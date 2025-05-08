@@ -1,0 +1,39 @@
+/cmake-build-debug/
+/.venv/
+/cmake-build-debug
+# Conan
+/conan.lock
+/conanbuild/
+/conanfile.lock
+
+# Logs
+*.log
+
+# Python virtual envs
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# CLion & JetBrains
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# Backup files
+*~
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+/build/
+/cmake-build-*/
+/CMakeFiles/
+/Makefile
+/CMakeCache.txt
+/*.sln
+/*.vcxproj*
+/*.user
+fipsmodule.cnf
