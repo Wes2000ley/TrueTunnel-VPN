@@ -1,10 +1,27 @@
+rueTunnel VPN Licensing Terms
+================================================================================
+
+This project, TrueTunnel VPN, is dual-licensed under:
+
+1. The MIT License (OSI-approved permissive license)
+2. The GNU General Public License v2.0 (GPLv2)
+
+You may choose either license according to your needs.
+
 > ⚠️ Licensing Note:
-> This project is dual-licensed under the MIT License or GNU GPLv2.
+> This project includes dependencies licensed under the Apache License 2.0,
+> including the OpenSSL FIPS provider.
 >
-> It also includes components (such as OpenSSL FIPS) that are licensed under the Apache License 2.0.
-> Since GPLv2 is not compatible with Apache 2.0, users choosing the GPLv2 option **must ensure** they do not combine or redistribute Apache-licensed components under GPLv2 terms.
+> Because the Apache License 2.0 is **not GPLv2-compatible**, using the
+> **GPLv2 license** to redistribute this project **with Apache-licensed components**
+> (like OpenSSL FIPS) may **cause a license conflict**.
 >
-> **To avoid conflict, use the MIT license option** if you intend to redistribute this project with its Apache-licensed components.
+> ✔️ **To avoid legal conflicts, choose the MIT license option** when redistributing
+> this project with Apache 2.0 components.
+
+-------------------------------------------------------------------------------
+This file includes full text of both licenses for your reference.
+-------------------------------------------------------------------------------
 
 ================================================================================
 MIT License

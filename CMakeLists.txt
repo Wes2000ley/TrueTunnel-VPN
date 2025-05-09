@@ -103,3 +103,7 @@ add_custom_command(TARGET vpn POST_BUILD
         "${CMAKE_SOURCE_DIR}/deps/openssl.cnf"
         "$<TARGET_FILE_DIR:vpn>"
 )
+
+if (WIN32)
+    target_sources(vpn PRIVATE ${CMAKE_SOURCE_DIR}/src/version.rc)
+endif()
