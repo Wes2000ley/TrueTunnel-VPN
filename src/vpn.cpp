@@ -1,6 +1,12 @@
-// ──────────────────────────────────────────────────────────────
-//	Mini TLS‑over‑Wintun VPN
-// ──────────────────────────────────────────────────────────────
+/*
+* TrueTunnel VPN - Secure FIPS-compliant VPN tunnel
+ * Copyright (c) 2025 Wesley Atwell
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the MIT License OR GNU GPL v2.0 (at your option).
+ *
+ * You should have received a copy of both licenses in the LICENSE file.
+ */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>

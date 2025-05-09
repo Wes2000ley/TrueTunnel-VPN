@@ -1,4 +1,4 @@
-# Mini TLS‑over‑Wintun VPN
+# TrueTunnel VPN
 
 A secure, minimalist, **FIPS-capable** VPN over TCP using TLS and the Wintun driver.  
 Designed for simple, authenticated IP tunnels between trusted peers — no third-party servers, just you and your traffic.

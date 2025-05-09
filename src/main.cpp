@@ -1,6 +1,12 @@
-// ──────────────────────────────────────────────────────────────
-//	Mini TLS‑over‑Wintun VPN
-// ──────────────────────────────────────────────────────────────
+/*
+* TrueTunnel VPN - Secure FIPS-compliant VPN tunnel
+ * Copyright (c) 2025 Wesley Atwell
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the MIT License OR GNU GPL v2.0 (at your option).
+ *
+ * You should have received a copy of both licenses in the LICENSE file.
+ */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -44,6 +50,11 @@ int main(int argc, char *argv[]) {
 		std::cerr << "[!] This program must be run as Administrator.\n";
 		return 1;
 	}
+
+	std::cout << "TrueTunnel VPN v1.0.0\n"
+		  << "Copyright (c) 2025 Wesley Atwell\n"
+		  << "Licensed under MIT or GPLv2 — See LICENSE\n\n";
+
 
 	try {
 		/*───────────────────────────────────────────────────────────
@@ -330,19 +341,24 @@ int main(int argc, char *argv[]) {
 				std::cout << "[✔] Password sent\n\n";
 			}
 
-			// Start interactive message input thread
+// Start interactive message input thread 
 			std::thread message_input_thread([ssl]() {
 				std::string input;
 				while (true) {
 					std::cout << "[Type a message or /quit] > ";
 					std::getline(std::cin, input);
-					if (input == "/quit") break;
+					if (input == "/quit") {
+						send_message(ssl, "/quit"); // Signal peer to quit
+						break;
+					}
 					if (!input.empty()) {
 						send_message(ssl, input);
 					}
 				}
+				// Signal threads to terminate
+				SSL_shutdown(ssl);
+				exit(0); // Force program termination
 			});
-
 			// Packet pump threads
 			std::thread t1(tun_to_tls, session, ssl);
 			std::thread t2(tls_to_tun, session, ssl);
