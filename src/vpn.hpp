@@ -108,3 +108,5 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl);
 void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl);
 
 void send_message(SSL *ssl, const std::string &msg);
+
+bool is_valid_input(const std::string &s);

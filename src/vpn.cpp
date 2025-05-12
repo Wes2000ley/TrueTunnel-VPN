@@ -253,3 +253,15 @@ void send_message(SSL *ssl, const std::string &msg) {
 	SSL_write(ssl, &type, 1);
 	SSL_write(ssl, msg.c_str(), static_cast<int>(msg.size()));
 }
+
+bool is_valid_input(const std::string &s) {
+	if (s.empty()) {
+		return false;
+	}
+	return std::all_of(s.begin(), s.end(), [](char c) {
+		return (c >= 'a' && c <= 'z')
+			|| (c >= 'A' && c <= 'Z')
+			|| (c >= '0' && c <= '9')
+			|| c == '.';
+	});
+}
