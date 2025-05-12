@@ -129,6 +129,19 @@ int main(int argc, char *argv[]) {
 			auto adapter = WintunCreateAdapter(wname.c_str(), L"Wintun", &guid);
 			CHECK(adapter, "WintunCreateAdapter failed");
 
+
+			if (!is_valid_input(adaptername)
+			 || !is_valid_input(local_ip)
+			 || !is_valid_input(mask)
+			 || !is_valid_input(gateway)
+			 || (!is_server && !is_valid_input(server_ip)))
+			{
+				std::cerr << red << "[!]"
+						  << reset
+						  << " Invalid characters in input. Only a-z, A-Z, 0-9, and '.' are allowed.\n";
+				return 1;
+			}
+
 			// 4) Configure it with netsh
 			{
 				std::string cmd0 =
