@@ -21,6 +21,7 @@ add_executable(vpn
         src/main.cpp
         src/include/applink.c
         src/vpn.cpp
+        src/utils.cpp
 )
 
 # Tell OpenSSL headers we're linking them statically 

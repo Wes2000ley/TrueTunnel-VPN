@@ -16,6 +16,7 @@
 #include <netioapi.h>
 #include <EASTL/vector.h>
 #include "vpn.hpp"
+#include "utils.hpp"
 
 #include <iostream>
 #include <filesystem>

@@ -75,21 +75,6 @@ inline WINTUN_RELEASE_RECEIVE_PACKET_FUNC WintunReleaseReceivePacket  = nullptr;
 void LoadWintun();
 
 
-// ─── pretty logging helpers ───────────────────────────────────
-namespace util {
-	void logInfo(const std::string &s);
-	void logWarn(const std::string &s);
-	void logErr(const std::string &s);
-
-	bool looksLikeIp(const std::string &v);
-
-	void ask(const char *prompt, std::string &val,
-	         std::function<bool(const std::string &)> ok = nullptr);
-} // namespace
-
-bool is_running_as_admin();
-
-
 // ─── FIPS–compliant key + certificate helpers ──────────────────────────
 EVP_PKEY *generate_fips_rsa_key();
 
@@ -108,5 +93,3 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl);
 void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl);
 
 void send_message(SSL *ssl, const std::string &msg);
-
-bool is_valid_input(const std::string &s);
