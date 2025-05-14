@@ -15,8 +15,8 @@
 #include <iphlpapi.h>
 #include <netioapi.h>
 #include <EASTL/vector.h>
-#include "vpn.hpp"
-#include "utils.hpp"
+#include "../vpn.hpp"
+#include "../utils.hpp"
 #include <wx/wx.h>
 
 #include <iostream>
@@ -25,7 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <functional>		  //  ← ask() validator
-#include "include/cxxopts.hpp"
+#include "../include/cxxopts.hpp"
 #include "termcolor.hpp"
 
 #include <openssl/ssl.h>
