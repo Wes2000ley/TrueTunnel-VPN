@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Always build static binaries
 set(BUILD_SHARED_LIBS OFF)
+set(CONAN_CMAKE_FLAGS "--build=missing")
+
+
+
 
 # On MSVC: use the static CRT
 if (MSVC)
@@ -16,13 +20,21 @@ endif ()
 # Required for finding Conan packages
 find_package(EASTL REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(wxWidgets)
+
+
 
 add_executable(vpn
-        src/main.cpp
+        src/app.cpp
         src/include/applink.c
         src/vpn.cpp
         src/utils.cpp
+        src/VpnController.cpp
+        src/MainFrame.cpp
 )
+
+# 👉 ADD THIS after add_executable
+set_target_properties(vpn PROPERTIES WIN32_EXECUTABLE ON)
 
 # Tell OpenSSL headers we're linking them statically 
 target_compile_definitions(vpn PRIVATE
@@ -47,6 +59,8 @@ target_link_libraries(vpn PRIVATE
         crypt32      # <-- CryptoAPI
         advapi32     # <-- sometimes needed by CAPI
         EASTL::EASTL
+        wxWidgets::wxWidgets
+
 )
 
 # Enable static linking for Windows runtime

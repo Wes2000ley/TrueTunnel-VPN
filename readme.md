@@ -16,7 +16,7 @@ Designed for simple, authenticated IP tunnels between trusted peers — no third
 * 💬 **Interactive messaging channel** over the encrypted tunnel
 * 🧠 **Raw IP tunnel** via Wintun — handles TCP, UDP, ICMP, etc.
 * 🧱 **Works through NAT** (client side — no port forwarding required)
-* ⚙️ **Command-line + interactive** input for quick setup
+* ⚙️ **GUI
 * 🪪 **Single binary, no install**, no registry modification
 * 🧵 Dual-threaded packet pump with optional control channel
 * 🖥️ Full Windows compatibility — ideal for power users or lab setups
@@ -56,47 +56,9 @@ This step configures `fipsmodule.cnf` and ensures OpenSSL uses the FIPS provider
 
 ### ✅ Server (public IP or port-forwarded):
 
-```bash
-vpn.exe --mode server --local-ip 10.0.0.1 --gateway 10.0.0.2 --password MySharedSecret123
-```
 
 ### ✅ Client (can be behind NAT):
 
-```bash
-vpn.exe --mode client --server-ip 203.0.113.10 --local-ip 10.0.0.2 --gateway 10.0.0.1 --password MySharedSecret123
-```
-
-### Optional Arguments:
-
-| Flag          | Description                                   |
-| ------------- | --------------------------------------------- |
-| `--mode`      | `server` or `client`                          |
-| `--server-ip` | IP of the server (only for client)            |
-| `--port`      | TCP port (default: `5555`)                    |
-| `--local-ip`  | IP address to assign to the adapter           |
-| `--gateway`   | Gateway IP (peer's virtual IP)                |
-| `--mask`      | Subnet mask (default: `255.255.255.0`)        |
-| `--adapter`   | Name of the Wintun adapter (default: `MyVPN`) |
-| `--password`  | Shared secret (min 12 characters)             |
-
-Missing values will be prompted for interactively.
-
----
-
-## 🎮 Runtime Controls
-
-Once the tunnel is established, you'll be presented with a prompt:
-
-```bash
-[Type a message or /quit] >
-```
-
-| Command       | Effect                            |
-| ------------- | --------------------------------- |
-| `Hello World` | Sends encrypted message to peer   |
-| `/quit`       | Gracefully shuts down the program |
-
----
 
 ## 🌍 Network Behavior
 
@@ -157,7 +119,7 @@ For compliance-sensitive use cases, consult official CMVP guidance:
 * No reconnection logic — restart on disconnect
 * Server must run with admin privileges
 * MTU must be tuned manually (`1380` is a good default)
-* No GUI (command line only)
+
 
 ---
 
@@ -238,8 +200,16 @@ Dual-licensed under **MIT** or **GPLv2** — your choice.
 
 ---
 
-## 🙏 Credits
+👏 Credits
 
-* [Wintun by WireGuard](https://www.wintun.net/)
-* [OpenSSL Project](https://www.openssl.org/)
-* [FIPS 140-3 Guidelines](https://csrc.nist.gov/publications/detail/fips/140/3/final)
+Wintun by WireGuard
+
+OpenSSL Project
+
+wxWidgets Library
+
+EASTL (EA's STL)
+
+cxxopts (CLI parser)
+
+termcolor (Terminal colors)

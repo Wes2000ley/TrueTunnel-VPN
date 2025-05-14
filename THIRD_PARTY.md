@@ -1,67 +1,72 @@
-# 📦 Third-Party Licenses
+📦 Third-Party Licenses
+This project, TrueTunnel VPN, incorporates several third-party libraries and components.
+Each component is governed by its respective license. You are responsible for complying with these terms when using, modifying, or redistributing this software.
 
-This project, **TrueTunnel VPN**, incorporates the following third-party libraries and components.  
-Each component is governed by its respective license. You are responsible for complying with these terms in your use, modification, and redistribution.
+🔐 OpenSSL
+Website: https://www.openssl.org/
 
----
+License: Apache License 2.0
 
-### 🔐 OpenSSL
+Purpose: Provides TLS 1.2/1.3 encryption and cryptographic primitives.
 
-- **Website**: https://www.openssl.org/
-- **License**: Apache License 2.0
-- **Purpose**: Provides TLS 1.2/1.3 encryption and cryptographic primitives
+🛡️ FIPS Compliance Notice
+This project redistributes the OpenSSL FIPS 140-3 validated module (version 3.1.2) in its original, unmodified binary form.
+See the FIPS Notice for full redistribution terms.
 
-#### 🛡️ FIPS Compliance Note
+⚠️ Important:
+TrueTunnel VPN itself is not FIPS-certified.
+Inclusion of the OpenSSL FIPS module does not imply compliance with FIPS 140-3.
+You must not claim FIPS validation unless your build environment, configuration, and use strictly conform to the official CMVP certificate requirements.
 
-This project includes the [OpenSSL FIPS 140-3 validated module (version 3.1.2)](https://www.openssl.org/docs/fips.html), redistributed **in its original binary form** without modification.  
-See full redistribution terms in the project’s [FIPS Notice](./README.md#redistribution-notice-for-openssl-fips-provider).
+🌐 Wintun
+Website: https://www.wintun.net/
 
-> ⚠️ **This project is NOT FIPS-certified.**  
-> Inclusion of the OpenSSL FIPS module does not imply compliance.  
-> **You must NOT claim FIPS validation** unless your environment, build process, and configuration exactly match the conditions described in the module's official CMVP certificate.
+License: GNU General Public License v2.0 (GPLv2)
 
----
+Purpose: Provides a virtual TUN/TAP adapter for Windows networking.
 
-### 🌐 Wintun
+The wintun.dll binary is redistributed unmodified.
 
-- **Website**: https://www.wintun.net/
-- **License**: GNU General Public License v2 (GPLv2)
-- **Purpose**: Acts as the virtual TUN/TAP adapter on Windows
+⚠️ GPLv2 Applicability:
+If you redistribute TrueTunnel VPN (even under MIT), the GPLv2 terms still apply to Wintun.
+Redistribution must fully comply with GPLv2 obligations, including offering source code or an equivalent written offer.
 
-The `wintun.dll` is redistributed **unmodified** for user convenience.
+🖥️ wxWidgets
+Website: https://www.wxwidgets.org/
 
-> ⚠️ If you redistribute this project under a different license (e.g., MIT), the GPLv2 terms of Wintun **still apply** to `wintun.dll`.  
-> Redistribution **must fully comply** with the GPLv2, including providing source or a written offer as required.
+License: wxWindows Library License 3.1 (based on LGPL-2.1 with exceptions)
 
----
+Purpose: Cross-platform C++ GUI library used to build the TrueTunnel VPN user interface.
 
-### ⚙️ EASTL (Electronic Arts Standard Template Library)
+📜 Special License Note
+The wxWindows License allows usage in both open-source and proprietary software, without the strict copyleft requirements typical of LGPL libraries.
+You are permitted to link against wxWidgets without your application becoming subject to the LGPL.
 
-- **Repository**: https://github.com/electronicarts/EASTL
-- **License**: BSD-3-Clause
-- **Purpose**: High-performance drop-in STL replacement used for internal data structures
+For full terms, see the wxWidgets License FAQ.
 
----
+⚙️ EASTL (Electronic Arts Standard Template Library)
+Repository: https://github.com/electronicarts/EASTL
 
-### 🧩 cxxopts
+License: BSD-3-Clause
 
-- **Repository**: https://github.com/jarro2783/cxxopts
-- **License**: MIT
-- **Purpose**: Lightweight, header-only command-line argument parser
+Purpose: High-performance, drop-in alternative to the standard C++ STL, used for internal data structures.
 
----
+🧩 cxxopts
+Repository: https://github.com/jarro2783/cxxopts
 
-### 🎨 termcolor
+License: MIT License
 
-- **Repository**: https://github.com/ikalnytskyi/termcolor
-- **License**: BSD-3-Clause
-- **Purpose**: Cross-platform terminal output coloring for enhanced CLI readability
+Purpose: Lightweight, header-only library for command-line argument parsing.
 
----
+🎨 termcolor
+Repository: https://github.com/ikalnytskyi/termcolor
 
-## 🗓️ License Summary
+License: BSD-3-Clause
 
-This license list is current as of **May 2025**.  
-If you distribute a modified version of this project or incorporate it into a larger system, **you are responsible for ensuring your own compliance** with each upstream license — especially in commercial, redistributed, or closed-source deployments.
+Purpose: Provides cross-platform terminal color output for better CLI readability.
 
-> 📘 For full license texts, see the [LICENSE](./LICENSE) file.
+📄 License Summary
+This third-party license summary is current as of May 2025.
+If you redistribute TrueTunnel VPN or incorporate it into another product, you are responsible for ensuring your own compliance with all applicable third-party license terms — particularly in commercial, redistributed, or closed-source settings.
+
+📘 For full license texts, see the LICENSE file included in this project.

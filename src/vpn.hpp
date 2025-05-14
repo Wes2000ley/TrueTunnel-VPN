@@ -88,8 +88,12 @@ enum vpn_packet_type : uint8_t;
 
 
 //— Packet pumps
-void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl);
+void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool>& running);
 
-void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl);
+void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool>& running);
 
 void send_message(SSL *ssl, const std::string &msg);
+enum vpn_packet_type : uint8_t {
+	PACKET_TYPE_IP = 0x00,
+	PACKET_TYPE_MSG = 0x01
+};

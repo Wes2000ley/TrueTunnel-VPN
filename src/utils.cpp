@@ -37,9 +37,15 @@ using termcolor::reset;
 
 // ─── pretty logging helpers ───────────────────────────────────
 namespace util {
-	void logInfo(const std::string &s) { std::cout << bold << green << "[INFO] " << reset << s << "\n"; }
-	void logWarn(const std::string &s) { std::cout << bold << yellow << "[WARN] " << reset << s << "\n"; }
-	void logErr(const std::string &s) { std::cerr << bold << red << "[ERR ] " << reset << s << "\n"; }
+	void logInfo(const std::string& s) {
+		std::cout << bold << green << "[INFO] " << reset << s << std::endl;
+	}
+	void logWarn(const std::string& s) {
+		std::cout << bold << yellow << "[WARN] " << reset << s << std::endl;
+	}
+	void logErr(const std::string& s) {
+		std::cerr << bold << red << "[ERR ] " << reset << s << std::endl;
+	}
 
 	bool looksLikeIp(const std::string &v) {
 		in_addr a{};

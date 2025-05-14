@@ -17,6 +17,7 @@
 #include <EASTL/vector.h>
 #include "vpn.hpp"
 #include "utils.hpp"
+#include <wx/wx.h>
 
 #include <iostream>
 #include <filesystem>
@@ -61,7 +62,7 @@ int main(int argc, char *argv[]) {
 		/*───────────────────────────────────────────────────────────
 		  1. Command‑line ─ use cxxopts   (vpn --help  for details)
 		───────────────────────────────────────────────────────────*/
-		cxxopts::Options opts("vpn", "Mini Wintun VPN");
+		cxxopts::Options opts("vpn", "TrueTunnel VPN");
 		opts.add_options()
 				("m,mode", "server | client", cxxopts::value<std::string>())
 				("s,server-ip", "server IPv4 (client‑only)", cxxopts::value<std::string>())
