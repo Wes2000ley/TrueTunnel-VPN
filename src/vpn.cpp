@@ -161,15 +161,10 @@ SSL_CTX *make_ssl_ctx(bool is_server)
     return ctx;
 }
 
-enum vpn_packet_type : uint8_t {
-	PACKET_TYPE_IP = 0x00,
-	PACKET_TYPE_MSG = 0x01
-};
 
 
-//— Packet pumps
-void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl) {
-	while (true) {
+void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool>& running) {
+	while (running) {
 		UINT32 size = 0;
 		void *pkt = WintunReceivePacket(session, &size);
 		if (!pkt) {
@@ -183,31 +178,45 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl) {
 	}
 }
 
-void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl) {
+void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool>& running) {
 	char buf[1600];
-	while (true) {
-		int8_t pkt_type = 0;
-		if (SSL_read(ssl, (char *) &pkt_type, 1) <= 0) break;
+	while (running) {
+		uint8_t pkt_type = 0;
+		if (SSL_read(ssl, &pkt_type, 1) <= 0) break;
 
 		if (pkt_type == PACKET_TYPE_IP) {
 			int n = SSL_read(ssl, buf, sizeof(buf));
 			if (n <= 0) break;
-			void *pkt = WintunAllocateSendPacket(session, (UINT32) n);
+			void* pkt = WintunAllocateSendPacket(session, (UINT32)n);
 			if (!pkt) break;
 			memcpy(pkt, buf, n);
-			WintunSendPacket(session, pkt, (UINT32) n);
+			WintunSendPacket(session, pkt, (UINT32)n);
+
 		} else if (pkt_type == PACKET_TYPE_MSG) {
 			char msg_buf[1024] = {};
 			int n = SSL_read(ssl, msg_buf, sizeof(msg_buf) - 1);
 			if (n > 0) {
+				msg_buf[n] = '\0';
+
 				std::cout << "[📨] Message from peer: " << msg_buf << "\n";
+
+				// ADD THIS: if we receive "/quit", stop running
+				if (std::string(msg_buf) == "/quit") {
+					std::cout << "[!] Peer requested disconnect. Closing tunnel.\n";
+					running = false;
+					break;
+				}
 			}
 		}
 	}
 }
 
+
+
+
+
 void send_message(SSL *ssl, const std::string &msg) {
-	uint8_t type = PACKET_TYPE_MSG;
-	SSL_write(ssl, &type, 1);
+	uint8_t packet_type = PACKET_TYPE_MSG;
+	SSL_write(ssl, &packet_type, 1);
 	SSL_write(ssl, msg.c_str(), static_cast<int>(msg.size()));
 }

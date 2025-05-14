@@ -2,5 +2,6 @@
 # To keep your changes, remove these comment lines, but the plugin won't be able to modify your requirements
 
 requirements:
+  - "wxwidgets/3.2.6"
   - "openssl/3.1.2"
   - "eastl/3.21.12"

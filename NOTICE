@@ -2,81 +2,77 @@
 
 This product includes software developed by **Wesley Atwell**.
 
-It may be used under the terms of the **MIT License**, or at your option, the **GNU General Public License v2**.
-See the LICENSE file for more details.
+It is licensed under your choice of:
+
+* The **MIT License**, or
+* The **GNU General Public License v2.0 (GPLv2)**.
+
+See the `LICENSE` file for full details.
 
 ---
 
 ## 🔐 Cryptographic Software Disclosure
 
-This product includes the **OpenSSL FIPS 140-3 validated module (fips.dll)** version **3.1.2**,
-distributed under terms authorized by **The OpenSSL Project**.
+This product includes the **OpenSSL FIPS 140-3 Validated Module (fips.dll)**, version **3.1.2**,
+as distributed by **The OpenSSL Project**.
 
-This module is **reproduced and distributed in its original entirety**, without any modification to its binary form
-or its associated Security Policy.
+The module is redistributed **in its original, unmodified form**, along with its official Security Policy.
 
 > ⚠️ **Disclaimer**:
-> Although this product includes a FIPS 140-3 validated module, **this product and its distributor (Wesley Atwell)**
-> **have not been independently certified or validated by NIST or CMVP** to be FIPS 140-3 compliant.
-> Use of this module does not imply that your build or usage is FIPS-approved.
+> Although this product incorporates a FIPS 140-3 validated module, **this product and Wesley Atwell**
+> **have not been independently certified or validated** by **NIST** or the **CMVP**.
+> Use of the module does **not** imply FIPS-validated compliance for this product.
 
 ---
 
-### Redistribution Notice for OpenSSL FIPS Provider (fips.dll)
+### 🔍 Module Details
+
+* **Name**: OpenSSL FIPS Provider Module
+* **Version**: 3.1.2
+* **Website**: [https://www.openssl.org](https://www.openssl.org)
+* **License**: Apache License 2.0
+* **FIPS Certificate**: A3548
+* **Security Policy**: *"OpenSSL FIPS 140-3 Security Policy, Version 1.0, December 29, 2023"*
 
 ---
 
-### 🔍 Origin
+### ⚠️ Important Redistribution Terms
 
-- **Name**: OpenSSL FIPS Provider Module
-- **Version**: 3.1.2
-- **Website**: https://www.openssl.org
-- **License**: Apache License 2.0
-- **FIPS Certificate**: #A3548
-- **Security Policy**: *"OpenSSL FIPS 140-3 Security Policy, Version 1.0, December 29, 2023"*
+* **Redistribution of fips.dll is permitted** only if it is:
 
----
+  * Whole and unmodified,
+  * Distributed with the complete, original FIPS Security Policy document.
+* **Modification** of the binary or configuration files will invalidate the FIPS 140-3 validation.
+* **No endorsement**: Wesley Atwell is not a FIPS validation authority or certified distributor.
 
-### ⚠️ Required Notice
-
-This module may be freely reproduced and distributed **whole and intact**, including this copyright
-notice and the associated FIPS Security Policy.
-
-> **Important**:
-> The module has been tested and validated under **specific operating environments** and **build conditions**.
-> Any modification to this module or deviation from the documented build process may **invalidate** its FIPS 140-3 validation.
-
-> **No Endorsement or Certification**:
-> **Wesley Atwell is not an official validation authority, testing laboratory, or certified redistributor.**
-> Redistribution of this module is done solely under the original OpenSSL license terms.
-> This product is **not certified by NIST**, nor guaranteed to be used in a validated FIPS context.
+> ⚠️ **Warning**:
+> Redistribution is allowed under the original OpenSSL terms, but **no warranties, guarantees, or FIPS endorsements** are implied.
 
 ---
 
 ### ✅ Redistributor Responsibilities
 
-- **DO NOT** modify `fips.dll`, `fipsmodule.cnf`, or any validation artifacts.
-- **Include** a complete, original copy of the FIPS Security Policy PDF.
-- **Do not represent** your build as FIPS-validated unless it strictly follows the CMVP certificate's build/config specs.
-- **Comply** with applicable **U.S. export laws** on cryptographic software.
+* **Do NOT** alter `fips.dll`, `fipsmodule.cnf`, or validation documents.
+* **Always include** the official FIPS Security Policy PDF.
+* **Avoid misleading claims** of FIPS-validation unless complying exactly with CMVP specs.
+* **Follow all relevant U.S. export control laws** on cryptographic software.
 
 ---
 
 ### 📦 Included FIPS Files
 
-- `fips.dll`
-- OpenSSL FIPS 140-3 Security Policy (PDF, unmodified)
+* `fips.dll`
+* OpenSSL FIPS 140-3 Security Policy (PDF)
 
 ---
 
 ### 🔗 References
 
-- [NIST CMVP](https://csrc.nist.gov/projects/cryptographic-module-validation-program)
-- [OpenSSL FIPS Overview](https://www.openssl.org/docs/fips.html)
+* [NIST CMVP Website](https://csrc.nist.gov/projects/cryptographic-module-validation-program)
+* [OpenSSL FIPS Overview](https://www.openssl.org/docs/fips.html)
 
 ---
 
 ## 📄 Third-Party Components
 
-This software also makes use of third-party libraries, governed by their respective licenses.
-See [`THIRD_PARTY.md`](./THIRD_PARTY.md) for complete attribution and license terms.
+This product utilizes additional third-party libraries. Their licenses and attributions are detailed in [`THIRD_PARTY.md`](./THIRD_PARTY.md).
