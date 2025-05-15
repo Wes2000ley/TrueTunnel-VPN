@@ -94,3 +94,46 @@ bool is_valid_input(const std::string &s) {
 			|| c == '.';
 	});
 }
+
+bool run_command_hidden(const std::string& command) {
+	STARTUPINFOW si = { sizeof(si) };
+	si.dwFlags = STARTF_USESHOWWINDOW;
+	si.wShowWindow = SW_HIDE; // Hide the window
+
+	PROCESS_INFORMATION pi;
+
+	// Convert command to wide string
+	std::wstring wcmd(command.begin(), command.end());
+
+	// Create a writable buffer (CreateProcess needs non-const buffer)
+	std::vector<wchar_t> buffer(wcmd.begin(), wcmd.end());
+	buffer.push_back(L'\0');
+
+	BOOL success = CreateProcessW(
+		nullptr,        // No module name (use command line)
+		buffer.data(),  // Command line
+		nullptr,        // Process handle not inheritable
+		nullptr,        // Thread handle not inheritable
+		FALSE,          // Set handle inheritance to FALSE
+		0,              // No creation flags
+		nullptr,        // Use parent's environment block
+		nullptr,        // Use parent's starting directory
+		&si,            // Pointer to STARTUPINFO structure
+		&pi             // Pointer to PROCESS_INFORMATION structure
+	);
+
+	if (success) {
+		// Wait for the process to finish
+		WaitForSingleObject(pi.hProcess, INFINITE);
+
+		DWORD exit_code = 0;
+		GetExitCodeProcess(pi.hProcess, &exit_code);
+
+		CloseHandle(pi.hProcess);
+		CloseHandle(pi.hThread);
+
+		return (exit_code == 0);
+	} else {
+		return false;
+	}
+}

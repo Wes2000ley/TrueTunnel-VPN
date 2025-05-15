@@ -2,6 +2,8 @@
 #include "vpn.hpp"
 #include "utils.hpp"
 #include "redirect_stream.hpp"
+#include "raii.hpp"
+
 
 #include <iostream>
 #include <filesystem>
@@ -19,6 +21,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+
+#include "raii.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -92,134 +96,161 @@ bool VpnController::is_running() const {
 }
 
 void VpnController::vpn_thread_func() {
-	dual_redirect_stream cout_redirect([this](const std::string& msg) {
-	if (log_callback) {
-		log_callback(msg);
-	}
-});
+    dual_redirect_stream cout_redirect([this](const std::string& msg) {
+        if (log_callback) {
+            log_callback(msg);
+        }
+    });
+
+    std::string exe_dir = std::filesystem::current_path().string();
+
+    std::cout << "VPN thread started\n";
+    util::logInfo("TLS handshake (expected later)");
+
+    try {
+        if (!is_running_as_admin()) {
+            throw std::runtime_error("Administrator privileges required.");
+        }
+
+        const bool is_server = (mode == "server");
+
+        std::cout << "TrueTunnel VPN v1.0.0\n"
+                  << "Copyright (c) 2025 Wesley Atwell\n"
+                  << "Licensed under MIT or GPLv2 — See LICENSE\n\n";
+
+        ComInit com;
+        WsaInit wsa;
+        ModuleGuard wintun(LoadLibraryW(L"wintun.dll"));
+    	std::cout << "[*] Loading Wintun driver...\n";
+    	LoadWintun();
+    	std::cout << "[✓] Wintun driver loaded\n";
+
+        // Create adapter
+        GUID guid;
+        CHECK(CoCreateGuid(&guid) == S_OK, "CoCreateGuid failed");
+        std::wstring wname(adaptername.begin(), adaptername.end());
+    	std::cout << "[*] Creating Wintun adapter: " << adaptername << "\n";
+    	auto adapter = WintunCreateAdapter(wname.c_str(), L"Wintun", &guid);
+    	if (!adapter) {
+    		DWORD err = GetLastError();
+    		throw std::runtime_error("WintunCreateAdapter failed, error code: " + std::to_string(err));
+    	}
+    	std::cout << "[✓] Wintun adapter created\n";
 
 
-	std::string exe_dir = std::filesystem::current_path().string(); // <<<<< FIXED argv[0] (not available)
+        // Configure adapter (silent netsh)
+        {
+            std::string cmd0 = "netsh interface ipv4 set address name=\"" + adaptername +
+                               "\" static " + local_ip + " " + subnetmask + " " + gateway + " 1 store=persistent";
+            std::string cmd1 = "netsh interface ipv4 add route prefix=0.0.0.0/0 "
+                               "interface=\"" + adaptername + "\" nexthop=" + gateway +
+                               " metric=1 store=persistent";
+            std::string cmd2 = "netsh interface ipv4 set subinterface \"" + adaptername +
+                               "\" mtu=1380 store=persistent";
 
-	std::cout << "VPN thread started\n";
-	util::logInfo("TLS handshake (expected later)");
+            std::cout << "[CMD] " << cmd0 << "\n"
+                      << "[CMD] " << cmd1 << "\n"
+                      << "[CMD] " << cmd2 << "\n";
 
-	try {
-		if (!is_running_as_admin()) {
-			throw std::runtime_error("Administrator privileges required.");
-		}
+            bool rc0 = run_command_hidden(cmd0);
+            bool rc1 = run_command_hidden(cmd1);
+            bool rc2 = run_command_hidden(cmd2);
 
-		const bool is_server = (mode == "server");
+        	std::cout << "[✓] Adapter configuration complete\n";
 
-		std::cout << "TrueTunnel VPN v1.0.0\n"
-				<< "Copyright (c) 2025 Wesley Atwell\n"
-				<< "Licensed under MIT or GPLv2 — See LICENSE\n\n";
+        }
 
-		try {
-			// Load Wintun + COM
-			LoadWintun();
-			CHECK(CoInitializeEx(nullptr, COINIT_MULTITHREADED) == S_OK, "CoInitializeEx failed");
-
-			// Create adapter
-			GUID guid;
-			CHECK(CoCreateGuid(&guid) == S_OK, "CoCreateGuid failed");
-			std::wstring wname(adaptername.begin(), adaptername.end());
-			auto adapter = WintunCreateAdapter(wname.c_str(), L"Wintun", &guid);
-			CHECK(adapter, "WintunCreateAdapter failed");
-
-			// Configure adapter with netsh
-			{
-				std::string cmd0 = "netsh interface ipv4 set address name=\"" + adaptername +
-				                   "\" static " + local_ip + " " + subnetmask + " " + gateway + " 1 store=persistent";
-				std::string cmd1 = "netsh interface ipv4 add route prefix=0.0.0.0/0 "
-				                   "interface=\"" + adaptername + "\" nexthop=" + gateway +
-				                   " metric=1 store=persistent";
-				std::string cmd2 = "netsh interface ipv4 set subinterface \"" + adaptername +
-				                   "\" mtu=1380 store=persistent";
-
-				std::cout << "[CMD] " << cmd0 << "\n"
-						<< "[CMD] " << cmd1 << "\n"
-						<< "[CMD] " << cmd2 << "\n"
-						<< "Press Enter to run these…";
-				std::cin.get();
-
-				int rc0 = system(cmd0.c_str());
-				int rc1 = system(cmd1.c_str());
-				int rc2 = system(cmd2.c_str());
-
-				if (rc1 != 0) {
-					std::cerr << "[!] Warning: default route may already exist (code " << rc1 << ")\n";
-				}
-				if (rc2 != 0) {
-					std::cerr << "[!] Warning: MTU setting may have failed (code " << rc2 << ")\n";
-				}
-			}
-
-			// Start session
-			constexpr UINT32 kRingCap = 0x400000;
-			auto session = WintunStartSession(adapter, kRingCap);
-			CHECK(session, "WintunStartSession failed");
-
-			// Initialize OpenSSL
-			_putenv(("OPENSSL_CONF=" + exe_dir + "\\openssl.cnf").c_str());
-			_putenv(("OPENSSL_MODULES=" + exe_dir).c_str());
-
-			OPENSSL_init_ssl(OPENSSL_INIT_LOAD_CONFIG, nullptr);
-
-			OSSL_PROVIDER *fips = OSSL_PROVIDER_load(nullptr, "fips");
-			CHECK(fips, "Failed to load FIPS provider");
-
-			OSSL_PROVIDER *base = OSSL_PROVIDER_load(nullptr, "base");
-			CHECK(base, "Failed to load base provider");
-
-			CHECK(EVP_default_properties_enable_fips(nullptr, 1) == 1, "enable FIPS");
-
-			if (!EVP_default_properties_is_fips_enabled(nullptr)) {
-				ERR_print_errors_fp(stderr);
-				CHECK(false, "FIPS mode is not enabled");
-			}
-
-			WSADATA ws;
-			CHECK(WSAStartup(MAKEWORD(2, 2), &ws) == 0, "WSAStartup failed");
-
-			SSL_CTX *ctx = make_ssl_ctx(is_server);
-			SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
-			CHECK(sock != INVALID_SOCKET, "socket failed");
+    	std::cout << "[*] Starting Wintun session...\n";
+    	WintunSessionGuard session(WintunStartSession(adapter, 0x400000)); // 4MB ring
+    	CHECK(session.get(), "WintunStartSession failed");
+    	std::cout << "[✓] Wintun session started\n";
 
 
-			int reuse = 1;
-			setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse));
 
-			sockaddr_in addr{};
-			addr.sin_family = AF_INET;
-			addr.sin_port = htons(port);
-			addr.sin_addr.s_addr = is_server ? INADDR_ANY : inet_addr(server_ip.c_str());
+        // OpenSSL setup
+    	std::cout << "[*] Initializing OpenSSL FIPS providers...\n";
 
-			if (is_server) {
-				CHECK(bind(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR, "bind failed");
-				CHECK(listen(sock, 1) != SOCKET_ERROR, "listen failed");
-				std::cout << "[*] Waiting for client on port " << port << "…\n";
-				SOCKET client = accept(sock, nullptr, nullptr);
-				CHECK(client != INVALID_SOCKET, "accept failed");
-				closesocket(sock);
-				sock = client;
-			} else {
-				std::cout << "[*] Connecting to " << server_ip << ":" << port << "…\n";
-				CHECK(connect(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR, "connect failed");
-			}
+        _putenv(("OPENSSL_CONF=" + exe_dir + "\\openssl.cnf").c_str());
+        _putenv(("OPENSSL_MODULES=" + exe_dir).c_str());
+        OPENSSL_init_ssl(OPENSSL_INIT_LOAD_CONFIG, nullptr);
 
-			SSL *ssl = SSL_new(ctx);
-			CHECK(ssl != nullptr, "SSL_new failed");
-			CHECK(SSL_set_fd(ssl, static_cast<int>(sock)) == 1, "SSL_set_fd failed");
+        CHECK(OSSL_PROVIDER_load(nullptr, "fips"), "load FIPS provider");
+        CHECK(OSSL_PROVIDER_load(nullptr, "base"), "load base provider");
+        CHECK(EVP_default_properties_enable_fips(nullptr, 1) == 1, "enable FIPS");
 
-			if (is_server) {
-				CHECK(SSL_accept(ssl) > 0, "SSL_accept failed");
-			} else {
-				CHECK(SSL_connect(ssl) > 0, "SSL_connect failed");
-			}
-			std::cout << "✅ TLS handshake done\n";
 
-			// 1) Generate our nonce - use secure memory
+        if (!EVP_default_properties_is_fips_enabled(nullptr)) {
+            ERR_print_errors_fp(stderr);
+            throw std::runtime_error("FIPS mode is not enabled");
+        }
+    	std::cout << "[✓] OpenSSL FIPS mode enabled\n";
+
+
+    	std::cout << "[*] Creating TCP socket...\n";
+
+    	// 1. Create raw socket
+    	SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+    	CHECK(sock != INVALID_SOCKET, "socket failed");
+    	std::cout << "[✓] TCP socket created\n";
+
+    	// 2. Set SO_REUSEADDR
+    	int reuse = 1;
+    	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+
+    	// 3. Prepare address
+    	sockaddr_in addr{};
+    	addr.sin_family = AF_INET;
+    	addr.sin_port = htons(port);
+    	addr.sin_addr.s_addr = is_server ? INADDR_ANY : inet_addr(server_ip.c_str());
+
+    	// 4. Bind/listen/accept or connect
+    	if (is_server) {
+    		std::cout << "[*] Binding socket...\n";
+    		CHECK(bind(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR, "bind failed");
+
+    		std::cout << "[*] Listening...\n";
+    		CHECK(listen(sock, 1) != SOCKET_ERROR, "listen failed");
+
+    		std::cout << "[*] Waiting for incoming TCP connection...\n";
+    		SOCKET client = accept(sock, nullptr, nullptr);
+    		CHECK(client != INVALID_SOCKET, "accept failed");
+
+    		closesocket(sock); // Close the listening socket
+    		sock = client;     // Use the accepted client socket
+    		std::cout << "[✓] Client connected\n";
+    	} else {
+    		std::cout << "[*] Connecting to " << server_ip << ":" << port << "...\n";
+    		CHECK(connect(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR, "connect failed");
+    		std::cout << "[✓] Connected to server\n";
+    	}
+
+    	// 5. Create SSL_CTX
+    	SSL_CTX* ctx = make_ssl_ctx(is_server);
+
+    	// 6. Create SSL and bind to socket
+    	SSL* ssl = SSL_new(ctx);
+    	CHECK(ssl != nullptr, "SSL_new failed");
+    	CHECK(SSL_set_fd(ssl, static_cast<int>(sock)) == 1, "SSL_set_fd failed");
+
+    	// 7. Perform TLS handshake
+    	if (is_server) {
+    		CHECK(SSL_accept(ssl) > 0, "SSL_accept failed");
+    	} else {
+    		CHECK(SSL_connect(ssl) > 0, "SSL_connect failed");
+    	}
+
+    	std::cout << "✅ TLS handshake done\n";
+
+    	// 8. Store SSL and socket
+	    {
+        	std::lock_guard<std::mutex> lock(ssl_sock_mutex);
+        	sock_ = sock;
+        	ssl_ = ssl;
+	    }
+
+
+
+ // 1) Generate our nonce - use secure memory
 			unsigned char *my_nonce = (unsigned char *) OPENSSL_secure_malloc(16);
 			unsigned char *peer_nonce = (unsigned char *) OPENSSL_secure_malloc(16);
 			CHECK(my_nonce && peer_nonce, "Secure malloc failed");
@@ -307,67 +338,35 @@ void VpnController::vpn_thread_func() {
 				std::cout << "[✔] Password sent\n\n";
 			}
 
-
-			std::cout << "\nType your message and press send.\nType /quit to exit.\n\n";
-			std::thread message_input_thread([ssl, this]() {
-			  std::string input;
-			  while (running.load()) {
-				if (!std::getline(std::cin, input)) break;
-				if (input == "/quit") {
-				  send_message(ssl, "/quit");
-				  running = false;
-				  break;
-				}
-				if (!input.empty()) {
-				  send_message(ssl, input);
-				  std::cout << "[You] " << input << "\n";
-				}
-			  }
-			});
+        std::cout << "\nType your message and press send.\nType /quit to exit.\n\n";
 
 
 
+        std::thread message_input_thread([this]() {
+            std::string input;
+            while (running.load()) {
+                if (!std::getline(std::cin, input)) break;
+                if (input == "/quit") {
+                    send_manual_message("/quit");
+                    running = false;
+                    break;
+                }
+                if (!input.empty()) {
+                    send_manual_message(input);
+                    std::cout << "[You] " << input << "\n";
+                }
+            }
+        });
 
-			{
-				std::lock_guard<std::mutex> lock(ssl_sock_mutex);
-				sock_ = sock;
-				ssl_ = ssl;
-			}
+        std::thread t1(tun_to_tls, session.get(), ssl_, std::ref(running));
+        std::thread t2(tls_to_tun, session.get(), ssl_, std::ref(running));
 
+        t1.join();
+        t2.join();
+        message_input_thread.join();
 
-			std::thread t1(tun_to_tls, session, ssl, std::ref(running));
-			std::thread t2(tls_to_tun, session, ssl, std::ref(running));
-
-			t1.join();
-			t2.join();
-			message_input_thread.join();
-
-			// Cleanup
-			{
-				std::lock_guard<std::mutex> lock(ssl_sock_mutex);
-				if (ssl_) {
-					SSL_shutdown(ssl_);
-					SSL_free(ssl_);
-					ssl_ = nullptr;
-				}
-				if (sock_ != INVALID_SOCKET) {
-					shutdown(sock_, SD_BOTH);
-					closesocket(sock_);
-					sock_ = INVALID_SOCKET;
-				}
-			}
-			SSL_CTX_free(ctx);
-			WSACleanup();
-			WintunEndSession(session);
-			WintunCloseAdapter(adapter);
-			FreeLibrary(hWintun);
-			CoUninitialize();
-		} catch (...) {
-			std::cerr << "[!] Unknown fatal error.\n";
-			running = false;
-			return;
-		}
-	} catch (const std::exception &ex) {
-		std::cerr << "[!] " << ex.what() << "\n";
-	}
+    } catch (const std::exception& ex) {
+        std::cerr << "[!] Exception: " << ex.what() << "\n";
+        running = false;
+    }
 }

@@ -50,3 +50,5 @@ namespace util {
 bool is_running_as_admin();
 
 bool is_valid_input(const std::string &s);
+
+bool run_command_hidden(const std::string& command);
