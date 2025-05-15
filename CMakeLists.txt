@@ -31,6 +31,7 @@ add_executable(vpn
         src/utils.cpp
         src/VpnController.cpp
         src/MainFrame.cpp
+        src/raii.hpp
 )
 
 # 👉 ADD THIS after add_executable
