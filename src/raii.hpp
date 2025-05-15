@@ -139,5 +139,12 @@ private:
     T* ptr_;
     std::size_t size_;
 };
+struct HmacCtxDeleter {
+    void operator()(HMAC_CTX* ctx) const {
+        if (ctx) HMAC_CTX_free(ctx);
+    }
+};
+using HMAC_CTX_ptr = std::unique_ptr<HMAC_CTX, HmacCtxDeleter>;
+
 
 #endif // TRUE_TUNNEL_RAII_HPP
