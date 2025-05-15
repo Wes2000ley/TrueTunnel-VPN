@@ -280,19 +280,18 @@ void VpnController::vpn_thread_func() {
 			unsigned char *my_hmac = (unsigned char *) OPENSSL_secure_malloc(EVP_MAX_MD_SIZE);
 			CHECK(my_hmac, "Secure malloc failed");
 			unsigned int hlen;
-			HMAC_CTX *hctx = HMAC_CTX_new();
-			CHECK(hctx, "HMAC_CTX_new");
-			CHECK(HMAC_Init_ex(hctx,
-				      (unsigned char*)password.data(),
-				      password.size(),
-				      EVP_sha256(),
-				      nullptr) == 1, "HMAC_Init");
-			CHECK(HMAC_Update(hctx, data, 32) == 1, "HMAC_Update");
-			CHECK(HMAC_Final(hctx, my_hmac, &hlen) == 1, "HMAC_Final");
-			HMAC_CTX_free(hctx);
+        HMAC_CTX_ptr hctx(HMAC_CTX_new());
+        CHECK(hctx, "HMAC_CTX_new");
+        CHECK(HMAC_Init_ex(hctx.get(),
+	              (unsigned char*)password.data(),
+	              password.size(),
+	              EVP_sha256(),
+	              nullptr) == 1, "HMAC_Init");
+        CHECK(HMAC_Update(hctx.get(), data, 32) == 1, "HMAC_Update");
+        CHECK(HMAC_Final(hctx.get(), my_hmac, &hlen) == 1, "HMAC_Final");
 
-			// 5) Exchange HMACs
-			SSL_write(ssl, my_hmac, hlen);
+        // 5) Exchange HMACs
+        SSL_write(ssl, my_hmac, hlen);
 			unsigned char *peer_hmac = (unsigned char *) OPENSSL_secure_malloc(EVP_MAX_MD_SIZE);
 			CHECK(peer_hmac, "Secure malloc failed");
 			SSL_read(ssl, peer_hmac, hlen);
