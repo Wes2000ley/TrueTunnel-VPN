@@ -1,4 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
+#include "utils.hpp"
+
+#include <codecvt>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -136,4 +139,43 @@ bool run_command_hidden(const std::string& command) {
 	} else {
 		return false;
 	}
+}
+
+std::vector<network_adapter_info> list_real_network_adapters() {
+	std::vector<network_adapter_info> adapters;
+
+	ULONG out_buf_len = 0;
+	GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, nullptr, &out_buf_len);
+
+	std::vector<BYTE> buffer(out_buf_len);
+	IP_ADAPTER_ADDRESSES* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+
+	if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, addresses, &out_buf_len) != NO_ERROR) {
+		std::cerr << "[!] Failed to enumerate adapters\n";
+		return adapters;
+	}
+
+	for (IP_ADAPTER_ADDRESSES* adapter = addresses; adapter; adapter = adapter->Next) {
+		if (adapter->OperStatus != IfOperStatusUp || adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+			continue; // Skip loopback or down interfaces
+
+		network_adapter_info info;
+		info.name = adapter->FriendlyName ? std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(adapter->FriendlyName) : "Unknown";
+
+		for (IP_ADAPTER_UNICAST_ADDRESS* ua = adapter->FirstUnicastAddress; ua; ua = ua->Next) {
+			if (ua->Address.lpSockaddr->sa_family == AF_INET) {
+				char ip_buf[INET_ADDRSTRLEN] = {};
+				sockaddr_in* ipv4 = reinterpret_cast<sockaddr_in*>(ua->Address.lpSockaddr);
+				inet_ntop(AF_INET, &ipv4->sin_addr, ip_buf, sizeof(ip_buf));
+				info.ip = ip_buf;
+				break;
+			}
+		}
+
+		if (!info.ip.empty()) {
+			adapters.push_back(info);
+		}
+	}
+
+	return adapters;
 }

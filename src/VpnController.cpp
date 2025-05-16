@@ -36,10 +36,10 @@ VpnController::~VpnController() {
 }
 
 std::mutex ssl_sock_mutex;
-
 bool VpnController::start(const std::string &mode, const std::string &server_ip, int port,
                           const std::string &local_ip, const std::string &gateway, const std::string &password,
-                          const std::string &adaptername, const std::string &subnetmask) {
+                          const std::string &adaptername, const std::string &subnetmask,
+                          const std::string &public_ip, const std::string &real_adapter) {
 	if (running) return false;
 
 	this->mode = mode;
@@ -50,6 +50,8 @@ bool VpnController::start(const std::string &mode, const std::string &server_ip,
 	this->password = password;
 	this->adaptername = adaptername;
 	this->subnetmask = subnetmask;
+	this->public_ip = public_ip;
+	this->real_adapter = real_adapter;
 
 	running = true;
 	vpn_thread = std::thread(&VpnController::vpn_thread_func, this);
@@ -160,6 +162,30 @@ void VpnController::vpn_thread_func() {
 
         }
 
+    	if (is_server) {
+    		std::cout << "[*] Enabling NAT on interface: " << real_adapter << "\n";
+
+    		std::string cmd_nat_install = "net start remoteaccess >nul 2>&1";
+    		std::string cmd_nat_pub = "netsh routing ip nat add interface \"" + real_adapter + "\" full";
+    		std::string cmd_nat_priv = "netsh routing ip nat add interface \"" + adaptername + "\" private";
+
+    		run_command_hidden(cmd_nat_install);
+    		run_command_hidden(cmd_nat_pub);
+    		run_command_hidden(cmd_nat_priv);
+
+    		std::cout << "[✓] NAT configured\n";
+    		std::cout << "[*] NAT on real adapter: " << real_adapter << "\n";
+    	}
+
+    	if (!is_server) {
+    		std::string cmd_route_protect = "route delete " + public_ip + " >nul 2>&1 && ";
+    		cmd_route_protect += "route add " + public_ip + " mask 255.255.255.255 " + gateway + " metric 1";
+    		run_command_hidden(cmd_route_protect);
+    		std::cout << "[✓] Public IP route protected\n";
+    	}
+
+
+
     	std::cout << "[*] Starting Wintun session...\n";
     	WintunSessionGuard session(WintunStartSession(adapter, 0x400000)); // 4MB ring
     	CHECK(session.get(), "WintunStartSession failed");
@@ -201,7 +227,8 @@ void VpnController::vpn_thread_func() {
     	sockaddr_in addr{};
     	addr.sin_family = AF_INET;
     	addr.sin_port = htons(port);
-    	addr.sin_addr.s_addr = is_server ? INADDR_ANY : inet_addr(server_ip.c_str());
+    	addr.sin_addr.s_addr = is_server ? INADDR_ANY : inet_addr(public_ip.c_str());
+
 
     	// 4. Bind/listen/accept or connect
     	if (is_server) {
@@ -219,7 +246,7 @@ void VpnController::vpn_thread_func() {
     		sock = client;     // Use the accepted client socket
     		std::cout << "[✓] Client connected\n";
     	} else {
-    		std::cout << "[*] Connecting to " << server_ip << ":" << port << "...\n";
+    		std::cout << "[*] Connecting to " << public_ip << ":" << port << "...\n";
     		CHECK(connect(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR, "connect failed");
     		std::cout << "[✓] Connected to server\n";
     	}

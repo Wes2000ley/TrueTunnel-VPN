@@ -2,6 +2,8 @@
 #define MAINFRAME_H
 
 #include <wx/wx.h>
+
+#include "utils.hpp"
 #include "VpnController.h"
 
 // Custom event that carries log lines 
@@ -22,6 +24,7 @@ private:
 	void OnVpnLog(wxThreadEvent &evt);
 
 	void OnClose(wxCloseEvent &event);
+	void PopulateRealAdapters();
 
 	// Helpers
 	void StartVpn();
@@ -41,6 +44,9 @@ private:
 	wxTextCtrl *password_text_ = nullptr;
 	wxTextCtrl *log_box_ = nullptr;
 	wxTextCtrl *message_box_ = nullptr;
+	wxComboBox* real_adapter_choice_;
+	wxTextCtrl* public_ip_text_;
+	std::vector<network_adapter_info> real_adapters_;
 
 	wxButton *send_message_btn_ = nullptr;
 	wxComboBox* mode_text_ = nullptr;  // add here in the class
@@ -49,5 +55,6 @@ private:
 	// Define style constant
 	static constexpr long wxTE_HIDDEN = 0x0800;
 };
+
 
 #endif  // MAINFRAME_H
