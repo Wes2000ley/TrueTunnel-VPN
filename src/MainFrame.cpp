@@ -1,5 +1,7 @@
 #include "MainFrame.h"
 
+#include <codecvt>
+
 wxDEFINE_EVENT(wxEVT_VPN_LOG, wxThreadEvent);
 
 MainFrame::MainFrame(const wxString& title)
@@ -39,6 +41,12 @@ MainFrame::MainFrame(const wxString& title)
   AddRow("Gateway:", gateway_text_, "10.0.0.2");
   AddRow("Password:", password_text_, "SuperStrongPassword123", wxTE_PASSWORD);
 
+  AddRow("Server Public IP:", public_ip_text_, "only needed on client example: 201.12.21.145");
+
+  sizer->Add(new wxStaticText(panel, wxID_ANY, "Real Adapter (for routing):"), 0, wxALL, 4);
+  real_adapter_choice_ = new wxComboBox(panel, wxID_ANY);
+  sizer->Add(real_adapter_choice_, 0, wxEXPAND | wxALL, 4);
+
   wxButton* connect_btn = new wxButton(panel, wxID_ANY, "Connect");
   sizer->Add(connect_btn, 0, wxALIGN_CENTER | wxALL, 10);
 
@@ -56,6 +64,7 @@ MainFrame::MainFrame(const wxString& title)
   sizer->Add(send_message_btn_, 0, wxALIGN_CENTER | wxALL, 4);
 
   panel->SetSizerAndFit(sizer);
+  PopulateRealAdapters();
   Centre();
 
   // Bind events
@@ -104,6 +113,8 @@ void MainFrame::OnSendMessage(wxCommandEvent&) {
 
 
 
+
+
 void MainFrame::OnVpnLog(wxThreadEvent& evt) {
   log_box_->AppendText(evt.GetString() + "\n");
   log_box_->ShowPosition(log_box_->GetLastPosition());
@@ -133,8 +144,60 @@ void MainFrame::StartVpn() {
   std::string gateway = gateway_text_->GetValue().ToStdString();
   std::string password = password_text_->GetValue().ToStdString();
 
+  std::string public_ip = public_ip_text_->GetValue().ToStdString();
+  std::string real_adapter =
+      real_adapter_choice_->GetSelection() != wxNOT_FOUND
+          ? real_adapter_choice_->GetStringSelection().ToStdString()
+          : "Ethernet";
+
   vpn_controller_->start(mode, server_ip, port, local_ip, gateway, password,
-                         adapter_name, subnet_mask);
+                         adapter_name, subnet_mask, public_ip, real_adapter);
+}
+
+void MainFrame::PopulateRealAdapters() {
+  ULONG out_buf_len = 0;
+  GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, nullptr, &out_buf_len);
+
+  std::vector<BYTE> buffer(out_buf_len);
+  IP_ADAPTER_ADDRESSES* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+
+  if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, addresses, &out_buf_len) != NO_ERROR)
+    return;
+
+  wxArrayString adapter_choices;
+
+  for (IP_ADAPTER_ADDRESSES* adapter = addresses; adapter; adapter = adapter->Next) {
+    if (adapter->OperStatus != IfOperStatusUp || adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+      continue;
+
+    std::string name = adapter->FriendlyName ? std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(adapter->FriendlyName) : "Unknown";
+    std::string ip;
+
+    for (IP_ADAPTER_UNICAST_ADDRESS* ua = adapter->FirstUnicastAddress; ua; ua = ua->Next) {
+      if (ua->Address.lpSockaddr->sa_family == AF_INET) {
+        char ip_buf[INET_ADDRSTRLEN] = {};
+        sockaddr_in* ipv4 = reinterpret_cast<sockaddr_in*>(ua->Address.lpSockaddr);
+        inet_ntop(AF_INET, &ipv4->sin_addr, ip_buf, sizeof(ip_buf));
+        ip = ip_buf;
+        break;
+      }
+    }
+
+    if (!ip.empty()) {
+      real_adapters_.push_back({name, ip});
+      adapter_choices.Add(wxString::FromUTF8(name.c_str()));
+    }
+  }
+  if (!real_adapter_choice_) return;
+
+
+  if (real_adapter_choice_) {
+    real_adapter_choice_->Clear();
+    real_adapter_choice_->Append(adapter_choices);
+    if (!adapter_choices.IsEmpty()) {
+      real_adapter_choice_->SetSelection(0);
+    }
+  }
 }
 
 void MainFrame::StopVpn() {

@@ -21,7 +21,9 @@ public:
 	           const std::string &gateway,
 	           const std::string &password,
 	           const std::string &adaptername,
-	           const std::string &subnetmask);
+	           const std::string &subnetmask,
+	           const std::string &public_ip,
+	           const std::string &real_adapter);
 
 	void stop();
 
@@ -44,6 +46,8 @@ private:
 	std::string subnetmask;
 	std::atomic<bool> running;
 	std::thread vpn_thread;
+	std::string public_ip;
+	std::string real_adapter;
 
 	SOCKET sock_;
 	SSL *ssl_;
