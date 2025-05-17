@@ -20,22 +20,34 @@ endif ()
 # Required for finding Conan packages
 find_package(EASTL REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(wxWidgets)
+find_package(imgui REQUIRED)
+find_package(freetype)
+set(IMGUI_BACKENDS_DIR "${CMAKE_SOURCE_DIR}/deps/imgui/backends")
+set(IMGUI_MISC_DIR "${CMAKE_SOURCE_DIR}/deps/imgui/misc")
 
 
 
 add_executable(vpn
-        src/app.cpp
         src/include/applink.c
         src/vpn.cpp
         src/utils.cpp
         src/VpnController.cpp
-        src/MainFrame.cpp
         src/raii.hpp
+        src/main.cpp
 )
 
+target_sources(vpn PRIVATE
+        ${IMGUI_BACKENDS_DIR}/imgui_impl_win32.cpp
+        ${IMGUI_BACKENDS_DIR}/imgui_impl_dx11.cpp
+        ${IMGUI_MISC_DIR}/freetype/imgui_freetype.cpp
+)
+
+
 # 👉 ADD THIS after add_executable
-set_target_properties(vpn PROPERTIES WIN32_EXECUTABLE ON)
+set_target_properties(vpn PROPERTIES
+        LINK_FLAGS "/SUBSYSTEM:WINDOWS"
+)
+
 
 # Tell OpenSSL headers we're linking them statically 
 target_compile_definitions(vpn PRIVATE
@@ -48,7 +60,12 @@ target_include_directories(vpn PRIVATE
         ${OPENSSL_INCLUDE_DIR}
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/include
+        ${IMGUI_BACKENDS_DIR}
+        ${IMGUI_MISC_DIR}                 # ✅ needed for freetype headers
+        ${IMGUI_MISC_DIR}/freetype       # ✅ contains imgui_freetype.h
 )
+
+
 
 # Link against the static .lib's, not DLL import libs
 target_link_libraries(vpn PRIVATE
@@ -60,7 +77,11 @@ target_link_libraries(vpn PRIVATE
         crypt32      # <-- CryptoAPI
         advapi32     # <-- sometimes needed by CAPI
         EASTL::EASTL
-        wxWidgets::wxWidgets
+        imgui::imgui
+        d3d11
+        dxgi
+        dxguid
+        Freetype::Freetype
 
 )
 
