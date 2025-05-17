@@ -28,10 +28,7 @@ public:
 	           const std::string &subnetmask,
 	           const std::string &public_ip,
 	           const std::string &real_adapter);
-	VpnController(const VpnController&) = delete;
-	VpnController& operator=(const VpnController&) = delete;
-	VpnController(VpnController&&) = delete;
-	VpnController& operator=(VpnController&&) = delete;
+
 
 	void stop();
 
@@ -58,6 +55,7 @@ private:
 	std::thread vpn_thread;
 	std::string public_ip;
 	std::string real_adapter;
+
 
 	SOCKET sock_;
 	SOCKET listen_sock_ = INVALID_SOCKET;
