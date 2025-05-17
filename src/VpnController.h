@@ -8,6 +8,10 @@
 #include <winsock2.h>
 #include <openssl/ssl.h>
 
+#include "vpn.hpp"
+
+
+
 class VpnController {
 public:
 	VpnController();
@@ -28,6 +32,8 @@ public:
 	void stop();
 
 	bool is_running() const;
+
+	void VpnController::cleanup_ssl_and_socket();
 
 	void set_log_callback(std::function<void(const std::string &)> callback) {
 		log_callback = std::move(callback);
@@ -50,7 +56,12 @@ private:
 	std::string real_adapter;
 
 	SOCKET sock_;
-	SSL *ssl_;
+	SOCKET listen_sock_ = INVALID_SOCKET;
+	using SSLPtr = std::unique_ptr<SSL, decltype(&SSL_free)>;
+	SSLPtr ssl_{nullptr, SSL_free};
+	WINTUN_ADAPTER_HANDLE adapter_handle_ = nullptr;
+
+
 
 	std::function<void(const std::string &)> log_callback;
 };

@@ -10,6 +10,9 @@
 #include <netioapi.h>
 #include <EASTL/vector.h>
 #include "vpn.hpp"
+#include <shellapi.h>
+#pragma comment(lib, "Shell32.lib")
+
 
 #include <iostream>
 #include <filesystem>
@@ -27,6 +30,9 @@
 #include <openssl/provider.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#include <netfw.h>
+#include <comdef.h>
+#include <stdexcept>
 
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib,"ole32.lib")
@@ -99,47 +105,73 @@ bool is_valid_input(const std::string &s) {
 }
 
 bool run_command_hidden(const std::string& command) {
-	STARTUPINFOW si = { sizeof(si) };
-	si.dwFlags = STARTF_USESHOWWINDOW;
-	si.wShowWindow = SW_HIDE; // Hide the window
+	STARTUPINFOW startup_info = { sizeof(startup_info) };
+	startup_info.dwFlags = STARTF_USESHOWWINDOW;
+	startup_info.wShowWindow = SW_HIDE;
 
-	PROCESS_INFORMATION pi;
+	PROCESS_INFORMATION process_info;
 
 	// Convert command to wide string
-	std::wstring wcmd(command.begin(), command.end());
+	std::wstring wide_command(command.begin(), command.end());
 
-	// Create a writable buffer (CreateProcess needs non-const buffer)
-	std::vector<wchar_t> buffer(wcmd.begin(), wcmd.end());
-	buffer.push_back(L'\0');
+	// Create writable buffer for CreateProcessW
+	std::vector<wchar_t> command_buffer(wide_command.begin(), wide_command.end());
+	command_buffer.push_back(L'\0');
 
 	BOOL success = CreateProcessW(
-		nullptr,        // No module name (use command line)
-		buffer.data(),  // Command line
-		nullptr,        // Process handle not inheritable
-		nullptr,        // Thread handle not inheritable
-		FALSE,          // Set handle inheritance to FALSE
-		0,              // No creation flags
-		nullptr,        // Use parent's environment block
-		nullptr,        // Use parent's starting directory
-		&si,            // Pointer to STARTUPINFO structure
-		&pi             // Pointer to PROCESS_INFORMATION structure
+		nullptr,                // No module name (use command line)
+		command_buffer.data(),  // Command line
+		nullptr,                // Process handle not inheritable
+		nullptr,                // Thread handle not inheritable
+		FALSE,                  // Do not inherit handles
+		CREATE_NO_WINDOW,       // Do not create a window
+		nullptr,                // Use parent's environment block
+		nullptr,                // Use parent's starting directory
+		&startup_info,          // Pointer to STARTUPINFO
+		&process_info           // Pointer to PROCESS_INFORMATION
 	);
 
 	if (success) {
-		// Wait for the process to finish
-		WaitForSingleObject(pi.hProcess, INFINITE);
+		WaitForSingleObject(process_info.hProcess, INFINITE);
 
 		DWORD exit_code = 0;
-		GetExitCodeProcess(pi.hProcess, &exit_code);
+		GetExitCodeProcess(process_info.hProcess, &exit_code);
 
-		CloseHandle(pi.hProcess);
-		CloseHandle(pi.hThread);
+		CloseHandle(process_info.hProcess);
+		CloseHandle(process_info.hThread);
 
 		return (exit_code == 0);
-	} else {
-		return false;
 	}
+
+	return false;
 }
+
+bool run_command_admin(const std::string& command) {
+    std::wstring wcmd = L"-Command \"" + std::wstring(command.begin(), command.end()) + L"\"";
+
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.lpVerb = L"runas";
+    sei.lpFile = L"powershell.exe";
+    sei.lpParameters = wcmd.c_str();
+    sei.nShow = SW_HIDE;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+
+    if (!ShellExecuteExW(&sei)) {
+        DWORD err = GetLastError();
+        std::cerr << "[!] ShellExecuteEx failed: " << err << "\n";
+        return false;
+    }
+
+    WaitForSingleObject(sei.hProcess, INFINITE);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(sei.hProcess, &exit_code);
+    CloseHandle(sei.hProcess);
+
+    return (exit_code == 0);
+}
+
+
+
 
 std::vector<network_adapter_info> list_real_network_adapters() {
 	std::vector<network_adapter_info> adapters;
@@ -178,4 +210,58 @@ std::vector<network_adapter_info> list_real_network_adapters() {
 	}
 
 	return adapters;
+}
+
+void SafeRelease(IUnknown* ptr) {
+	if (ptr) ptr->Release();
+}
+
+void AddICMPv4Rule() {
+	INetFwPolicy2* firewall_policy = nullptr;
+	INetFwRule* rule = nullptr;
+	INetFwRules* rules = nullptr;
+
+	try {
+		HRESULT hr = CoCreateInstance(__uuidof(NetFwPolicy2), nullptr, CLSCTX_INPROC_SERVER,
+									  IID_PPV_ARGS(&firewall_policy));
+		if (FAILED(hr)) throw std::runtime_error("Failed to create INetFwPolicy2");
+
+		hr = firewall_policy->get_Rules(&rules);
+		if (FAILED(hr)) throw std::runtime_error("Failed to get rules interface");
+
+		BSTR rule_name = SysAllocString(L"Allow ICMPv4-In");
+		hr = rules->Item(rule_name, &rule);
+		if (SUCCEEDED(hr)) {
+			SysFreeString(rule_name);
+			SafeRelease(rule);
+			SafeRelease(rules);
+			SafeRelease(firewall_policy);
+			return;
+		}
+		SysFreeString(rule_name);
+
+		hr = CoCreateInstance(__uuidof(NetFwRule), nullptr, CLSCTX_INPROC_SERVER,
+							  IID_PPV_ARGS(&rule));
+		if (FAILED(hr)) throw std::runtime_error("Failed to create INetFwRule");
+
+		rule->put_Name(SysAllocString(L"Allow ICMPv4-In-True_tunnel_VPN"));
+		rule->put_Protocol(1);  // ICMP
+		rule->put_IcmpTypesAndCodes(SysAllocString(L"8:*"));
+		rule->put_Direction(NET_FW_RULE_DIR_IN);
+		rule->put_Action(NET_FW_ACTION_ALLOW);
+		rule->put_Enabled(VARIANT_TRUE);
+
+		hr = rules->Add(rule);
+		if (FAILED(hr)) throw std::runtime_error("Failed to add firewall rule");
+
+	} catch (...) {
+		SafeRelease(rules);
+		SafeRelease(rule);
+		SafeRelease(firewall_policy);
+		throw;
+	}
+
+	SafeRelease(rules);
+	SafeRelease(rule);
+	SafeRelease(firewall_policy);
 }

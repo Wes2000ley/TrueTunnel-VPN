@@ -35,13 +35,13 @@ MainFrame::MainFrame(const wxString& title)
 
   AddRow("Server IP:", server_ip_text_);
   AddRow("Port:", port_text_, "5555");
-  AddRow("Local IP:", local_ip_text_, "10.0.0.1");
+  AddRow("Local IP:", local_ip_text_, "will decide of type choice");
   AddRow("Adapter Name:", adaptername_text_, "TrueTunnel VPN Adapter");
-  AddRow("SubnetMask:", subnetmask_text_, "255.255.255.0");
-  AddRow("Gateway:", gateway_text_, "10.0.0.2");
+  AddRow("SubnetMask: DONT CHANGE", subnetmask_text_, "will decide of type choice");
+  AddRow("Gateway:", gateway_text_, "will decide of type choice");
   AddRow("Password:", password_text_, "SuperStrongPassword123", wxTE_PASSWORD);
 
-  AddRow("Server Public IP:", public_ip_text_, "only needed on client example: 201.12.21.145");
+  AddRow("Server Public IP:", public_ip_text_, "192.168.1.10");
 
   sizer->Add(new wxStaticText(panel, wxID_ANY, "Real Adapter (for routing):"), 0, wxALL, 4);
   real_adapter_choice_ = new wxComboBox(panel, wxID_ANY);

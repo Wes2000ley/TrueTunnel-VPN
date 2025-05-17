@@ -7,8 +7,11 @@
 
 #include <iostream>
 #include <filesystem>
+#include <ppltasks.h>
 #include <stdexcept>
 #include <thread>
+#include <chrono>>   //for using the function sleep
+
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -27,6 +30,11 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "iphlpapi.lib")
+
+// Sleeps for the specified number of milliseconds.
+void SleepForMilliseconds(int milliseconds) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+}
 
 VpnController::VpnController() : running(false) {
 }
@@ -63,10 +71,10 @@ void VpnController::send_manual_message(const std::string& message) {
 
 	if (ssl_ && running) {
 	    uint8_t packet_type = PACKET_TYPE_MSG;
-	    if (SSL_write(ssl_, &packet_type, 1) <= 0 ||
-	        SSL_write(ssl_, message.c_str(), static_cast<int>(message.size())) <= 0) {
+	    if (SSL_write(ssl_.get(), &packet_type, 1) <= 0 ||
+	        SSL_write(ssl_.get(), message.c_str(), static_cast<int>(message.size())) <= 0) {
 	        if (log_callback) {
-	            log_callback("[!] Failed to send message over SSL");
+	            log_callback("[!] Failed to send message over ssl");
 	        }
 	    }
 	}
@@ -79,17 +87,63 @@ void VpnController::stop() {
 		running = false; {
 			std::lock_guard<std::mutex> lock(ssl_sock_mutex);
 			if (ssl_) {
-				SSL_shutdown(ssl_);
-				SSL_free(ssl_);
-				ssl_ = nullptr;
+				SSL_shutdown(ssl_.get());
+				ssl_.reset();  // ✅ safe cleanup
 			}
 			if (sock_ != INVALID_SOCKET) {
 				shutdown(sock_, SD_BOTH);
 				closesocket(sock_);
 				sock_ = INVALID_SOCKET;
 			}
+			if (listen_sock_ != INVALID_SOCKET) {
+				shutdown(listen_sock_, SD_BOTH);
+				closesocket(listen_sock_);
+				listen_sock_ = INVALID_SOCKET;
+			}
 		}
 		if (vpn_thread.joinable()) vpn_thread.join();
+	}
+
+	// Delete route
+	std::string cmd_delete_route = "route delete 10.10.100.0 mask 255.255.255.252 10.10.100.1";
+	std::string cmd_delete_route2 = "route delete 10.10.100.0 mask 255.255.255.252 10.10.100.2";
+
+
+	// Reset IP address (optional)
+	std::string cmd_reset_ip = "netsh interface ipv4 set address name=\"" + adaptername + "\" dhcp";
+
+	// Remove MTU override (optional but cleaner)
+	std::string cmd_clear_mtu = "netsh interface ipv4 set subinterface \"" + adaptername + "\" mtu=1500 store=persistent";
+
+	run_command_hidden(cmd_delete_route);
+	run_command_hidden(cmd_delete_route2);
+	run_command_hidden(cmd_reset_ip);
+	run_command_hidden(cmd_clear_mtu);
+
+	if (mode == "server") {
+		std::cout << "[*] Removing NAT rules\n";
+		std::string cmd_nat_pub = "netsh routing ip nat delete interface \"" + real_adapter + "\"";
+		std::string cmd_nat_priv = "netsh routing ip nat delete interface \"" + adaptername + "\"";
+
+		run_command_hidden(cmd_nat_pub);
+		run_command_hidden(cmd_nat_priv);
+	} else {
+		std::cout << "[*] Removing public IP route protection\n";
+		std::string cmd_remove_protect = "route delete " + public_ip + " >nul 2>&1";
+		run_command_hidden(cmd_remove_protect);
+	}
+}
+
+void VpnController::cleanup_ssl_and_socket() {
+	std::lock_guard<std::mutex> lock(ssl_sock_mutex);
+	if (ssl_) {
+		SSL_shutdown(ssl_.get());
+		ssl_.reset();
+	}
+	if (sock_ != INVALID_SOCKET) {
+		shutdown(sock_, SD_BOTH);
+		closesocket(sock_);
+		sock_ = INVALID_SOCKET;
 	}
 }
 
@@ -139,16 +193,31 @@ void VpnController::vpn_thread_func() {
     	}
     	std::cout << "[✓] Wintun adapter created\n";
 
+    	if (is_server) {
+    		gateway = "10.10.100.2";
+    		local_ip = "10.10.100.1";
+    		subnetmask = "255.255.255.252";
+    	}else {
+    		gateway = "10.10.100.1";
+    		local_ip = "10.10.100.2";
+    		subnetmask = "255.255.255.252";
+    	}
+
+
 
         // Configure adapter (silent netsh)
         {
-            std::string cmd0 = "netsh interface ipv4 set address name=\"" + adaptername +
-                               "\" static " + local_ip + " " + subnetmask + " " + gateway + " 1 store=persistent";
-            std::string cmd1 = "netsh interface ipv4 add route prefix=0.0.0.0/0 "
-                               "interface=\"" + adaptername + "\" nexthop=" + gateway +
-                               " metric=1 store=persistent";
-            std::string cmd2 = "netsh interface ipv4 set subinterface \"" + adaptername +
-                               "\" mtu=1380 store=persistent";
+        	std::string cmd0 = "netsh interface ipv4 set address name=\"" + adaptername +
+					"\" static " + local_ip + " " + subnetmask + " none";
+
+        	std::string cmd1 = "netsh interface ipv4 add route prefix=10.10.100.0/30 "
+							   "interface=\"" + adaptername + "\" nexthop=" + gateway +
+							   " metric=1 store=persistent";
+
+        	std::string cmd2 = "netsh interface ipv4 set subinterface \"" + adaptername +
+							   "\" mtu=1380 store=persistent";
+
+
 
             std::cout << "[CMD] " << cmd0 << "\n"
                       << "[CMD] " << cmd1 << "\n"
@@ -158,31 +227,11 @@ void VpnController::vpn_thread_func() {
             bool rc1 = run_command_hidden(cmd1);
             bool rc2 = run_command_hidden(cmd2);
 
+
+
         	std::cout << "[✓] Adapter configuration complete\n";
 
         }
-
-    	if (is_server) {
-    		std::cout << "[*] Enabling NAT on interface: " << real_adapter << "\n";
-
-    		std::string cmd_nat_install = "net start remoteaccess >nul 2>&1";
-    		std::string cmd_nat_pub = "netsh routing ip nat add interface \"" + real_adapter + "\" full";
-    		std::string cmd_nat_priv = "netsh routing ip nat add interface \"" + adaptername + "\" private";
-
-    		run_command_hidden(cmd_nat_install);
-    		run_command_hidden(cmd_nat_pub);
-    		run_command_hidden(cmd_nat_priv);
-
-    		std::cout << "[✓] NAT configured\n";
-    		std::cout << "[*] NAT on real adapter: " << real_adapter << "\n";
-    	}
-
-    	if (!is_server) {
-    		std::string cmd_route_protect = "route delete " + public_ip + " >nul 2>&1 && ";
-    		cmd_route_protect += "route add " + public_ip + " mask 255.255.255.255 " + gateway + " metric 1";
-    		run_command_hidden(cmd_route_protect);
-    		std::cout << "[✓] Public IP route protected\n";
-    	}
 
 
 
@@ -193,11 +242,12 @@ void VpnController::vpn_thread_func() {
 
 
 
-        // OpenSSL setup
-    	std::cout << "[*] Initializing OpenSSL FIPS providers...\n";
 
-        _putenv(("OPENSSL_CONF=" + exe_dir + "\\openssl.cnf").c_str());
-        _putenv(("OPENSSL_MODULES=" + exe_dir).c_str());
+        // Openssl setup
+    	std::cout << "[*] Initializing Openssl FIPS providers...\n";
+
+        _putenv(("OPENssl_CONF=" + exe_dir + "\\openssl.cnf").c_str());
+        _putenv(("OPENssl_MODULES=" + exe_dir).c_str());
         OPENSSL_init_ssl(OPENSSL_INIT_LOAD_CONFIG, nullptr);
 
         CHECK(OSSL_PROVIDER_load(nullptr, "fips"), "load FIPS provider");
@@ -209,75 +259,122 @@ void VpnController::vpn_thread_func() {
             ERR_print_errors_fp(stderr);
             throw std::runtime_error("FIPS mode is not enabled");
         }
-    	std::cout << "[✓] OpenSSL FIPS mode enabled\n";
+    	std::cout << "[✓] Openssl FIPS mode enabled\n";
 
 
     	std::cout << "[*] Creating TCP socket...\n";
 
     	// 1. Create raw socket
-    	SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
-    	CHECK(sock != INVALID_SOCKET, "socket failed");
-    	std::cout << "[✓] TCP socket created\n";
+    	SOCKET temp_sock = INVALID_SOCKET;
+    	SSLPtr temp_ssl(nullptr, SSL_free);
+        try {
+	        SOCKET raw_sock = socket(AF_INET, SOCK_STREAM, 0);
+	        CHECK(raw_sock != INVALID_SOCKET, "socket failed");
+	        SocketGuard sock(raw_sock);
+	        std::cout << "[✓] TCP socket created\n";
 
-    	// 2. Set SO_REUSEADDR
-    	int reuse = 1;
-    	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+	        // 2. Set SO_REUSEADDR
+	        int reuse = 1;
+	        setsockopt(sock.get(), SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
 
-    	// ✅ 2.5 Disable Nagle's Algorithm to reduce latency on small packets
-    	int flag = 1;
-    	setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+	        // ✅ 2.5 Disable Nagle's Algorithm to reduce latency on small packets
+	        int flag = 1;
+	        setsockopt(sock.get(), IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
-    	// 3. Prepare address
-    	sockaddr_in addr{};
-    	addr.sin_family = AF_INET;
-    	addr.sin_port = htons(port);
-    	addr.sin_addr.s_addr = is_server ? INADDR_ANY : inet_addr(public_ip.c_str());
+	        // 3. Prepare address
+	        sockaddr_in addr{};
+	        addr.sin_family = AF_INET;
+	        addr.sin_port = htons(port);
+	        addr.sin_addr.s_addr = is_server ? INADDR_ANY : inet_addr(public_ip.c_str());
+	        listen_sock_ = sock.get();
+
+	            	            bool success = run_command_admin(
+    "Get-NetConnectionProfile | "
+    "Where-Object {$_.InterfaceAlias -eq '" + adaptername + "'} | "
+    "Set-NetConnectionProfile -NetworkCategory Private"
+);
+
+        	AddICMPv4Rule();
 
 
-    	// 4. Bind/listen/accept or connect
-    	if (is_server) {
-    		std::cout << "[*] Binding socket...\n";
-    		CHECK(bind(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR, "bind failed");
+	        // 4. Bind/listen/accept or connect
+	        if (is_server) {
+		        std::cout << "[*] Binding socket...\n";
+		        CHECK(bind(sock.get(), (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR, "bind failed");
 
-    		std::cout << "[*] Listening...\n";
-    		CHECK(listen(sock, 1) != SOCKET_ERROR, "listen failed");
+		        std::cout << "[*] Listening...\n";
+		        CHECK(listen(sock.get(), 1) != SOCKET_ERROR, "listen failed");
 
-    		std::cout << "[*] Waiting for incoming TCP connection...\n";
-    		SOCKET client = accept(sock, nullptr, nullptr);
-    		CHECK(client != INVALID_SOCKET, "accept failed");
+		        std::cout << "[*] Waiting for incoming TCP connection...\n";
+		        SOCKET client = INVALID_SOCKET;
+		        while (running && (client = accept(sock.get(), nullptr, nullptr)) == INVALID_SOCKET) {
+			        int err = WSAGetLastError();
+			        if (!running || err == WSAEINTR || err == WSAENOTSOCK || err == WSAEINVAL) {
+				        std::cerr << "[!] connect() aborted or invalid socket\n";
+				        sock.reset();  // RAII-safe cleanup
+				        return;
+			        }
+			        std::this_thread::sleep_for(std::chrono::milliseconds(100)); // backoff
+		        }
+		        if (!running) return;
 
-    		closesocket(sock); // Close the listening socket
-    		sock = client;     // Use the accepted client socket
-    		std::cout << "[✓] Client connected\n";
-    	} else {
-    		std::cout << "[*] Connecting to " << public_ip << ":" << port << "...\n";
-    		CHECK(connect(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR, "connect failed");
-    		std::cout << "[✓] Connected to server\n";
-    	}
+		        closesocket(sock.get()); // Close the listening socket
+		        sock.reset(client);  // ✅ Proper way to assign a new SOCKET to a SocketGuard
+		        std::cout << "[✓] Client connected\n";
+	        } else {
+		        std::cout << "[*] Connecting to " << public_ip << ":" << port << "...\n";
+		        while (connect(sock.get(), (sockaddr *) &addr, sizeof(addr)) == SOCKET_ERROR) {
+			        int err = WSAGetLastError();
+			        if (!running || err == WSAEINTR || err == WSAENOTSOCK || err == WSAEINVAL) {
+				        std::cerr << "[!] connect() aborted or invalid socket\n";
+				        closesocket(sock.get());
+				        return;
+			        }
+			        std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+			        std::cout << "[!] Connection failed, retrying...\n";
+		        }
 
-    	// 5. Create SSL_CTX
-    	SSL_CTX* ctx = make_ssl_ctx(is_server);
+		        std::cout << "[✓] Connected to server\n";
+	        }
 
-    	// 6. Create SSL and bind to socket
-    	SSL* ssl = SSL_new(ctx);
-    	CHECK(ssl != nullptr, "SSL_new failed");
-    	CHECK(SSL_set_fd(ssl, static_cast<int>(sock)) == 1, "SSL_set_fd failed");
+	        // 5. Create ssl_CTX
+	        using SslCtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
+	        SslCtxPtr ctx(make_ssl_ctx(is_server), SSL_CTX_free);
 
-    	// 7. Perform TLS handshake
-    	if (is_server) {
-    		CHECK(SSL_accept(ssl) > 0, "SSL_accept failed");
-    	} else {
-    		CHECK(SSL_connect(ssl) > 0, "SSL_connect failed");
-    	}
 
-    	std::cout << "✅ TLS handshake done\n";
+	        // 6. Create ssl and bind to socket
+	        SSLPtr ssl(SSL_new(ctx.get()), SSL_free);
+	        CHECK(ssl != nullptr, "ssl_new failed");
+	        CHECK(SSL_set_fd(ssl.get(), static_cast<int>(sock.get())) == 1, "ssl_set_fd failed");
 
-    	// 8. Store SSL and socket
+
+	        // 7. Perform TLS handshake
+	        if (is_server) {
+		        CHECK(SSL_accept(ssl.get()) > 0, "ssl_accept failed");
+	        } else {
+		        CHECK(SSL_connect(ssl.get()) > 0, "ssl_connect failed");
+	        }
+
+	        std::cout << "✅ TLS handshake done\n";
+        	temp_sock = sock.release();       // ✅ Prevent SocketGuard from closing it
+        	temp_ssl = std::move(ssl);        // ✅ Move SSL out
+
+
+        } catch (const std::exception& ex) {
+        	std::cerr << "[!] Exception: " << ex.what() << "\n";
+        	cleanup_ssl_and_socket();
+        	running = false;
+        	return;
+        }
+    	// 8. Store ssl and socket
+    	// Now outside the sock scope
 	    {
         	std::lock_guard<std::mutex> lock(ssl_sock_mutex);
-        	sock_ = sock;
-        	ssl_ = ssl;
+        	sock_ = temp_sock;
+        	ssl_ = std::move(temp_ssl);
 	    }
+
+
 
 
 
@@ -294,11 +391,11 @@ constexpr size_t NONCE_SIZE = 16;
 
         // 2) Exchange nonces
         if (is_server) {
-	        SSL_read(ssl, peer_nonce.get(), NONCE_SIZE); // client first
-	        SSL_write(ssl, my_nonce.get(), NONCE_SIZE); // then server
+	        SSL_read(ssl_.get(), peer_nonce.get(), NONCE_SIZE); // client first
+	        SSL_write(ssl_.get(), my_nonce.get(), NONCE_SIZE); // then server
         } else {
-	        SSL_write(ssl, my_nonce.get(), NONCE_SIZE); // client first
-	        SSL_read(ssl, peer_nonce.get(), NONCE_SIZE); // then server
+	        SSL_write(ssl_.get(), my_nonce.get(), NONCE_SIZE); // client first
+	        SSL_read(ssl_.get(), peer_nonce.get(), NONCE_SIZE); // then server
         }
 
         // 3) Build the data buffer (client||server) in secure memory
@@ -327,10 +424,10 @@ constexpr size_t NONCE_SIZE = 16;
         CHECK(HMAC_Final(hctx.get(), my_hmac.get(), &hlen) == 1, "HMAC_Final");
 
         // 5) Exchange HMACs
-        SSL_write(ssl, my_hmac.get(), hlen);
+        SSL_write(ssl_.get(), my_hmac.get(), hlen);
         OpenSSLSecurePtr<unsigned char> peer_hmac(MAX_HMAC_SIZE);
         CHECK(peer_hmac, "Secure malloc failed");
-        SSL_read(ssl, peer_hmac.get(), hlen);
+        SSL_read(ssl_.get(), peer_hmac.get(), hlen);
 
         // 6) Compare in constant time
         int result = CRYPTO_memcmp(my_hmac.get(), peer_hmac.get(), hlen);
@@ -340,8 +437,8 @@ constexpr size_t NONCE_SIZE = 16;
         }
 
         // Log cipher & TLS version
-        const char *version = SSL_get_version(ssl);
-        const char *cipher = SSL_get_cipher(ssl);
+        const char *version = SSL_get_version(ssl_.get());
+        const char *cipher = SSL_get_cipher(ssl_.get());
         std::cout << "[🔒] TLS version: " << version
 		        << ", cipher: " << cipher << "\n\n";
 
@@ -349,18 +446,22 @@ constexpr size_t NONCE_SIZE = 16;
         if (is_server) {
 	        // server reads
 	        char pwbuf[MAX_PASSWORD_SIZE] = {0};
-	        int pwlen = SSL_read(ssl, pwbuf, sizeof(pwbuf) - 1);
-	        CHECK(pwlen > 0, "SSL_read failed");
-	        if (password != std::string(pwbuf, pwlen)) {
-		        std::cerr << "[!] Authentication failed\n";
-		        SSL_shutdown(ssl);
-		        SSL_free(ssl);
-		        closesocket(sock);
-	        }
+	        int pwlen = SSL_read(ssl_.get(), pwbuf, sizeof(pwbuf) - 1);
+	        CHECK(pwlen > 0, "ssl_read failed");
+        	if (password != std::string(pwbuf, pwlen)) {
+        		std::cerr << "[!] Authentication failed\n";
+        		SSL_shutdown(ssl_.get());         // Correct: shutdown the live SSL connection
+        		shutdown(sock_, SD_BOTH);         // Proper shutdown for socket_
+        		closesocket(sock_);
+        		sock_ = INVALID_SOCKET;
+        		ssl_.reset();                     // Clear the SSL wrapper
+        		return;
+        	}
+
 	        std::cout << "[✔] Client authenticated\n\n";
         } else {
 	        // client writes
-	        CHECK(SSL_write(ssl, password.c_str(),
+	        CHECK(SSL_write(ssl_.get(), password.c_str(),
 		              (int)password.size()) > 0, "Failed to send password");
 	        std::cout << "[✔] Password sent\n\n";
         }
@@ -384,15 +485,18 @@ constexpr size_t NONCE_SIZE = 16;
 	        }
         });
 
-        std::thread t1(tun_to_tls, session.get(), ssl_, std::ref(running));
-        std::thread t2(tls_to_tun, session.get(), ssl_, std::ref(running));
-
+    	SSL* raw_ssl = ssl_.get();
+    	WINTUN_SESSION_HANDLE raw_session = session.get();
+    	std::thread t1(tun_to_tls, raw_session, raw_ssl, std::ref(running));
+    	std::thread t2(tls_to_tun, raw_session, raw_ssl, std::ref(running));
         t1.join();
         t2.join();
         message_input_thread.join();
 
     } catch (const std::exception& ex) {
-        std::cerr << "[!] Exception: " << ex.what() << "\n";
-        running = false;
+    	std::cerr << "[!] Exception: " << ex.what() << "\n";
+    	cleanup_ssl_and_socket();
+    	running = false;
     }
-}
+    	running = false;
+    }

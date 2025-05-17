@@ -13,14 +13,22 @@ class ComInit {
 public:
     ComInit() {
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        if (FAILED(hr)) {
+        already_initialized_ = (hr == RPC_E_CHANGED_MODE);
+        if (FAILED(hr) && !already_initialized_) {
             throw std::runtime_error("CoInitializeEx failed");
         }
     }
+
     ~ComInit() {
-        CoUninitialize();
+        if (!already_initialized_) {
+            CoUninitialize();
+        }
     }
+
+private:
+    bool already_initialized_ = false;
 };
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WSA Startup Guard (RAII for WSAStartup / WSACleanup)
@@ -58,15 +66,45 @@ public:
     explicit SocketGuard(SOCKET s = INVALID_SOCKET) : sock_(s) {}
     ~SocketGuard() {
         if (sock_ != INVALID_SOCKET) {
-            closesocket(sock_); // just close, don't bother shutdown
-            sock_ = INVALID_SOCKET;
+            std::cerr << "[RAII] Closing socket " << sock_ << "\n";
+            shutdown(sock_, SD_BOTH);
+            closesocket(sock_);
         }
     }
+
+    SocketGuard(const SocketGuard&) = delete;
+    SocketGuard& operator=(const SocketGuard&) = delete;
+
+    SocketGuard(SocketGuard&& other) noexcept : sock_(other.sock_) {
+        other.sock_ = INVALID_SOCKET;
+    }
+
+    SocketGuard& operator=(SocketGuard&& other) noexcept {
+        if (this != &other) {
+            reset(other.sock_);
+            other.sock_ = INVALID_SOCKET;
+        }
+        return *this;
+    }
+
     SOCKET get() const { return sock_; }
-    SOCKET release() { SOCKET old = sock_; sock_ = INVALID_SOCKET; return old; }
+    void reset(SOCKET s = INVALID_SOCKET) {
+        if (sock_ != INVALID_SOCKET) {
+            shutdown(sock_, SD_BOTH);
+            closesocket(sock_);
+        }
+        sock_ = s;
+    }
+    SOCKET release() {
+        SOCKET s = sock_;
+        sock_ = INVALID_SOCKET;
+        return s;
+    }
+
 private:
     SOCKET sock_;
 };
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wintun Session Guard (RAII for WINTUN_SESSION_HANDLE)
