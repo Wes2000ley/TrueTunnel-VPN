@@ -265,3 +265,61 @@ void AddICMPv4Rule() {
 	SafeRelease(rule);
 	SafeRelease(firewall_policy);
 }
+
+void SetStaticIPv4Address(const std::string& adapter_name,
+                          const std::string& ip_address,
+                          const std::string& subnet_mask) {
+    // Convert strings to wide strings
+    std::wstring w_adapter_name(adapter_name.begin(), adapter_name.end());
+
+    // Retrieve the list of interfaces
+    ULONG buffer_size = 0;
+    GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, nullptr, &buffer_size);
+    std::vector<BYTE> buffer(buffer_size);
+    IP_ADAPTER_ADDRESSES* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+
+    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, addresses, &buffer_size) != NO_ERROR) {
+        throw std::runtime_error("GetAdaptersAddresses failed");
+    }
+
+    // Find the adapter by name
+    NET_LUID luid{};
+    bool found = false;
+    for (auto* adapter = addresses; adapter != nullptr; adapter = adapter->Next) {
+        if (adapter->FriendlyName && w_adapter_name == adapter->FriendlyName) {
+            luid = adapter->Luid;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        throw std::runtime_error("Adapter not found: " + adapter_name);
+    }
+
+    // Prepare IP address
+    MIB_UNICASTIPADDRESS_ROW row{};
+    InitializeUnicastIpAddressEntry(&row);
+    row.InterfaceLuid = luid;
+    row.Address.si_family = AF_INET;
+    inet_pton(AF_INET, ip_address.c_str(), &row.Address.Ipv4.sin_addr);
+
+    // Convert subnet mask to prefix length
+    ULONG mask = ntohl(inet_addr(subnet_mask.c_str()));
+    ULONG prefix_length = 0;
+    while (mask & 0x80000000) {
+        prefix_length++;
+        mask <<= 1;
+    }
+    row.OnLinkPrefixLength = static_cast<UINT8>(prefix_length);
+
+    // Set static address
+    row.DadState = IpDadStatePreferred;
+    row.ValidLifetime = 0xFFFFFFFF;
+    row.PreferredLifetime = 0xFFFFFFFF;
+
+    DWORD result = CreateUnicastIpAddressEntry(&row);
+    if (result != NO_ERROR) {
+        throw std::runtime_error("CreateUnicastIpAddressEntry failed with code: " + std::to_string(result));
+    }
+}

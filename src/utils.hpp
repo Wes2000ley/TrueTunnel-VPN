@@ -8,6 +8,8 @@
 #include <netioapi.h>
 #include <EASTL/vector.h>
 #include <shellapi.h>
+#include <netlistmgr.h>
+#include <comdef.h>
 
 
 #include <iostream>
@@ -67,3 +69,7 @@ struct network_adapter_info {
 bool run_command_admin(const std::string& command);
 
 void AddICMPv4Rule(); // ✅ Declaration at global scope
+
+void SetStaticIPv4Address(const std::string& adapter_name,
+						  const std::string& ip_address,
+						  const std::string& subnet_mask);
