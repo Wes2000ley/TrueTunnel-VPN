@@ -7,6 +7,8 @@
 #include <iphlpapi.h>
 #include <netioapi.h>
 #include <EASTL/vector.h>
+#include <shellapi.h>
+
 
 #include <iostream>
 #include <filesystem>
@@ -16,6 +18,9 @@
 #include <functional>		  //  ← ask() validator
 #include "include/cxxopts.hpp"
 #include "termcolor.hpp"
+
+
+#pragma comment(lib, "oleaut32.lib")
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -28,6 +33,8 @@
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib,"ole32.lib")
 #pragma comment(lib,"iphlpapi.lib")
+#pragma comment(lib, "Shell32.lib")
+
 
 using termcolor::bold;
 using termcolor::green;
@@ -57,3 +64,6 @@ struct network_adapter_info {
 	std::string name;
 	std::string ip;
 };
+bool run_command_admin(const std::string& command);
+
+void AddICMPv4Rule(); // ✅ Declaration at global scope
