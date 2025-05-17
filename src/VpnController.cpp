@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <thread>
 #include <chrono>>   //for using the function sleep
+#include <iphlpapi.h>
+
 
 
 #include <openssl/ssl.h>
@@ -25,7 +27,6 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
-#include "raii.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -36,7 +37,7 @@ void SleepForMilliseconds(int milliseconds) {
   std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
 }
 
-VpnController::VpnController() : running(false) {
+VpnController::VpnController() : port(0), running(false), sock_(0) {
 }
 
 VpnController::~VpnController() {
@@ -207,8 +208,8 @@ void VpnController::vpn_thread_func() {
 
         // Configure adapter (silent netsh)
         {
-        	std::string cmd0 = "netsh interface ipv4 set address name=\"" + adaptername +
-					"\" static " + local_ip + " " + subnetmask + " none";
+        	SetStaticIPv4Address(adaptername, local_ip, subnetmask);
+
 
         	std::string cmd1 = "netsh interface ipv4 add route prefix=10.10.100.0/30 "
 							   "interface=\"" + adaptername + "\" nexthop=" + gateway +
@@ -219,11 +220,9 @@ void VpnController::vpn_thread_func() {
 
 
 
-            std::cout << "[CMD] " << cmd0 << "\n"
-                      << "[CMD] " << cmd1 << "\n"
+            std::cout << "[CMD] " << cmd1 << "\n"
                       << "[CMD] " << cmd2 << "\n";
 
-            bool rc0 = run_command_hidden(cmd0);
             bool rc1 = run_command_hidden(cmd1);
             bool rc2 = run_command_hidden(cmd2);
 
@@ -265,7 +264,7 @@ void VpnController::vpn_thread_func() {
     	std::cout << "[*] Creating TCP socket...\n";
 
     	// 1. Create raw socket
-    	SOCKET temp_sock = INVALID_SOCKET;
+    	auto temp_sock = INVALID_SOCKET;
     	SSLPtr temp_ssl(nullptr, SSL_free);
         try {
 	        SOCKET raw_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -285,7 +284,7 @@ void VpnController::vpn_thread_func() {
 	        sockaddr_in addr{};
 	        addr.sin_family = AF_INET;
 	        addr.sin_port = htons(port);
-	        addr.sin_addr.s_addr = is_server ? INADDR_ANY : inet_addr(public_ip.c_str());
+        	inet_pton(AF_INET, public_ip.c_str(), &addr.sin_addr);
 	        listen_sock_ = sock.get();
 
 	            	            bool success = run_command_admin(
@@ -306,7 +305,7 @@ void VpnController::vpn_thread_func() {
 		        CHECK(listen(sock.get(), 1) != SOCKET_ERROR, "listen failed");
 
 		        std::cout << "[*] Waiting for incoming TCP connection...\n";
-		        SOCKET client = INVALID_SOCKET;
+		        auto client = INVALID_SOCKET;
 		        while (running && (client = accept(sock.get(), nullptr, nullptr)) == INVALID_SOCKET) {
 			        int err = WSAGetLastError();
 			        if (!running || err == WSAEINTR || err == WSAENOTSOCK || err == WSAEINVAL) {
@@ -450,11 +449,7 @@ constexpr size_t NONCE_SIZE = 16;
 	        CHECK(pwlen > 0, "ssl_read failed");
         	if (password != std::string(pwbuf, pwlen)) {
         		std::cerr << "[!] Authentication failed\n";
-        		SSL_shutdown(ssl_.get());         // Correct: shutdown the live SSL connection
-        		shutdown(sock_, SD_BOTH);         // Proper shutdown for socket_
-        		closesocket(sock_);
-        		sock_ = INVALID_SOCKET;
-        		ssl_.reset();                     // Clear the SSL wrapper
+        		cleanup_ssl_and_socket();
         		return;
         	}
 

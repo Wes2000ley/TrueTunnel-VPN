@@ -28,6 +28,10 @@ public:
 	           const std::string &subnetmask,
 	           const std::string &public_ip,
 	           const std::string &real_adapter);
+	VpnController(const VpnController&) = delete;
+	VpnController& operator=(const VpnController&) = delete;
+	VpnController(VpnController&&) = delete;
+	VpnController& operator=(VpnController&&) = delete;
 
 	void stop();
 
