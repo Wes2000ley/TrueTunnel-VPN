@@ -223,6 +223,10 @@ void VpnController::vpn_thread_func() {
     	int reuse = 1;
     	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
 
+    	// ✅ 2.5 Disable Nagle's Algorithm to reduce latency on small packets
+    	int flag = 1;
+    	setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+
     	// 3. Prepare address
     	sockaddr_in addr{};
     	addr.sin_family = AF_INET;
