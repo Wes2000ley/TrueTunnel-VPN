@@ -32,6 +32,13 @@ void CreateRenderTarget();
 void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+#define WM_TRAYICON (WM_USER + 1)
+#define ID_TRAY_EXIT 1001
+#define ID_TRAY_RESTORE 1002
+
+NOTIFYICONDATA nid = {};
+HMENU h_tray_menu = nullptr;
+
 // Main code
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 {
@@ -606,26 +613,87 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
     case WM_SIZE:
         if (wParam == SIZE_MINIMIZED)
+        {
+            // Add tray icon
+            nid.cbSize = sizeof(NOTIFYICONDATA);
+            nid.hWnd = hWnd;
+            nid.uID = 1;
+            nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+            nid.uCallbackMessage = WM_TRAYICON;
+            nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_VPN_ICON));
+            strcpy_s(nid.szTip, "TrueTunnel VPN");
+            Shell_NotifyIcon(NIM_ADD, &nid);
+
+            ShowWindow(hWnd, SW_HIDE);
             return 0;
-        g_ResizeWidth = (UINT)LOWORD(lParam); // Queue resize
-        g_ResizeHeight = (UINT)HIWORD(lParam);
+        }
+
+        g_ResizeWidth = LOWORD(lParam);
+        g_ResizeHeight = HIWORD(lParam);
         return 0;
+
     case WM_SYSCOMMAND:
-        if ((wParam & 0xfff0) == SC_KEYMENU) // Disable ALT application menu
+        if ((wParam & 0xfff0) == SC_KEYMENU)
             return 0;
         break;
-    case WM_DESTROY:
-        ::PostQuitMessage(0);
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case ID_TRAY_EXIT:
+            Shell_NotifyIcon(NIM_DELETE, &nid);
+            PostQuitMessage(0);
+            break;
+
+        case ID_TRAY_RESTORE:
+            ShowWindow(hWnd, SW_RESTORE);
+            Shell_NotifyIcon(NIM_DELETE, &nid);
+            break;
+        }
         return 0;
+
+case WM_TRAYICON:
+        switch (LOWORD(lParam)) {
+            case WM_LBUTTONDBLCLK: // <- double-click left
+                ShowWindow(hWnd, SW_RESTORE);
+                Shell_NotifyIcon(NIM_DELETE, &nid);
+                break;
+
+            case WM_RBUTTONUP: {
+                POINT pt;
+                GetCursorPos(&pt);
+
+                if (!h_tray_menu) {
+                    h_tray_menu = CreatePopupMenu();
+                    AppendMenu(h_tray_menu, MF_STRING, ID_TRAY_RESTORE, "Restore");
+                    AppendMenu(h_tray_menu, MF_STRING, ID_TRAY_EXIT, "Exit");
+                }
+
+                SetForegroundWindow(hWnd);
+                TrackPopupMenu(h_tray_menu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hWnd, NULL);
+            }
+            break;
+        }
+        break;
+
+
+    case WM_DESTROY:
+        Shell_NotifyIcon(NIM_DELETE, &nid);
+        PostQuitMessage(0);
+        return 0;
+
     case WM_DPICHANGED:
         if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_DpiEnableScaleViewports)
         {
-            //const int dpi = HIWORD(wParam);
-            //printf("WM_DPICHANGED to %d (%.0f%%)\n", dpi, (float)dpi / 96.0f * 100.0f);
             const RECT* suggested_rect = (RECT*)lParam;
-            ::SetWindowPos(hWnd, nullptr, suggested_rect->left, suggested_rect->top, suggested_rect->right - suggested_rect->left, suggested_rect->bottom - suggested_rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            ::SetWindowPos(hWnd, nullptr,
+                           suggested_rect->left, suggested_rect->top,
+                           suggested_rect->right - suggested_rect->left,
+                           suggested_rect->bottom - suggested_rect->top,
+                           SWP_NOZORDER | SWP_NOACTIVATE);
         }
         break;
     }
+
     return ::DefWindowProcW(hWnd, msg, wParam, lParam);
 }
