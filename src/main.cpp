@@ -112,6 +112,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
     style.FramePadding = ImVec2(8, 6);
     style.ItemSpacing = ImVec2(10, 8);
     style.WindowPadding = ImVec2(16, 12);
+    style.PopupRounding = 5.00f;
+
+
+    
 
     ImVec4 *colors = ImGui::GetStyle().Colors;
         colors[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
@@ -305,7 +309,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             ImGui::SetNextWindowSize(window_size, ImGuiCond_Always);
 
             // Apply padding styles
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 16));  // Space inside window
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(5, 5));  // Space inside window
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 6));    // Space around text inside widgets
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 8));     // Space between widgets
 
@@ -356,6 +360,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             if (ImGui::Combo("##mode", &selected_mode, mode_options, IM_ARRAYSIZE(mode_options))) {
                 strncpy_s(mode, mode_options[selected_mode], sizeof(mode) - 1);
             }
+
+
 ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 25.0f);
             if (ImGui::Button("?", ImVec2(25, 25)))
                 ImGui::OpenPopup("Help Me");
