@@ -38,6 +38,8 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 NOTIFYICONDATA nid = {};
 HMENU h_tray_menu = nullptr;
+bool in_tray = false;
+
 
 // Main code
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
@@ -612,9 +614,10 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch (msg)
     {
     case WM_SIZE:
-        if (wParam == SIZE_MINIMIZED)
+        if (wParam == SIZE_MINIMIZED && !in_tray)
         {
             // Add tray icon
+            in_tray = true;
             nid.cbSize = sizeof(NOTIFYICONDATA);
             nid.hWnd = hWnd;
             nid.uID = 1;
@@ -648,6 +651,8 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case ID_TRAY_RESTORE:
             ShowWindow(hWnd, SW_RESTORE);
             Shell_NotifyIcon(NIM_DELETE, &nid);
+                in_tray = false;
+
             break;
         }
         return 0;
@@ -657,6 +662,8 @@ case WM_TRAYICON:
             case WM_LBUTTONDBLCLK: // <- double-click left
                 ShowWindow(hWnd, SW_RESTORE);
                 Shell_NotifyIcon(NIM_DELETE, &nid);
+                in_tray = false;
+
                 break;
 
             case WM_RBUTTONUP: {
