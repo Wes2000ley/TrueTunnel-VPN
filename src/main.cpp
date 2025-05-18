@@ -466,7 +466,8 @@ ImGui::Text("Log:");
             ImGui::BeginChild("log_box", ImVec2(0, available_height), true,
                               ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
             ImGui::TextUnformatted(vpn_log);
-            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+            bool should_scroll = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 10.0f;
+            if (should_scroll)
                 ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
 
