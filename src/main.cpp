@@ -9,6 +9,7 @@
 #include <d3d11.h>
 #include <tchar.h>
 #include "VpnController.h"
+#include "utils.hpp"
 
 
 
@@ -49,6 +50,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 
     HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"True Tunnel VPN", WS_OVERLAPPEDWINDOW,
                                 pos_x ,pos_y, width, height, nullptr, nullptr, wc.hInstance, nullptr);
+
+    populate_real_adapters();
 
     // Initialize Direct3D
     if (!CreateDeviceD3D(hwnd))
@@ -282,14 +285,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
     static char public_ip[64] = "192.168.1.10";
     static int  real_adapter_index = 0;
 
-static const char *mode_options[] = {"server", "client"};
-    ImGui::Text("Mode:");
-    static int selected_mode = 0;
-    if (ImGui::Combo("##mode", &selected_mode, mode_options, IM_ARRAYSIZE(mode_options))) {
-        strncpy_s(mode, mode_options[selected_mode], sizeof(mode) - 1);
-    }
+            static const char* mode_options[] = { "server", "client" };
+            static int selected_mode = 0;
 
-    ImGui::InputText("Server IP", server_ip, IM_ARRAYSIZE(server_ip));
+            // Start combo
+            if (ImGui::Combo("##mode", &selected_mode, mode_options, IM_ARRAYSIZE(mode_options))) {
+                strncpy_s(mode, mode_options[selected_mode], sizeof(mode) - 1);
+            }
+
+            // Label placed to the right of the combo
+            ImGui::SameLine();
+            ImGui::Text("Mode:");
+
+
+
+
+
+            ImGui::InputText("Server IP", server_ip, IM_ARRAYSIZE(server_ip));
     ImGui::InputText("Port", port, IM_ARRAYSIZE(port));
     ImGui::InputText("Local IP", local_ip, IM_ARRAYSIZE(local_ip));
     ImGui::InputText("Adapter Name", adapter_name, IM_ARRAYSIZE(adapter_name));
@@ -298,15 +310,20 @@ static const char *mode_options[] = {"server", "client"};
     ImGui::InputText("Password", password, IM_ARRAYSIZE(password), ImGuiInputTextFlags_Password);
     ImGui::InputText("Server Public IP", public_ip, IM_ARRAYSIZE(public_ip));
 
-    static const char* adapter_choices[] = {
-        "Ethernet", "Wi-Fi", "NordLynx Tunnel", "Wintun Tunnel", "Custom Adapter"
-    };
-    ImGui::Text("Real Adapter (for routing):");
-    ImGui::Combo("##real_adapter", &real_adapter_index, adapter_choices, IM_ARRAYSIZE(adapter_choices));
+            // Show adapter dropdown
+            if (!adapter_labels_.empty()) {
+                ImGui::Combo("##real_adapter", &current_adapter_idx_, adapter_labels_.data(), static_cast<int>(adapter_labels_.size()));
+                ImGui::SameLine();
+                ImGui::Text("Tethered Adapter:");
+            } else {
+                ImGui::Text("No network adapters found.");
+            }
 
-    static char vpn_log[2048] = "";
-    static char message_input[256] = "";
+            // Static buffers for logging and message input
+            static char vpn_log[2048] = "";
+            static char message_input[256] = "";
 
+            // Connect button
             if (ImGui::Button("Connect")) {
                 strcat_s(vpn_log, "[System] Connect button pressed\n");
 
@@ -320,7 +337,11 @@ static const char *mode_options[] = {"server", "client"};
                 });
 
                 std::string mode_str = mode;
-                std::string real_adapter_str = adapter_choices[real_adapter_index];
+
+                // Get selected adapter name (safe fallback)
+                std::string real_adapter_str = (current_adapter_idx_ >= 0 && current_adapter_idx_ < static_cast<int>(real_adapters_.size()))
+                    ? real_adapters_[current_adapter_idx_].name
+                    : "Unknown";
 
                 g_vpn_controller->start(
                     mode_str,
@@ -337,16 +358,19 @@ static const char *mode_options[] = {"server", "client"};
             }
 
     ImGui::Separator();
-    ImGui::Text("Log:");
+ImGui::Text("Log:");
             // Reserve space for log box height dynamically
             float available_height = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f;
 
-            ImGui::BeginChild("log_box", ImVec2(0, available_height), true, ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
+            ImGui::BeginChild("log_box", ImVec2(0, available_height), true,
+                              ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
             ImGui::TextUnformatted(vpn_log);
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+                ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
 
 
-    ImGui::InputText("Message", message_input, IM_ARRAYSIZE(message_input));
+            ImGui::InputText("Message", message_input, IM_ARRAYSIZE(message_input));
             if (ImGui::Button("Send Message")) {
                 if (strlen(message_input) > 0) {
                     if (g_vpn_controller && g_vpn_controller->is_running()) {

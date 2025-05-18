@@ -323,3 +323,51 @@ void SetStaticIPv4Address(const std::string& adapter_name,
         throw std::runtime_error("CreateUnicastIpAddressEntry failed with code: " + std::to_string(result));
     }
 }
+
+void populate_real_adapters() {
+	real_adapters_.clear();
+	adapter_choices_.clear();
+	adapter_labels_.clear();
+
+	ULONG out_buf_len = 0;
+	GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, nullptr, &out_buf_len);
+
+	std::vector<BYTE> buffer(out_buf_len);
+	IP_ADAPTER_ADDRESSES* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+
+	if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, addresses, &out_buf_len) != NO_ERROR)
+		return;
+
+	for (IP_ADAPTER_ADDRESSES* adapter = addresses; adapter; adapter = adapter->Next) {
+		if (adapter->OperStatus != IfOperStatusUp || adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+			continue;
+
+		std::string name = adapter->FriendlyName
+			? std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(adapter->FriendlyName)
+			: "Unknown";
+
+		std::string ip;
+		for (IP_ADAPTER_UNICAST_ADDRESS* ua = adapter->FirstUnicastAddress; ua; ua = ua->Next) {
+			if (ua->Address.lpSockaddr->sa_family == AF_INET) {
+				char ip_buf[INET_ADDRSTRLEN] = {};
+				sockaddr_in* ipv4 = reinterpret_cast<sockaddr_in*>(ua->Address.lpSockaddr);
+				inet_ntop(AF_INET, &ipv4->sin_addr, ip_buf, sizeof(ip_buf));
+				ip = ip_buf;
+				break;
+			}
+		}
+
+		if (!ip.empty()) {
+			real_adapters_.push_back({ name, ip });
+			adapter_choices_.push_back(name);
+		}
+	}
+
+	for (const std::string& choice : adapter_choices_) {
+		adapter_labels_.push_back(choice.c_str());
+	}
+
+	if (!adapter_choices_.empty()) {
+		current_adapter_idx_ = 0;
+	}
+}
