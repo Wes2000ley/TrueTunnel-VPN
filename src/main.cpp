@@ -197,6 +197,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 
     IM_ASSERT(customFont != nullptr);
     io.FontDefault = customFont;
+    #define IMGUI_ENABLE_FREETYPE
+    ImGui::GetIO().Fonts->Build(); // Call after fonts are loaded
 
 
     // Main loop
@@ -320,33 +322,80 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             static const char* mode_options[] = { "server", "client" };
             static int selected_mode = 0;
 
+
+            ImGui::Text("Mode:");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Select the VPN role:\n"
+                    "* Server: Listens for an incoming connection (requires port forwarding or a public IP).\n"
+                    "* Client: Initiates the connection to the server (can operate behind NAT)."
+                );
+
+            ImGui::SameLine();
             // Start combo
             if (ImGui::Combo("##mode", &selected_mode, mode_options, IM_ARRAYSIZE(mode_options))) {
                 strncpy_s(mode, mode_options[selected_mode], sizeof(mode) - 1);
             }
 
-            // Label placed to the right of the combo
+
+
+
+
+            // ImGui::Text("Server IP:");
+            // ImGui::SameLine();
+            // if (ImGui::IsItemHovered())
+            //     ImGui::SetTooltip("This is the IP clients will connect to (internal or external).");
+            // ImGui::InputText("##server_ip", server_ip, IM_ARRAYSIZE(server_ip));
+
+            ImGui::Text("Port:");
             ImGui::SameLine();
-            ImGui::Text("Mode:");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The TCP port to use for this VPN connection.");
+            ImGui::InputText("##port", port, IM_ARRAYSIZE(port));
 
+            // ImGui::Text("Local IP:");
+            // ImGui::SameLine();
+            // if (ImGui::IsItemHovered())
+            //     ImGui::SetTooltip("The internal IP assigned to this node (e.g., 10.x.x.x).");
+            // ImGui::InputText("##local_ip", local_ip, IM_ARRAYSIZE(local_ip));
 
+            ImGui::Text("Adapter Name:");
+            ImGui::SameLine();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The display name of your virtual adapter.");
+            ImGui::InputText("##adapter_name", adapter_name, IM_ARRAYSIZE(adapter_name));
 
+            // ImGui::Text("Subnet Mask:");
+            // ImGui::SameLine();
+            // if (ImGui::IsItemHovered())
+            //     ImGui::SetTooltip("The subnet mask for the VPN adapter (e.g., 255.255.255.0).");
+            // ImGui::InputText("##subnet_mask", subnet_mask, IM_ARRAYSIZE(subnet_mask));
 
+            // ImGui::Text("Gateway:");
+            // ImGui::SameLine();
+            // if (ImGui::IsItemHovered())
+            //     ImGui::SetTooltip("The gateway address to reach external networks.");
+            // ImGui::InputText("##gateway", gateway, IM_ARRAYSIZE(gateway));
 
-          //  ImGui::InputText("Server IP", server_ip, IM_ARRAYSIZE(server_ip));
-    ImGui::InputText("Port", port, IM_ARRAYSIZE(port));
-   // ImGui::InputText("Local IP", local_ip, IM_ARRAYSIZE(local_ip));
-    ImGui::InputText("Adapter Name", adapter_name, IM_ARRAYSIZE(adapter_name));
-   // ImGui::InputText("Subnet Mask", subnet_mask, IM_ARRAYSIZE(subnet_mask));
-   // ImGui::InputText("Gateway", gateway, IM_ARRAYSIZE(gateway));
-    ImGui::InputText("Password", password, IM_ARRAYSIZE(password), ImGuiInputTextFlags_Password);
-    ImGui::InputText("Server Public IP", public_ip, IM_ARRAYSIZE(public_ip));
+            ImGui::Text("Password:");
+            ImGui::SameLine();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("This pre-shared password will be used for authentication.");
+            ImGui::InputText("##password", password, IM_ARRAYSIZE(password), ImGuiInputTextFlags_Password);
+
+            ImGui::Text("Server Public IP:");
+            ImGui::SameLine();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("This is the routable IP of your server.");
+            ImGui::InputText("##public_ip", public_ip, IM_ARRAYSIZE(public_ip));
 
             // Show adapter dropdown
             if (!adapter_labels_.empty()) {
-                ImGui::Combo("##real_adapter", &current_adapter_idx_, adapter_labels_.data(), static_cast<int>(adapter_labels_.size()));
-                ImGui::SameLine();
                 ImGui::Text("Tethered Adapter:");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("This is adapter you bind Wintun to.");
+                ImGui::SameLine();
+                ImGui::Combo("##real_adapter", &current_adapter_idx_, adapter_labels_.data(), static_cast<int>(adapter_labels_.size()));
             } else {
                 ImGui::Text("No network adapters found.");
             }

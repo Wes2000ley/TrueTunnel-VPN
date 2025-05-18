@@ -53,7 +53,7 @@ bool VpnController::start(const std::string &mode, const std::string &server_ip,
 	if (running) return false;
 
 	this->mode = mode;
-	this->server_ip = server_ip;
+	this->server_ip = server_ip; // UNUSED!!!
 	this->port = port;
 	this->local_ip = local_ip;
 	this->gateway = gateway;
