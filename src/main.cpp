@@ -258,6 +258,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
             ImGui::SetNextWindowSize(window_size, ImGuiCond_Always);
 
+            // Apply padding styles
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 16));  // Space inside window
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 6));    // Space around text inside widgets
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 8));     // Space between widgets
+
+            ImGui::SetNextWindowPos(ImVec2(0, 0));
+            ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
+
 
             ImGui::Begin("##MainPanel", nullptr,
                          ImGuiWindowFlags_NoTitleBar |
@@ -301,12 +309,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 
 
 
-            ImGui::InputText("Server IP", server_ip, IM_ARRAYSIZE(server_ip));
+          //  ImGui::InputText("Server IP", server_ip, IM_ARRAYSIZE(server_ip));
     ImGui::InputText("Port", port, IM_ARRAYSIZE(port));
-    ImGui::InputText("Local IP", local_ip, IM_ARRAYSIZE(local_ip));
+   // ImGui::InputText("Local IP", local_ip, IM_ARRAYSIZE(local_ip));
     ImGui::InputText("Adapter Name", adapter_name, IM_ARRAYSIZE(adapter_name));
-    ImGui::InputText("Subnet Mask", subnet_mask, IM_ARRAYSIZE(subnet_mask));
-    ImGui::InputText("Gateway", gateway, IM_ARRAYSIZE(gateway));
+   // ImGui::InputText("Subnet Mask", subnet_mask, IM_ARRAYSIZE(subnet_mask));
+   // ImGui::InputText("Gateway", gateway, IM_ARRAYSIZE(gateway));
     ImGui::InputText("Password", password, IM_ARRAYSIZE(password), ImGuiInputTextFlags_Password);
     ImGui::InputText("Server Public IP", public_ip, IM_ARRAYSIZE(public_ip));
 
@@ -384,9 +392,9 @@ ImGui::Text("Log:");
                 }
             }
 
-
     ImGui::End();
             ImGui::PopStyleVar(3);
+            ImGui::PopStyleVar(3); // Restore padding
 }
 
 
@@ -444,7 +452,7 @@ bool CreateDeviceD3D(HWND hWnd)
     sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.OutputWindow = hWnd;
-    sd.SampleDesc.Count = 1;
+    sd.SampleDesc.Count = 4;
     sd.SampleDesc.Quality = 0;
     sd.Windowed = TRUE;
     sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
@@ -452,7 +460,12 @@ bool CreateDeviceD3D(HWND hWnd)
     UINT createDeviceFlags = 0;
     //createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
     D3D_FEATURE_LEVEL featureLevel;
-    const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0, };
+    const D3D_FEATURE_LEVEL featureLevelArray[] = {
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+        D3D_FEATURE_LEVEL_9_3
+    };
     HRESULT res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
     if (res == DXGI_ERROR_UNSUPPORTED) // Try high-performance WARP software driver if hardware is not available.
         res = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, createDeviceFlags, featureLevelArray, 2, D3D11_SDK_VERSION, &sd, &g_pSwapChain, &g_pd3dDevice, &featureLevel, &g_pd3dDeviceContext);
