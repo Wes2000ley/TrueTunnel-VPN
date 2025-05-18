@@ -8,7 +8,6 @@
 #include <objbase.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
-#include <EASTL/vector.h>
 #include "vpn.hpp"
 #include <shellapi.h>
 #pragma comment(lib, "Shell32.lib")
@@ -20,7 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <functional>		  //  ← ask() validator
-#include "include/cxxopts.hpp"
+#include <regex>
 #include "termcolor.hpp"
 
 #include <openssl/ssl.h>
