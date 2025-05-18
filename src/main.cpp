@@ -10,7 +10,7 @@
 #include <tchar.h>
 #include "VpnController.h"
 #include "utils.hpp"
-
+#define IDI_VPN_ICON 101
 
 
 
@@ -37,7 +37,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 {
     // Create application window
     //ImGui_ImplWin32_EnableDpiAwareness();
-    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"True Tunnel VPN", nullptr };
+    HICON h_icon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_VPN_ICON));
+    HICON h_icon_small = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(IDI_VPN_ICON),
+                                          IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+
+    WNDCLASSEXW wc = {
+        sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L,
+        hInstance, h_icon, LoadCursor(nullptr, IDC_ARROW),
+        nullptr, nullptr, L"True Tunnel VPN", h_icon_small
+    };
     ::RegisterClassExW(&wc);
     RECT screen;
     GetWindowRect(GetDesktopWindow(), &screen);
@@ -52,6 +60,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
                                 pos_x ,pos_y, width, height, nullptr, nullptr, wc.hInstance, nullptr);
 
     populate_real_adapters();
+    SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)h_icon);
+    SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)h_icon_small);
+
 
     // Initialize Direct3D
     if (!CreateDeviceD3D(hwnd))
