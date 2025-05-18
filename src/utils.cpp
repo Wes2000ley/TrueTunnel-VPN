@@ -371,3 +371,19 @@ void populate_real_adapters() {
 		current_adapter_idx_ = 0;
 	}
 }
+
+std::string sanitize_shell_string(const std::string& input) {
+	static const std::regex allowed(R"(^[a-zA-Z0-9 _\.\-]{1,64}$)");
+	if (!std::regex_match(input, allowed)) {
+		throw std::runtime_error("Unsafe characters in input string for shell command");
+	}
+	return input;
+}
+
+std::string sanitize_ip(const std::string& ip) {
+	static const std::regex ip_regex(R"(^\d{1,3}(\.\d{1,3}){3}$)");
+	if (!std::regex_match(ip, ip_regex)) {
+		throw std::runtime_error("Invalid IP address");
+	}
+	return ip;
+}

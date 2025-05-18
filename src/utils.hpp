@@ -80,3 +80,8 @@ inline std::vector<network_adapter_info> real_adapters_;
 inline std::vector<std::string> adapter_choices_;
 inline std::vector<const char*> adapter_labels_;
 inline int current_adapter_idx_ = 0;
+
+std::string sanitize_shell_string(const std::string& input);
+
+
+std::string sanitize_ip(const std::string& ip);

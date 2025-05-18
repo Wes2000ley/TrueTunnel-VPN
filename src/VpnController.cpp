@@ -12,6 +12,7 @@
 #include <thread>
 #include <chrono>>   //for using the function sleep
 #include <iphlpapi.h>
+#include <regex>
 
 
 
@@ -204,6 +205,11 @@ void VpnController::vpn_thread_func() {
     		local_ip = "10.10.100.2";
     		subnetmask = "255.255.255.252";
     	}
+
+    	adaptername = sanitize_shell_string(adaptername);
+    	real_adapter = sanitize_shell_string(real_adapter);
+    	gateway = sanitize_ip(gateway);
+    	public_ip = sanitize_ip(public_ip);
 
 
 
