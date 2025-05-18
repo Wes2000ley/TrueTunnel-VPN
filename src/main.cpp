@@ -451,7 +451,11 @@ ImGui::Text("Log:");
             ImGui::EndChild();
 
             colors[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-            ImGui::InputText("Message", message_input, IM_ARRAYSIZE(message_input));
+ImGui::Text("Message:");
+            ImGui::SameLine();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Enter a message to send through the VPN tunnel.");
+            ImGui::InputText("##message", message_input, IM_ARRAYSIZE(message_input));
             if (ImGui::Button("Send Message")) {
                 if (strlen(message_input) > 0) {
                     if (g_vpn_controller && g_vpn_controller->is_running()) {
