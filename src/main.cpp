@@ -152,6 +152,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
         colors[ImGuiCol_NavWindowingHighlight] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
         colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
         colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
+    ImVec4 clear_color = ImVec4(0.07f, 0.07f, 0.10f, 1.00f);
+
 
 
 
@@ -184,7 +186,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
     //ImFont* font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\ArialUni.ttf", 18.0f, nullptr, io.Fonts->GetGlyphRangesJapanese());
     //IM_ASSERT(font != nullptr);
 
-    ImVec4 clear_color = ImVec4(0.00f, 0.00f, 0.05f, 1.00f);
 
     ImFontConfig font_cfg;
     font_cfg.OversampleH = 3;
@@ -392,7 +393,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 ImGui::Text("Log:");
             // Reserve space for log box height dynamically
             float available_height = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f;
-
+            colors[ImGuiCol_Text] = ImVec4(0.69f, 0.51f, 0.89f, 1.00f);
             ImGui::BeginChild("log_box", ImVec2(0, available_height), true,
                               ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
             ImGui::TextUnformatted(vpn_log);
@@ -400,7 +401,7 @@ ImGui::Text("Log:");
                 ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
 
-
+            colors[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
             ImGui::InputText("Message", message_input, IM_ARRAYSIZE(message_input));
             if (ImGui::Button("Send Message")) {
                 if (strlen(message_input) > 0) {
