@@ -6,7 +6,6 @@
 #include <objbase.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
-#include <EASTL/vector.h>
 #include <shellapi.h>
 #include <netlistmgr.h>
 #include <comdef.h>
@@ -18,7 +17,6 @@
 #include <stdexcept>
 #include <string>
 #include <functional>		  //  ← ask() validator
-#include "include/cxxopts.hpp"
 #include "termcolor.hpp"
 
 

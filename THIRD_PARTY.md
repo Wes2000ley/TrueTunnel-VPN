@@ -31,32 +31,14 @@ The wintun.dll binary is redistributed unmodified.
 If you redistribute TrueTunnel VPN (even under MIT), the GPLv2 terms still apply to Wintun.
 Redistribution must fully comply with GPLv2 obligations, including offering source code or an equivalent written offer.
 
-🖥️ wxWidgets
-Website: https://www.wxwidgets.org/
-
-License: wxWindows Library License 3.1 (based on LGPL-2.1 with exceptions)
-
-Purpose: Cross-platform C++ GUI library used to build the TrueTunnel VPN user interface.
-
-📜 Special License Note
-The wxWindows License allows usage in both open-source and proprietary software, without the strict copyleft requirements typical of LGPL libraries.
-You are permitted to link against wxWidgets without your application becoming subject to the LGPL.
-
-For full terms, see the wxWidgets License FAQ.
-
-⚙️ EASTL (Electronic Arts Standard Template Library)
-Repository: https://github.com/electronicarts/EASTL
-
-License: BSD-3-Clause
-
-Purpose: High-performance, drop-in alternative to the standard C++ STL, used for internal data structures.
-
-🧩 cxxopts
-Repository: https://github.com/jarro2783/cxxopts
+🎨 Dear ImGui
+Repository: https://github.com/ocornut/imgui
 
 License: MIT License
 
-Purpose: Lightweight, header-only library for command-line argument parsing.
+Purpose: Renders the in-app graphical user interface, including dropdowns, buttons, and configuration panels.
+
+Dear ImGui is statically linked and unmodified in this project.
 
 🎨 termcolor
 Repository: https://github.com/ikalnytskyi/termcolor

@@ -18,7 +18,6 @@ endif ()
 
 
 # Required for finding Conan packages
-find_package(EASTL REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(imgui REQUIRED)
 find_package(freetype)
@@ -76,7 +75,6 @@ target_link_libraries(vpn PRIVATE
         iphlpapi
         crypt32      # <-- CryptoAPI
         advapi32     # <-- sometimes needed by CAPI
-        EASTL::EASTL
         imgui::imgui
         d3d11
         dxgi
