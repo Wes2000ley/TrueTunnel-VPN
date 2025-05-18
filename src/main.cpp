@@ -619,6 +619,8 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             // Add tray icon
             in_tray = true;
             nid.cbSize = sizeof(NOTIFYICONDATA);
+            nid.uVersion = NOTIFYICON_VERSION_4;
+            Shell_NotifyIcon(NIM_SETVERSION, &nid);
             nid.hWnd = hWnd;
             nid.uID = 1;
             nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
@@ -626,6 +628,12 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_VPN_ICON));
             strcpy_s(nid.szTip, "TrueTunnel VPN");
             Shell_NotifyIcon(NIM_ADD, &nid);
+            nid.uFlags |= NIF_INFO;
+            strcpy_s(nid.szInfoTitle, "TrueTunnel VPN");
+            strcpy_s(nid.szInfo, "App minimized to system tray.\nDouble-click tray icon to restore.");
+            nid.dwInfoFlags = NIIF_INFO;
+            Shell_NotifyIcon(NIM_MODIFY, &nid);
+
 
             ShowWindow(hWnd, SW_HIDE);
             return 0;
