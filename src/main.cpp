@@ -342,7 +342,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             static const char* mode_options[] = { "server", "client" };
             static int selected_mode = 0;
 
-
+            
             ImGui::Text("Mode:");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
@@ -356,6 +356,36 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             if (ImGui::Combo("##mode", &selected_mode, mode_options, IM_ARRAYSIZE(mode_options))) {
                 strncpy_s(mode, mode_options[selected_mode], sizeof(mode) - 1);
             }
+ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 25.0f);
+            if (ImGui::Button("?", ImVec2(25, 25)))
+                ImGui::OpenPopup("Help Me");
+            if (ImGui::BeginPopup("Help Me")) {
+                ImGui::TextColored(ImVec4(0.98f, 0.8f, 0.2f, 1.0f), "TrueTunnel VPN");
+                ImGui::Separator();
+
+                ImGui::TextWrapped("TrueTunnel VPN is a secure point-to-point TLS VPN with a focus on speed, privacy, and reliability.");
+                ImGui::Spacing();
+
+                ImGui::BulletText("Double-click the tray icon to restore the app.");
+                ImGui::BulletText("Click 'Connect' to establish a VPN tunnel.");
+                ImGui::BulletText("Supports client and server mode.");
+                ImGui::BulletText("Minimizes to system tray when closed or minimized.");
+                ImGui::BulletText("Stores adapter binding and password securely in memory.");
+
+                ImGui::Spacing();
+                ImGui::Separator();
+
+                ImGui::Text("Developer: Wesley Atwell");
+                ImGui::Text("License:  MIT or GPLv2 ");
+
+                ImGui::Spacing();
+                if (ImGui::Button("Close")) {
+                    ImGui::CloseCurrentPopup();
+                }
+
+                ImGui::EndPopup();
+            }
+
 
 
 
