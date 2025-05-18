@@ -73,3 +73,10 @@ void AddICMPv4Rule(); // ✅ Declaration at global scope
 void SetStaticIPv4Address(const std::string& adapter_name,
 						  const std::string& ip_address,
 						  const std::string& subnet_mask);
+
+void populate_real_adapters();
+
+inline std::vector<network_adapter_info> real_adapters_;
+inline std::vector<std::string> adapter_choices_;
+inline std::vector<const char*> adapter_labels_;
+inline int current_adapter_idx_ = 0;
