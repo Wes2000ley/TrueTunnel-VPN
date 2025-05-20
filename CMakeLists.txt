@@ -45,6 +45,7 @@ target_sources(vpn PRIVATE
 # 👉 ADD THIS after add_executable
 set_target_properties(vpn PROPERTIES
         LINK_FLAGS "/SUBSYSTEM:WINDOWS"
+        ENABLE_EXPORTS FALSE
 )
 
 
@@ -142,3 +143,32 @@ add_custom_command(TARGET vpn POST_BUILD
 if (WIN32)
     target_sources(vpn PRIVATE ${CMAKE_SOURCE_DIR}/src/version.rc)
 endif()
+
+# Remove .lib and .exp files from the output directory
+add_custom_command(TARGET vpn POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E remove -f
+        "$<TARGET_FILE_DIR:vpn>/vpn.lib"
+        "$<TARGET_FILE_DIR:vpn>/vpn.exp"
+        "$<TARGET_FILE_DIR:vpn>/vpn.pdb"
+        COMMENT "Deleting MSVC-generated .lib/.exp files from output"
+)
+# Set build type name safely (since multi-config generators like Visual Studio won't define it at configure time)
+string(TOLOWER "$<CONFIG>" build_type)
+
+# Use generator expression for config-specific output folder
+set(zip_output_dir "$<TARGET_FILE_DIR:vpn>")
+set(zip_filename "$<TARGET_FILE_DIR:vpn>/TrueTunnel-VPN-$<CONFIG>.zip")
+
+# Only include files that exist; skip manifest if embedded
+add_custom_command(TARGET vpn POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo "Zipping TrueTunnel: $<CONFIG>"
+        COMMAND ${CMAKE_COMMAND} -E tar "cfv"
+        "${zip_filename}" --format=zip
+        -- "$<TARGET_FILE:vpn>"
+        "${zip_output_dir}/wintun.dll"
+        "${zip_output_dir}/fips.dll"
+        "${zip_output_dir}/openssl.exe"
+        "${zip_output_dir}/run_fipsinstall.bat"
+        "${zip_output_dir}/openssl.cnf"
+        COMMENT "Packing release zip: TrueTunnel-$<CONFIG>.zip"
+)

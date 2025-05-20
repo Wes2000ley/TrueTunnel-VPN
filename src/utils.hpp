@@ -83,3 +83,5 @@ std::string sanitize_shell_string(const std::string& input);
 
 
 std::string sanitize_ip(const std::string& ip);
+
+std::string get_ipv4_for_adapter(const std::string& adapter_name);
