@@ -121,19 +121,44 @@ private:
     WINTUN_SESSION_HANDLE session_;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Wintun Adapter Guard (RAII for WINTUN_ADAPTER_HANDLE)
+
+// Wintun Adapter Guard (RAII wrapper for WINTUN_ADAPTER_HANDLE)
 class WintunAdapterGuard {
 public:
     explicit WintunAdapterGuard(WINTUN_ADAPTER_HANDLE adapter) : adapter_(adapter) {}
-    ~WintunAdapterGuard() {
+
+    // Disallow copy
+    WintunAdapterGuard(const WintunAdapterGuard&) = delete;
+    WintunAdapterGuard& operator=(const WintunAdapterGuard&) = delete;
+
+    // Allow move
+    WintunAdapterGuard(WintunAdapterGuard&& other) noexcept : adapter_(other.adapter_) {
+        other.adapter_ = nullptr;
+    }
+
+    WintunAdapterGuard& operator=(WintunAdapterGuard&& other) noexcept {
+        if (this != &other) {
+            Reset();
+            adapter_ = other.adapter_;
+            other.adapter_ = nullptr;
+        }
+        return *this;
+    }
+
+    ~WintunAdapterGuard() { Reset(); }
+
+    void Reset() {
         if (adapter_) {
             WintunCloseAdapter(adapter_);
+            adapter_ = nullptr;
         }
     }
+
     WINTUN_ADAPTER_HANDLE get() const { return adapter_; }
+    explicit operator bool() const { return adapter_ != nullptr; }
+
 private:
-    WINTUN_ADAPTER_HANDLE adapter_;
+    WINTUN_ADAPTER_HANDLE adapter_ = nullptr;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

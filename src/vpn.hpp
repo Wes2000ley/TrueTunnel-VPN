@@ -58,6 +58,7 @@ typedef BOOL                    (WINAPI *WINTUN_SEND_PACKET_FUNC)(WINTUN_SESSION
 typedef void *                  (WINAPI *WINTUN_RECEIVE_PACKET_FUNC)(WINTUN_SESSION_HANDLE, UINT32 *);
 typedef void                    (WINAPI *WINTUN_RELEASE_RECEIVE_PACKET_FUNC)(WINTUN_SESSION_HANDLE, void *);
 
+
 // ─── Inline globals ───────────────────────────────────────────────────────────
 // C++17 inline variables: exactly one definition, external linkage
 inline HMODULE                            hWintun                     = nullptr;

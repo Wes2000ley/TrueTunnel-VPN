@@ -103,8 +103,11 @@ void VpnController::stop() {
 				closesocket(listen_sock_);
 				listen_sock_ = INVALID_SOCKET;
 			}
+
+
 		}
 		if (vpn_thread.joinable()) vpn_thread.join();
+
 	}
 
 	// Delete route
@@ -179,22 +182,25 @@ void VpnController::vpn_thread_func() {
 
         ComInit com;
         WsaInit wsa;
-        ModuleGuard wintun(LoadLibraryW(L"wintun.dll"));
     	std::cout << "[*] Loading Wintun driver...\n";
     	LoadWintun();
     	std::cout << "[✓] Wintun driver loaded\n";
 
         // Create adapter
-        GUID guid;
-        CHECK(CoCreateGuid(&guid) == S_OK, "CoCreateGuid failed");
-        std::wstring wname(adaptername.begin(), adaptername.end());
+    	GUID guid;
+    	CHECK(CoCreateGuid(&guid) == S_OK, "CoCreateGuid failed");
+
+    	std::wstring wname(adaptername.begin(), adaptername.end());
     	std::cout << "[*] Creating Wintun adapter: " << adaptername << "\n";
-    	auto adapter = WintunCreateAdapter(wname.c_str(), L"Wintun", &guid);
-    	if (!adapter) {
-    		DWORD err = GetLastError();
-    		throw std::runtime_error("WintunCreateAdapter failed, error code: " + std::to_string(err));
-    	}
+
+    	WINTUN_ADAPTER_HANDLE raw = WintunCreateAdapter(wname.c_str(), L"Wintun", &guid);
+    	CHECK(raw != nullptr, "WintunCreateAdapter failed");
+
+    	WintunAdapterGuard adapter(raw);
     	std::cout << "[✓] Wintun adapter created\n";
+
+    	// use `adapter.get()` as needed (e.g., WintunStartSession)
+
 
     	if (is_server) {
     		gateway = "10.10.100.2";
@@ -242,7 +248,7 @@ void VpnController::vpn_thread_func() {
 
 
     	std::cout << "[*] Starting Wintun session...\n";
-    	WintunSessionGuard session(WintunStartSession(adapter, 0x400000)); // 4MB ring
+    	WintunSessionGuard session(WintunStartSession(adapter.get(), 0x400000)); // 4MB ring
     	CHECK(session.get(), "WintunStartSession failed");
     	std::cout << "[✓] Wintun session started\n";
 

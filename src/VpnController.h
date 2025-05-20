@@ -56,6 +56,10 @@ private:
 	std::string public_ip;
 	std::string real_adapter;
 
+	WINTUN_ADAPTER_HANDLE wintun_adapter_ = nullptr;
+	WINTUN_SESSION_HANDLE wintun_session_ = nullptr;
+
+
 
 	SOCKET sock_;
 	SOCKET listen_sock_ = INVALID_SOCKET;
