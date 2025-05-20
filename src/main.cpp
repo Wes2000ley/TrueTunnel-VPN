@@ -259,7 +259,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
             static const char* mode_options[] = { "server", "client" };
             static int selected_mode = 0;
 
-            
+
             ImGui::Text("Mode:");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
@@ -437,22 +437,48 @@ ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 25.0f);
             ImGui::EndChild();
             ImGui::PopStyleColor();
 
+            // Label and tooltip
             ImGui::Text("Message:");
             ImGui::SameLine();
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Enter a message to send through the VPN tunnel.");
-            ImGui::InputText("##message", message_input, IM_ARRAYSIZE(message_input));
-            if (ImGui::Button("Send Message")) {
-                if (strlen(message_input) > 0) {
-                    if (g_vpn_controller && g_vpn_controller->is_running()) {
-                        g_vpn_controller->send_manual_message(message_input);
-                    }
 
-                    char formatted[256];
-                    snprintf(formatted, sizeof(formatted), "[You] %s\n", message_input);
-                    strcat_s(vpn_log, formatted);
-                    message_input[0] = '\0';
+            // Track whether we need to send
+            bool send_requested = false;
+
+            // InputText: returns true when Enter is pressed because of the flag
+            if (ImGui::InputText(
+                    "##message",
+                    message_input,
+                    IM_ARRAYSIZE(message_input),
+                    ImGuiInputTextFlags_EnterReturnsTrue
+                ))
+            {
+                send_requested = true;
+            }
+
+            // Keep the button on the same line
+
+            if (ImGui::Button("Send Message"))
+            {
+                send_requested = true;
+            }
+
+            // Actual send logic
+            if (send_requested && strlen(message_input) > 0)
+            {
+                if (g_vpn_controller && g_vpn_controller->is_running())
+                {
+                    g_vpn_controller->send_manual_message(message_input);
                 }
+
+                // Append to log
+                char formatted[256];
+                snprintf(formatted, sizeof(formatted), "[You] %s\n", message_input);
+                strcat_s(vpn_log, formatted);
+
+                // Clear input
+                message_input[0] = '\0';
             }
 
             ImGui::End();
