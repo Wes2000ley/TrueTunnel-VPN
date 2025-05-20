@@ -7,14 +7,17 @@
 class ImGuiStyleManager final {
 public:
 	void ApplyCustomDarkTheme();
+
 	void LoadDefaultFont(float size = 18.0f);
-	void LoadFontFromPath(const std::string& path, float size = 18.0f);
+
+	void LoadFontFromPath(const std::string &path, float size = 18.0f);
 
 	ImVec4 GetClearColor() const;
 
 private:
-	void SetupStyle(ImGuiStyle& style);
-	void SetupColors(ImVec4* colors);
+	void SetupStyle(ImGuiStyle &style);
+
+	void SetupColors(ImVec4 *colors);
 
 	ImVec4 clear_color_ = ImVec4(0.07f, 0.07f, 0.10f, 1.00f);
 };

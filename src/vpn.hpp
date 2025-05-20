@@ -46,30 +46,37 @@ using termcolor::reset;
 #define CHECK(cond,msg)  do{ if(!(cond)) throw std::runtime_error(msg);}while(0)
 
 // ─── Wintun ABI typedefs ─────────────────────────────────────────────────────
-typedef struct WINTUN_ADAPTER_   *WINTUN_ADAPTER_HANDLE;
-typedef struct WINTUN_SESSION_   *WINTUN_SESSION_HANDLE;
+typedef struct WINTUN_ADAPTER_ *WINTUN_ADAPTER_HANDLE;
+typedef struct WINTUN_SESSION_ *WINTUN_SESSION_HANDLE;
 
-typedef WINTUN_ADAPTER_HANDLE    (WINAPI *WINTUN_CREATE_ADAPTER_FUNC)(PCWSTR, PCWSTR, const GUID *);
-typedef WINTUN_SESSION_HANDLE    (WINAPI *WINTUN_START_SESSION_FUNC)(WINTUN_ADAPTER_HANDLE, UINT32);
-typedef void                    (WINAPI *WINTUN_END_SESSION_FUNC)(WINTUN_SESSION_HANDLE);
-typedef void                    (WINAPI *WINTUN_CLOSE_ADAPTER_FUNC)(WINTUN_ADAPTER_HANDLE);
-typedef void *                  (WINAPI *WINTUN_ALLOCATE_SEND_PACKET_FUNC)(WINTUN_SESSION_HANDLE, UINT32);
-typedef BOOL                    (WINAPI *WINTUN_SEND_PACKET_FUNC)(WINTUN_SESSION_HANDLE, void *, UINT32);
-typedef void *                  (WINAPI *WINTUN_RECEIVE_PACKET_FUNC)(WINTUN_SESSION_HANDLE, UINT32 *);
-typedef void                    (WINAPI *WINTUN_RELEASE_RECEIVE_PACKET_FUNC)(WINTUN_SESSION_HANDLE, void *);
+typedef WINTUN_ADAPTER_HANDLE (WINAPI *WINTUN_CREATE_ADAPTER_FUNC)(PCWSTR, PCWSTR, const GUID *);
+
+typedef WINTUN_SESSION_HANDLE (WINAPI *WINTUN_START_SESSION_FUNC)(WINTUN_ADAPTER_HANDLE, UINT32);
+
+typedef void (WINAPI *WINTUN_END_SESSION_FUNC)(WINTUN_SESSION_HANDLE);
+
+typedef void (WINAPI *WINTUN_CLOSE_ADAPTER_FUNC)(WINTUN_ADAPTER_HANDLE);
+
+typedef void * (WINAPI *WINTUN_ALLOCATE_SEND_PACKET_FUNC)(WINTUN_SESSION_HANDLE, UINT32);
+
+typedef BOOL (WINAPI *WINTUN_SEND_PACKET_FUNC)(WINTUN_SESSION_HANDLE, void *, UINT32);
+
+typedef void * (WINAPI *WINTUN_RECEIVE_PACKET_FUNC)(WINTUN_SESSION_HANDLE, UINT32 *);
+
+typedef void (WINAPI *WINTUN_RELEASE_RECEIVE_PACKET_FUNC)(WINTUN_SESSION_HANDLE, void *);
 
 
 // ─── Inline globals ───────────────────────────────────────────────────────────
 // C++17 inline variables: exactly one definition, external linkage
-inline HMODULE                            hWintun                     = nullptr;
-inline WINTUN_CREATE_ADAPTER_FUNC         WintunCreateAdapter         = nullptr;
-inline WINTUN_START_SESSION_FUNC          WintunStartSession          = nullptr;
-inline WINTUN_END_SESSION_FUNC            WintunEndSession            = nullptr;
-inline WINTUN_CLOSE_ADAPTER_FUNC          WintunCloseAdapter          = nullptr;
-inline WINTUN_ALLOCATE_SEND_PACKET_FUNC   WintunAllocateSendPacket    = nullptr;
-inline WINTUN_SEND_PACKET_FUNC            WintunSendPacket            = nullptr;
-inline WINTUN_RECEIVE_PACKET_FUNC         WintunReceivePacket         = nullptr;
-inline WINTUN_RELEASE_RECEIVE_PACKET_FUNC WintunReleaseReceivePacket  = nullptr;
+inline HMODULE hWintun = nullptr;
+inline WINTUN_CREATE_ADAPTER_FUNC WintunCreateAdapter = nullptr;
+inline WINTUN_START_SESSION_FUNC WintunStartSession = nullptr;
+inline WINTUN_END_SESSION_FUNC WintunEndSession = nullptr;
+inline WINTUN_CLOSE_ADAPTER_FUNC WintunCloseAdapter = nullptr;
+inline WINTUN_ALLOCATE_SEND_PACKET_FUNC WintunAllocateSendPacket = nullptr;
+inline WINTUN_SEND_PACKET_FUNC WintunSendPacket = nullptr;
+inline WINTUN_RECEIVE_PACKET_FUNC WintunReceivePacket = nullptr;
+inline WINTUN_RELEASE_RECEIVE_PACKET_FUNC WintunReleaseReceivePacket = nullptr;
 
 // ─── Load entry points ────────────────────────────────────────────────────────
 void LoadWintun();
@@ -79,7 +86,7 @@ void LoadWintun();
 EVP_PKEY *generate_fips_rsa_key();
 
 X509 *generate_self_signed_cert(EVP_PKEY *pkey,
-                                       const char *common_name);
+                                const char *common_name);
 
 /* Build a TLS context that only offers FIPS-approved suites */
 SSL_CTX *make_ssl_ctx(bool is_server);
@@ -88,11 +95,12 @@ enum vpn_packet_type : uint8_t;
 
 
 //— Packet pumps
-void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool>& running);
+void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running);
 
-void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool>& running);
+void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running);
 
 void send_message(SSL *ssl, const std::string &msg);
+
 enum vpn_packet_type : uint8_t {
 	PACKET_TYPE_IP = 0x00,
 	PACKET_TYPE_MSG = 0x01
