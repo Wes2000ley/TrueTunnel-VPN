@@ -45,43 +45,46 @@ using termcolor::reset;
 // ─── pretty logging helpers ───────────────────────────────────
 namespace util {
 	void logInfo(const std::string &s);
+
 	void logWarn(const std::string &s);
+
 	void logErr(const std::string &s);
 
 	bool looksLikeIp(const std::string &v);
 
 	void ask(const char *prompt, std::string &val,
-			 std::function<bool(const std::string &)> ok = nullptr);
+	         std::function<bool(const std::string &)> ok = nullptr);
 } // namespace
 
 bool is_running_as_admin();
 
 bool is_valid_input(const std::string &s);
 
-bool run_command_hidden(const std::string& command);
+bool run_command_hidden(const std::string &command);
 
 struct network_adapter_info {
 	std::string name;
 	std::string ip;
 };
-bool run_command_admin(const std::string& command);
+
+bool run_command_admin(const std::string &command);
 
 void AddICMPv4Rule(); // ✅ Declaration at global scope
 
-void SetStaticIPv4Address(const std::string& adapter_name,
-						  const std::string& ip_address,
-						  const std::string& subnet_mask);
+void SetStaticIPv4Address(const std::string &adapter_name,
+                          const std::string &ip_address,
+                          const std::string &subnet_mask);
 
 void populate_real_adapters();
 
 inline std::vector<network_adapter_info> real_adapters_;
 inline std::vector<std::string> adapter_choices_;
-inline std::vector<const char*> adapter_labels_;
+inline std::vector<const char *> adapter_labels_;
 inline int current_adapter_idx_ = 0;
 
-std::string sanitize_shell_string(const std::string& input);
+std::string sanitize_shell_string(const std::string &input);
 
 
-std::string sanitize_ip(const std::string& ip);
+std::string sanitize_ip(const std::string &ip);
 
-std::string get_ipv4_for_adapter(const std::string& adapter_name);
+std::string get_ipv4_for_adapter(const std::string &adapter_name);

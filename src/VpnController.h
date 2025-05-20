@@ -11,13 +11,14 @@
 #include "vpn.hpp"
 
 
-
 class VpnController {
 public:
 	VpnController();
 
 	~VpnController();
+
 	void send_manual_message(const std::string &message);
+
 	bool start(const std::string &mode,
 	           const std::string &server_ip,
 	           int port,
@@ -60,13 +61,11 @@ private:
 	WINTUN_SESSION_HANDLE wintun_session_ = nullptr;
 
 
-
 	SOCKET sock_;
 	SOCKET listen_sock_ = INVALID_SOCKET;
 	using SSLPtr = std::unique_ptr<SSL, decltype(&SSL_free)>;
 	SSLPtr ssl_{nullptr, SSL_free};
 	WINTUN_ADAPTER_HANDLE adapter_handle_ = nullptr;
-
 
 
 	std::function<void(const std::string &)> log_callback;
