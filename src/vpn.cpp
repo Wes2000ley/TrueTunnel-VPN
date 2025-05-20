@@ -46,36 +46,28 @@ using termcolor::reset;
 #define CHECK(cond,msg)  do{ if(!(cond)) throw std::runtime_error(msg);}while(0)
 
 void LoadWintun() {
-	hWintun = ::LoadLibraryW(L"wintun.dll");
-	CHECK(hWintun, "LoadLibrary(wintun.dll) failed");
+	static std::once_flag once;
+	std::call_once(once, []() {
+	  hWintun = ::LoadLibraryW(L"wintun.dll");
+	  CHECK(hWintun, "LoadLibrary(wintun.dll) failed");
 
-	WintunCreateAdapter = reinterpret_cast<WINTUN_CREATE_ADAPTER_FUNC>(
-		::GetProcAddress(hWintun, "WintunCreateAdapter"));
-	WintunStartSession = reinterpret_cast<WINTUN_START_SESSION_FUNC>(
-		::GetProcAddress(hWintun, "WintunStartSession"));
-	WintunEndSession = reinterpret_cast<WINTUN_END_SESSION_FUNC>(
-		::GetProcAddress(hWintun, "WintunEndSession"));
-	WintunCloseAdapter = reinterpret_cast<WINTUN_CLOSE_ADAPTER_FUNC>(
-		::GetProcAddress(hWintun, "WintunCloseAdapter"));
-	WintunAllocateSendPacket = reinterpret_cast<WINTUN_ALLOCATE_SEND_PACKET_FUNC>(
-		::GetProcAddress(hWintun, "WintunAllocateSendPacket"));
-	WintunSendPacket = reinterpret_cast<WINTUN_SEND_PACKET_FUNC>(
-		::GetProcAddress(hWintun, "WintunSendPacket"));
-	WintunReceivePacket = reinterpret_cast<WINTUN_RECEIVE_PACKET_FUNC>(
-		::GetProcAddress(hWintun, "WintunReceivePacket"));
-	WintunReleaseReceivePacket = reinterpret_cast<WINTUN_RELEASE_RECEIVE_PACKET_FUNC>(
-		::GetProcAddress(hWintun, "WintunReleaseReceivePacket"));
+	  auto load_fn = [](auto& fn, const char* name) {
+		fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(
+			::GetProcAddress(hWintun, name));
+		CHECK(fn, std::string("GetProcAddress failed: ") + name);
+	  };
 
-	CHECK(WintunCreateAdapter &&
-		  WintunStartSession &&
-		  WintunEndSession &&
-		  WintunCloseAdapter &&
-		  WintunAllocateSendPacket &&
-		  WintunSendPacket &&
-		  WintunReceivePacket &&
-		  WintunReleaseReceivePacket,
-		  "Failed to resolve one or more Wintun functions");
+	  load_fn(WintunCreateAdapter,        "WintunCreateAdapter");
+	  load_fn(WintunStartSession,         "WintunStartSession");
+	  load_fn(WintunEndSession,           "WintunEndSession");
+	  load_fn(WintunCloseAdapter,         "WintunCloseAdapter");
+	  load_fn(WintunAllocateSendPacket,   "WintunAllocateSendPacket");
+	  load_fn(WintunSendPacket,           "WintunSendPacket");
+	  load_fn(WintunReceivePacket,        "WintunReceivePacket");
+	  load_fn(WintunReleaseReceivePacket, "WintunReleaseReceivePacket");
+	});
 }
+
 
 
 // ─── FIPS–compliant key + certificate helpers ──────────────────────────

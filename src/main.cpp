@@ -464,34 +464,32 @@ ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 25.0f);
             if (ImGui::Button("Connect")) {
                 strcat_s(vpn_log, "[System] Connect button pressed\n");
 
-                if (g_vpn_controller) g_vpn_controller->stop();
+                // Stop and destroy previous controller if it exists
+                if (g_vpn_controller) {
+                    g_vpn_controller->stop();  // ✅ Waits for thread to exit
+                    g_vpn_controller.reset();  // ✅ Destroys the object safely
+                }
+
+                // Create a new VPN controller
                 g_vpn_controller = std::make_unique<VpnController>();
 
+                // Set logging
                 g_vpn_controller->set_log_callback([](const std::string& msg) {
-                    // Append log to ImGui buffer
-                    strncat_s(vpn_log, msg.c_str(), sizeof(vpn_log) - strlen(vpn_log) - 2);
-                    strncat_s(vpn_log, "\n", sizeof(vpn_log) - strlen(vpn_log) - 1);
+                  strncat_s(vpn_log, msg.c_str(), sizeof(vpn_log) - strlen(vpn_log) - 2);
+                  strncat_s(vpn_log, "\n", sizeof(vpn_log) - strlen(vpn_log) - 1);
                 });
 
-                std::string mode_str = mode;
+                // Start the connection with fresh params
+                bool success = g_vpn_controller->start(
+                    mode, server_ip, std::stoi(port), local_ip, gateway, password,
+                    adapter_name, subnet_mask, public_ip,
+                    (current_adapter_idx_ >= 0 && current_adapter_idx_ < static_cast<int>(real_adapters_.size()))
+                        ? real_adapters_[current_adapter_idx_].name
+                        : "Unknown");
 
-                // Get selected adapter name (safe fallback)
-                std::string real_adapter_str = (current_adapter_idx_ >= 0 && current_adapter_idx_ < static_cast<int>(real_adapters_.size()))
-                    ? real_adapters_[current_adapter_idx_].name
-                    : "Unknown";
-
-                g_vpn_controller->start(
-                    mode_str,
-                    server_ip,
-                    std::stoi(port),
-                    local_ip,
-                    gateway,
-                    password,
-                    adapter_name,
-                    subnet_mask,
-                    public_ip,
-                    real_adapter_str
-                );
+                if (!success) {
+                    strcat_s(vpn_log, "[!] Failed to start VPN controller\n");
+                }
             }
 
     ImGui::Separator();
