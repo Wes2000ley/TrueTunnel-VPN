@@ -386,3 +386,28 @@ std::string sanitize_ip(const std::string& ip) {
 	}
 	return ip;
 }
+
+std::string get_ipv4_for_adapter(const std::string& adapter_name) {
+	ULONG size = 0;
+	GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, nullptr, &size);
+
+	std::vector<BYTE> buffer(size);
+	IP_ADAPTER_ADDRESSES* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+
+	if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, adapters, &size) != NO_ERROR)
+		return "";
+
+	for (IP_ADAPTER_ADDRESSES* adapter = adapters; adapter; adapter = adapter->Next) {
+		std::wstring wname(adapter->FriendlyName);
+		std::string friendly = std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(wname);
+		if (friendly != adapter_name) continue;
+
+		for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
+			SOCKADDR_IN* sa_in = reinterpret_cast<SOCKADDR_IN*>(unicast->Address.lpSockaddr);
+			char ip_str[INET_ADDRSTRLEN];
+			inet_ntop(AF_INET, &(sa_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+			return std::string(ip_str);
+		}
+	}
+	return "";
+}

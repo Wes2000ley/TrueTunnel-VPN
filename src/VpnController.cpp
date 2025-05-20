@@ -291,14 +291,39 @@ void VpnController::vpn_thread_func() {
 	        sockaddr_in addr{};
 	        addr.sin_family = AF_INET;
 	        addr.sin_port = htons(port);
-        	inet_pton(AF_INET, public_ip.c_str(), &addr.sin_addr);
+        	if (is_server) {
+        		std::string bind_ip = get_ipv4_for_adapter(real_adapter);
+        		if (bind_ip.empty()) {
+        			throw std::runtime_error("Could not find IP for adapter: " + real_adapter);
+        		}
+        		inet_pton(AF_INET, bind_ip.c_str(), &addr.sin_addr);
+
+        	} else {
+        		std::string local_bind_ip = get_ipv4_for_adapter(real_adapter);
+        		if (local_bind_ip.empty()) {
+        			throw std::runtime_error("Could not find IP for adapter: " + real_adapter);
+        		}
+
+        		sockaddr_in bind_addr{};
+        		bind_addr.sin_family = AF_INET;
+        		bind_addr.sin_port = 0;  // 0 = let OS choose ephemeral port
+        		inet_pton(AF_INET, local_bind_ip.c_str(), &bind_addr.sin_addr);
+
+        		// ✅ Bind to the chosen adapter's IP
+        		CHECK(bind(sock.get(), (sockaddr*)&bind_addr, sizeof(bind_addr)) != SOCKET_ERROR, "client bind failed");
+
+        		// THEN connect to server
+        		inet_pton(AF_INET, public_ip.c_str(), &addr.sin_addr);
+        	}
 	        listen_sock_ = sock.get();
 
-	            	            bool success = run_command_admin(
+        run_command_admin(
     "Get-NetConnectionProfile | "
     "Where-Object {$_.InterfaceAlias -eq '" + adaptername + "'} | "
     "Set-NetConnectionProfile -NetworkCategory Private"
 );
+
+
 
         	AddICMPv4Rule();
 
