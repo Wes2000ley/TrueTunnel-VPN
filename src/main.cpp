@@ -10,6 +10,7 @@
 #include <tchar.h>
 #include "VpnController.h"
 #include "utils.hpp"
+#include "ImGuiStyleManager.h"
 #define IDI_VPN_ICON 101
 
 
@@ -104,79 +105,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
     //io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;     // FIXME-DPI: Experimental. THIS CURRENTLY DOESN'T WORK AS EXPECTED. DON'T USE IN USER APP!
     //io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports; // FIXME-DPI: Experimental.
 
-    // Setup Dear ImGui style
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 0.0f;
-    style.FrameRounding = 3.0f;
-    style.ScrollbarRounding = 2.0f;
-    style.FramePadding = ImVec2(8, 6);
-    style.ItemSpacing = ImVec2(10, 8);
-    style.WindowPadding = ImVec2(16, 12);
-    style.PopupRounding = 5.00f;
-
-
-    
-
-    ImVec4 *colors = ImGui::GetStyle().Colors;
-        colors[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-        colors[ImGuiCol_TextDisabled] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-        colors[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.06f, 0.06f, 0.94f);
-        colors[ImGuiCol_ChildBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-        colors[ImGuiCol_PopupBg] = ImVec4(0.08f, 0.08f, 0.08f, 0.94f);
-        colors[ImGuiCol_Border] = ImVec4(0.43f, 0.43f, 0.50f, 0.50f);
-        colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-        colors[ImGuiCol_FrameBg] = ImVec4(0.19f, 0.19f, 0.19f, 0.54f);
-        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.60f, 0.26f, 0.98f, 0.40f);
-        colors[ImGuiCol_FrameBgActive] = ImVec4(0.60f, 0.26f, 0.98f, 0.67f);
-        colors[ImGuiCol_TitleBg] = ImVec4(0.04f, 0.04f, 0.04f, 1.00f);
-        colors[ImGuiCol_TitleBgActive] = ImVec4(0.31f, 0.16f, 0.48f, 1.00f);
-        colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.00f, 0.00f, 0.00f, 0.51f);
-        colors[ImGuiCol_MenuBarBg] = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
-        colors[ImGuiCol_ScrollbarBg] = ImVec4(0.02f, 0.02f, 0.02f, 0.53f);
-        colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.31f, 0.31f, 0.31f, 1.00f);
-        colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.41f, 0.41f, 0.41f, 1.00f);
-        colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.51f, 0.51f, 0.51f, 1.00f);
-        colors[ImGuiCol_CheckMark] = ImVec4(0.60f, 0.26f, 0.98f, 1.00f);
-        colors[ImGuiCol_SliderGrab] = ImVec4(0.54f, 0.24f, 0.88f, 1.00f);
-        colors[ImGuiCol_SliderGrabActive] = ImVec4(0.60f, 0.26f, 0.98f, 1.00f);
-        colors[ImGuiCol_Button] = ImVec4(0.60f, 0.26f, 0.98f, 0.40f);
-        colors[ImGuiCol_ButtonHovered] = ImVec4(0.60f, 0.26f, 0.98f, 1.00f);
-        colors[ImGuiCol_ButtonActive] = ImVec4(0.49f, 0.06f, 0.98f, 1.00f);
-        colors[ImGuiCol_Header] = ImVec4(0.60f, 0.26f, 0.98f, 0.31f);
-        colors[ImGuiCol_HeaderHovered] = ImVec4(0.60f, 0.26f, 0.98f, 0.80f);
-        colors[ImGuiCol_HeaderActive] = ImVec4(0.60f, 0.26f, 0.98f, 1.00f);
-        colors[ImGuiCol_Separator] = ImVec4(0.43f, 0.43f, 0.50f, 0.50f);
-        colors[ImGuiCol_SeparatorHovered] = ImVec4(0.41f, 0.10f, 0.75f, 0.78f);
-        colors[ImGuiCol_SeparatorActive] = ImVec4(0.41f, 0.10f, 0.75f, 1.00f);
-        colors[ImGuiCol_ResizeGrip] = ImVec4(0.60f, 0.26f, 0.98f, 0.20f);
-        colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.60f, 0.26f, 0.98f, 0.67f);
-        colors[ImGuiCol_ResizeGripActive] = ImVec4(0.60f, 0.26f, 0.98f, 0.95f);
-        colors[ImGuiCol_TabHovered] = ImVec4(0.60f, 0.26f, 0.98f, 0.80f);
-        colors[ImGuiCol_Tab] = ImVec4(0.37f, 0.18f, 0.58f, 0.86f);
-        colors[ImGuiCol_TabSelected] = ImVec4(0.42f, 0.20f, 0.68f, 1.00f);
-        colors[ImGuiCol_TabSelectedOverline] = ImVec4(0.60f, 0.26f, 0.98f, 1.00f);
-        colors[ImGuiCol_TabDimmed] = ImVec4(0.11f, 0.07f, 0.15f, 0.97f);
-        colors[ImGuiCol_TabDimmedSelected] = ImVec4(0.27f, 0.14f, 0.42f, 1.00f);
-        colors[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.50f, 0.50f, 0.50f, 0.00f);
-        colors[ImGuiCol_DockingPreview] = ImVec4(0.60f, 0.26f, 0.98f, 0.70f);
-        colors[ImGuiCol_DockingEmptyBg] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-        colors[ImGuiCol_PlotLines] = ImVec4(0.61f, 0.61f, 0.61f, 1.00f);
-        colors[ImGuiCol_PlotLinesHovered] = ImVec4(1.00f, 0.43f, 0.35f, 1.00f);
-        colors[ImGuiCol_PlotHistogram] = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
-        colors[ImGuiCol_PlotHistogramHovered] = ImVec4(1.00f, 0.60f, 0.00f, 1.00f);
-        colors[ImGuiCol_TableHeaderBg] = ImVec4(0.19f, 0.19f, 0.20f, 1.00f);
-        colors[ImGuiCol_TableBorderStrong] = ImVec4(0.31f, 0.31f, 0.35f, 1.00f);
-        colors[ImGuiCol_TableBorderLight] = ImVec4(0.23f, 0.23f, 0.25f, 1.00f);
-        colors[ImGuiCol_TableRowBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-        colors[ImGuiCol_TableRowBgAlt] = ImVec4(1.00f, 1.00f, 1.00f, 0.06f);
-        colors[ImGuiCol_TextLink] = ImVec4(0.60f, 0.26f, 0.98f, 1.00f);
-        colors[ImGuiCol_TextSelectedBg] = ImVec4(0.53f, 0.53f, 0.53f, 0.45f);
-        colors[ImGuiCol_DragDropTarget] = ImVec4(1.00f, 1.00f, 0.00f, 0.90f);
-        colors[ImGuiCol_NavCursor] = ImVec4(0.60f, 0.26f, 0.98f, 1.00f);
-        colors[ImGuiCol_NavWindowingHighlight] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
-        colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
-        colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
-    ImVec4 clear_color = ImVec4(0.07f, 0.07f, 0.10f, 1.00f);
 
 
 
@@ -184,11 +112,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 
     // When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
    // ImGuiStyle& style = ImGui::GetStyle();
-    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-    {
-        style.WindowRounding = 0.0f;
-        style.Colors[ImGuiCol_WindowBg].w = 1.0f;
-    }
 
     // Setup Platform/Renderer backends
     ImGui_ImplWin32_Init(hwnd);
@@ -210,20 +133,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
     //ImFont* font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\ArialUni.ttf", 18.0f, nullptr, io.Fonts->GetGlyphRangesJapanese());
     //IM_ASSERT(font != nullptr);
 
-
-    ImFontConfig font_cfg;
-    font_cfg.OversampleH = 3;
-    font_cfg.OversampleV = 3;
-    font_cfg.PixelSnapH = false;
-
-    ImFont* customFont = io.Fonts->AddFontFromFileTTF(
-        "C:/Windows/Fonts/segoeui.ttf", 19.0f, &font_cfg, io.Fonts->GetGlyphRangesDefault());
-
-    IM_ASSERT(customFont != nullptr);
-    io.FontDefault = customFont;
-    #define IMGUI_ENABLE_FREETYPE
-    ImGui::GetIO().Fonts->Build(); // Call after fonts are loaded
-
+    ImGuiStyleManager style_mgr;
+    style_mgr.ApplyCustomDarkTheme();
+    style_mgr.LoadFontFromPath("C:/Windows/Fonts/segoeui.ttf", 19.0f);
+    ImVec4 clear_color = style_mgr.GetClearColor();
 
     // Main loop
     bool done = false;
@@ -477,6 +390,7 @@ ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 25.0f);
                 g_vpn_controller->set_log_callback([](const std::string& msg) {
                   strncat_s(vpn_log, msg.c_str(), sizeof(vpn_log) - strlen(vpn_log) - 2);
                   strncat_s(vpn_log, "\n", sizeof(vpn_log) - strlen(vpn_log) - 1);
+                   bool log_dirty = true;
                 });
 
                 // Start the connection with fresh params
@@ -491,22 +405,39 @@ ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 25.0f);
                     strcat_s(vpn_log, "[!] Failed to start VPN controller\n");
                 }
             }
+            ImGui::Separator();
+            ImGui::Text("Connection Log");
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) {
+                vpn_log[0] = '\0';
+            }
+            ImGui::SameLine();
+            static bool auto_scroll = true;
+            ImGui::Checkbox("Auto-scroll", &auto_scroll);
 
-    ImGui::Separator();
-ImGui::Text("Log:");
-            // Reserve space for log box height dynamically
             float available_height = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f;
-            colors[ImGuiCol_Text] = ImVec4(0.69f, 0.51f, 0.89f, 1.00f);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.69f, 0.51f, 0.89f, 1.00f));
+
+            // Track previous content size
+            static int last_log_length = 0;
+            int current_log_length = static_cast<int>(strlen(vpn_log));
+
+            // Begin log display
             ImGui::BeginChild("log_box", ImVec2(0, available_height), true,
                               ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
-            ImGui::TextUnformatted(vpn_log);
-            bool should_scroll = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 10.0f;
-            if (should_scroll)
-                ImGui::SetScrollHereY(1.0f);
-            ImGui::EndChild();
 
-            colors[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-ImGui::Text("Message:");
+            ImGui::TextUnformatted(vpn_log);
+
+            // Scroll to bottom only when new content is added
+            if (auto_scroll && current_log_length > last_log_length) {
+                ImGui::SetScrollHereY(1.0f);
+                last_log_length = current_log_length;
+            }
+
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+
+            ImGui::Text("Message:");
             ImGui::SameLine();
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Enter a message to send through the VPN tunnel.");
@@ -524,13 +455,10 @@ ImGui::Text("Message:");
                 }
             }
 
-    ImGui::End();
+            ImGui::End();
             ImGui::PopStyleVar(3);
             ImGui::PopStyleVar(3); // Restore padding
-}
-
-
-
+        }
 
 
         // Rendering

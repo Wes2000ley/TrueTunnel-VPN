@@ -33,6 +33,8 @@ add_executable(vpn
         src/VpnController.cpp
         src/raii.hpp
         src/main.cpp
+        src/ImGuiStyleManager.cpp
+        src/ImGuiStyleManager.h
 )
 
 target_sources(vpn PRIVATE
