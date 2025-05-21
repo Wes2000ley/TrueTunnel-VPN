@@ -385,14 +385,12 @@ void VpnController::vpn_thread_func() {
 
 			// 5. Create ssl_CTX
 			using SslCtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
-			SslCtxPtr ctx((make_ssl_ctx(is_server).get()), SSL_CTX_free);
-
+			SslCtxPtr ctx = make_ssl_ctx(is_server); // ✅ FIXED: take ownership properly
 
 			// 6. Create ssl and bind to socket
 			SSLPtr ssl(SSL_new(ctx.get()), SSL_free);
 			CHECK(ssl != nullptr, "ssl_new failed");
 			CHECK(SSL_set_fd(ssl.get(), static_cast<int>(sock.get())) == 1, "ssl_set_fd failed");
-
 
 			// 7. Perform TLS handshake
 			if (is_server) {
@@ -400,6 +398,7 @@ void VpnController::vpn_thread_func() {
 			} else {
 				CHECK(SSL_connect(ssl.get()) > 0, "ssl_connect failed");
 			}
+
 
 			std::cout << "✅ TLS handshake done\n";
 			temp_sock = sock.release(); // ✅ Prevent SocketGuard from closing it
