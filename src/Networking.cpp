@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
-#include "utils.hpp"
+#include "Networking.h"
+
 
 #include <codecvt>
 #include <winsock2.h>
@@ -10,7 +11,7 @@
 #include <netioapi.h>
 #include "vpn.hpp"
 #include <shellapi.h>
-#include "Networking.h"
+#include "utils.hpp"
 #pragma comment(lib, "Shell32.lib")
 
 
@@ -152,6 +153,10 @@ void SetStaticIPv4Address(const std::string &adapter_name,
 	row.InterfaceLuid = luid;
 	row.Address.si_family = AF_INET;
 	inet_pton(AF_INET, ip_address.c_str(), &row.Address.Ipv4.sin_addr);
+	if (inet_pton(AF_INET, ip_address.c_str(), &row.Address.Ipv4.sin_addr) != 1) {
+		throw std::runtime_error("Invalid IP address: " + ip_address);
+	}
+
 
 	// Convert subnet mask to prefix length
 	IN_ADDR addr {};
@@ -180,54 +185,73 @@ void SetStaticIPv4Address(const std::string &adapter_name,
 	}
 }
 
+template<typename T>
+struct ComReleaser {
+	void operator()(T* ptr) const {
+		if (ptr) ptr->Release();
+	}
+};
+
+using ComPtrFwRule   = std::unique_ptr<INetFwRule,   ComReleaser<INetFwRule>>;
+using ComPtrFwPolicy = std::unique_ptr<INetFwPolicy2, ComReleaser<INetFwPolicy2>>;
+using ComPtrFwRules  = std::unique_ptr<INetFwRules,  ComReleaser<INetFwRules>>;
+
 void AddICMPv4Rule() {
-	INetFwPolicy2 *firewall_policy = nullptr;
-	INetFwRule *rule = nullptr;
-	INetFwRules *rules = nullptr;
+	// Create firewall policy
+	INetFwPolicy2* raw_policy = nullptr;
+	HRESULT hr = CoCreateInstance(__uuidof(NetFwPolicy2), nullptr, CLSCTX_INPROC_SERVER,
+								  IID_PPV_ARGS(&raw_policy));
+	if (FAILED(hr)) throw std::runtime_error("Failed to create INetFwPolicy2");
 
-	try {
-		HRESULT hr = CoCreateInstance(__uuidof(NetFwPolicy2), nullptr, CLSCTX_INPROC_SERVER,
-									  IID_PPV_ARGS(&firewall_policy));
-		if (FAILED(hr)) throw std::runtime_error("Failed to create INetFwPolicy2");
+	ComPtrFwPolicy firewall_policy(raw_policy);  // RAII takes over
 
-		hr = firewall_policy->get_Rules(&rules);
-		if (FAILED(hr)) throw std::runtime_error("Failed to get rules interface");
+	// Get rules interface
+	INetFwRules* raw_rules = nullptr;
+	hr = firewall_policy->get_Rules(&raw_rules);
+	if (FAILED(hr)) throw std::runtime_error("Failed to get INetFwRules");
 
-		BSTR rule_name = SysAllocString(L"Allow ICMPv4-In");
-		hr = rules->Item(rule_name, &rule);
-		if (SUCCEEDED(hr)) {
-			SysFreeString(rule_name);
-			SafeRelease(rule);
-			SafeRelease(rules);
-			SafeRelease(firewall_policy);
-			return;
-		}
-		SysFreeString(rule_name);
+	ComPtrFwRules rules(raw_rules);
 
-		hr = CoCreateInstance(__uuidof(NetFwRule), nullptr, CLSCTX_INPROC_SERVER,
-							  IID_PPV_ARGS(&rule));
-		if (FAILED(hr)) throw std::runtime_error("Failed to create INetFwRule");
+	// Check if the rule exists
+	BSTR existing_name = SysAllocString(L"Allow ICMPv4-In");
+	INetFwRule* existing = nullptr;
+	hr = rules->Item(existing_name, &existing);
+	SysFreeString(existing_name);
 
-		rule->put_Name(SysAllocString(L"Allow ICMPv4-In-True_tunnel_VPN"));
-		rule->put_Protocol(1); // ICMP
-		rule->put_IcmpTypesAndCodes(SysAllocString(L"8:*"));
-		rule->put_Direction(NET_FW_RULE_DIR_IN);
-		rule->put_Action(NET_FW_ACTION_ALLOW);
-		rule->put_Enabled(VARIANT_TRUE);
-
-		hr = rules->Add(rule);
-		if (FAILED(hr)) throw std::runtime_error("Failed to add firewall rule");
-	} catch (...) {
-		SafeRelease(rules);
-		SafeRelease(rule);
-		SafeRelease(firewall_policy);
-		throw;
+	if (SUCCEEDED(hr)) {
+		existing->Release();  // We don't need it
+		return;
 	}
 
-	SafeRelease(rules);
-	SafeRelease(rule);
-	SafeRelease(firewall_policy);
+	// Create new rule
+	INetFwRule* raw_rule = nullptr;
+	hr = CoCreateInstance(__uuidof(NetFwRule), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&raw_rule));
+	if (FAILED(hr)) throw std::runtime_error("Failed to create INetFwRule");
+
+	ComPtrFwRule rule(raw_rule);
+
+	BSTR rule_name = SysAllocString(L"Allow ICMPv4-In-True_tunnel_VPN");
+	BSTR icmp_types = SysAllocString(L"8:*");
+	if (!rule_name || !icmp_types) {
+		SysFreeString(rule_name);
+		SysFreeString(icmp_types);
+		throw std::bad_alloc();
+	}
+
+	rule->put_Name(rule_name);
+	rule->put_Protocol(1); // ICMP
+	rule->put_IcmpTypesAndCodes(icmp_types);
+	rule->put_Direction(NET_FW_RULE_DIR_IN);
+	rule->put_Action(NET_FW_ACTION_ALLOW);
+	rule->put_Enabled(VARIANT_TRUE);
+
+	SysFreeString(rule_name);
+	SysFreeString(icmp_types);
+
+	hr = rules->Add(rule.get());
+	if (FAILED(hr)) throw std::runtime_error("Failed to add firewall rule");
 }
+
 
 std::vector<network_adapter_info> list_real_network_adapters() {
 	std::vector<network_adapter_info> adapters;
