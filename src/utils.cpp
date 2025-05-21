@@ -103,52 +103,87 @@ bool is_valid_input(const std::string &s) {
 	});
 }
 
-bool run_command_hidden(const std::string &command) {
-	STARTUPINFOW startup_info = {sizeof(startup_info)};
+class HandleGuard {
+public:
+	explicit HandleGuard(HANDLE h = nullptr) noexcept : handle_(h) {}
+
+	~HandleGuard() {
+		if (handle_ && handle_ != INVALID_HANDLE_VALUE) {
+			CloseHandle(handle_);
+		}
+	}
+
+	HandleGuard(HandleGuard&& other) noexcept : handle_(other.handle_) {
+		other.handle_ = nullptr;
+	}
+
+	HandleGuard& operator=(HandleGuard&& other) noexcept {
+		if (this != &other) {
+			if (handle_ && handle_ != INVALID_HANDLE_VALUE) {
+				CloseHandle(handle_);
+			}
+			handle_ = other.handle_;
+			other.handle_ = nullptr;
+		}
+		return *this;
+	}
+
+	[[nodiscard]] HANDLE get() const noexcept { return handle_; }
+	[[nodiscard]] explicit operator bool() const noexcept { return handle_ && handle_ != INVALID_HANDLE_VALUE; }
+
+	HandleGuard(const HandleGuard&) = delete;
+	HandleGuard& operator=(const HandleGuard&) = delete;
+
+private:
+	HANDLE handle_;
+};
+
+
+
+bool run_command_hidden(const std::string& command) {
+	STARTUPINFOW startup_info = { sizeof(startup_info) };
 	startup_info.dwFlags = STARTF_USESHOWWINDOW;
 	startup_info.wShowWindow = SW_HIDE;
 
-	PROCESS_INFORMATION process_info;
+	PROCESS_INFORMATION process_info{};
 
-	// Convert command to wide string
 	std::wstring wide_command(command.begin(), command.end());
-
-	// Create writable buffer for CreateProcessW
 	std::vector<wchar_t> command_buffer(wide_command.begin(), wide_command.end());
 	command_buffer.push_back(L'\0');
 
 	BOOL success = CreateProcessW(
-		nullptr, // No module name (use command line)
-		command_buffer.data(), // Command line
-		nullptr, // Process handle not inheritable
-		nullptr, // Thread handle not inheritable
-		FALSE, // Do not inherit handles
-		CREATE_NO_WINDOW, // Do not create a window
-		nullptr, // Use parent's environment block
-		nullptr, // Use parent's starting directory
-		&startup_info, // Pointer to STARTUPINFO
-		&process_info // Pointer to PROCESS_INFORMATION
+		nullptr,
+		command_buffer.data(),
+		nullptr,
+		nullptr,
+		FALSE,
+		CREATE_NO_WINDOW,
+		nullptr,
+		nullptr,
+		&startup_info,
+		&process_info
 	);
 
-	if (success) {
-		WaitForSingleObject(process_info.hProcess, INFINITE);
-
-		DWORD exit_code = 0;
-		GetExitCodeProcess(process_info.hProcess, &exit_code);
-
-		CloseHandle(process_info.hProcess);
-		CloseHandle(process_info.hThread);
-
-		return (exit_code == 0);
+	if (!success) {
+		return false;
 	}
 
-	return false;
+	HandleGuard process_handle(process_info.hProcess);
+	HandleGuard thread_handle(process_info.hThread);
+
+	WaitForSingleObject(process_handle.get(), INFINITE);
+
+	DWORD exit_code = 0;
+	GetExitCodeProcess(process_handle.get(), &exit_code);
+
+	return (exit_code == 0);
 }
 
-bool run_command_admin(const std::string &command) {
+
+bool run_command_admin(const std::string& command) {
 	std::wstring wcmd = L"-Command \"" + std::wstring(command.begin(), command.end()) + L"\"";
 
-	SHELLEXECUTEINFOW sei = {sizeof(sei)};
+	SHELLEXECUTEINFOW sei = { sizeof(sei) };
 	sei.lpVerb = L"runas";
 	sei.lpFile = L"powershell.exe";
 	sei.lpParameters = wcmd.c_str();
@@ -161,13 +196,15 @@ bool run_command_admin(const std::string &command) {
 		return false;
 	}
 
-	WaitForSingleObject(sei.hProcess, INFINITE);
+	HandleGuard process_handle(sei.hProcess);
+	WaitForSingleObject(process_handle.get(), INFINITE);
+
 	DWORD exit_code = 0;
-	GetExitCodeProcess(sei.hProcess, &exit_code);
-	CloseHandle(sei.hProcess);
+	GetExitCodeProcess(process_handle.get(), &exit_code);
 
 	return (exit_code == 0);
 }
+
 
 
 
@@ -212,10 +249,11 @@ ULONG convert_mask_to_prefix(const std::string& subnet_mask) {
 	ULONG mask = ntohl(addr.S_un.S_addr);
 	ULONG prefix_length = 0;
 
-	while (mask & 0x80000000) {
-		++prefix_length;
+	const int max_bits = 32;
+	for (; mask & 0x80000000 && prefix_length < max_bits; ++prefix_length) {
 		mask <<= 1;
 	}
+
 
 	return prefix_length;
 }
