@@ -4,6 +4,7 @@
 #include "redirect_stream.hpp"
 #include "raii.hpp"
 #include "Networking.h"
+#include "HmacAuthenticator.h"
 
 
 #include <iostream>
@@ -418,64 +419,15 @@ std::lock_guard<std::mutex> lock(ssl_io_mutex);
 		}
 
 
-		constexpr size_t NONCE_SIZE = 16;
-		constexpr size_t HMAC_DATA_SIZE = 32;
-		constexpr size_t MAX_HMAC_SIZE = EVP_MAX_MD_SIZE;
-		constexpr size_t MAX_PASSWORD_SIZE = 128;
-
-		// 1) Generate our nonce - use secure memory
-		OpenSSLSecurePtr<unsigned char> my_nonce(NONCE_SIZE);
-		OpenSSLSecurePtr<unsigned char> peer_nonce(NONCE_SIZE);
-		CHECK(my_nonce && peer_nonce, "Secure malloc failed");
-		CHECK(RAND_bytes(my_nonce.get(), NONCE_SIZE) == 1, "RAND_bytes failed");
-
-		// 2) Exchange nonces
-		if (is_server) {
-			SSL_read(ssl_.get(), peer_nonce.get(), NONCE_SIZE); // client first
-			SSL_write(ssl_.get(), my_nonce.get(), NONCE_SIZE); // then server
-		} else {
-			SSL_write(ssl_.get(), my_nonce.get(), NONCE_SIZE); // client first
-			SSL_read(ssl_.get(), peer_nonce.get(), NONCE_SIZE); // then server
+		HmacAuthenticator auth(ssl_.get(), password, is_server);
+		if (!auth.succeeded()) {
+			std::cerr << "[!] Authentication failed. Terminating.\n";
+			std::this_thread::sleep_for(std::chrono::seconds(5)); // Let the user see the message
+			cleanup_ssl_and_socket();
+			std::exit(EXIT_FAILURE);
 		}
 
-		// 3) Build the data buffer (client||server) in secure memory
-		OpenSSLSecurePtr<unsigned char> data(HMAC_DATA_SIZE);
-		CHECK(data, "Secure malloc failed");
-		if (is_server) {
-			memcpy(data.get(), peer_nonce.get(), NONCE_SIZE);
-			memcpy(data.get() + NONCE_SIZE, my_nonce.get(), NONCE_SIZE);
-		} else {
-			memcpy(data.get(), my_nonce.get(), NONCE_SIZE);
-			memcpy(data.get() + NONCE_SIZE, peer_nonce.get(), NONCE_SIZE);
-		}
-		// 4) Compute the HMAC-SHA256 over that buffer using password
-		OpenSSLSecurePtr<unsigned char> my_hmac(MAX_HMAC_SIZE);
-		CHECK(my_hmac, "Secure malloc failed");
 
-		HmacCtx hmac(EVP_sha256(),
-					 reinterpret_cast<const unsigned char*>(password.data()),
-					 password.size());
-
-		std::vector<unsigned char> mac_result = hmac.compute(data.get(), HMAC_DATA_SIZE);
-		CHECK(mac_result.size() <= MAX_HMAC_SIZE, "HMAC overflow");
-
-		std::memcpy(my_hmac.get(), mac_result.data(), mac_result.size());
-		unsigned int hlen = static_cast<unsigned int>(mac_result.size());
-
-		// 5) Exchange HMACs
-		SSL_write(ssl_.get(), my_hmac.get(), hlen);
-
-		OpenSSLSecurePtr<unsigned char> peer_hmac(MAX_HMAC_SIZE);
-		CHECK(peer_hmac, "Secure malloc failed");
-
-		SSL_read(ssl_.get(), peer_hmac.get(), hlen);
-
-		// 6) Compare in constant time
-		int result = CRYPTO_memcmp(my_hmac.get(), peer_hmac.get(), hlen);
-
-		if (result != 0) {
-			throw std::runtime_error("Post-handshake HMAC verification failed");
-		}
 
 		// Log cipher & TLS version
 		const char *version = SSL_get_version(ssl_.get());
@@ -483,44 +435,37 @@ std::lock_guard<std::mutex> lock(ssl_io_mutex);
 		std::cout << "[🔒] TLS version: " << version
 				<< ", cipher: " << cipher << "\n\n";
 
-		// Shared‐secret check
-		if (is_server) {
-			// server reads
-			char pwbuf[MAX_PASSWORD_SIZE] = {0};
-			int pwlen = SSL_read(ssl_.get(), pwbuf, sizeof(pwbuf) - 1);
-			CHECK(pwlen > 0, "ssl_read failed");
-			if (password != std::string(pwbuf, pwlen)) {
-				std::cerr << "[!] Authentication failed\n";
-				cleanup_ssl_and_socket();
-				return;
-			}
 
-			std::cout << "[✔] Client authenticated\n\n";
-		} else {
-			// client writes
-			CHECK(SSL_write(ssl_.get(), password.c_str(),
-				      (int)password.size()) > 0, "Failed to send password");
-			std::cout << "[✔] Password sent\n\n";
-		}
-
-		std::cout << "\nType your message and press send.\nType /quit to exit.\n\n";
-
+		std::cout << "\nType your message and press send.\n"<<std::endl;
 
 		std::thread message_input_thread([this]() {
-			std::string input;
-			while (running.load()) {
-				if (!std::getline(std::cin, input)) break;
-				if (input == "/quit") {
-					send_manual_message("/quit");
-					running = false;
-					break;
-				}
-				if (!input.empty()) {
-					send_manual_message(input);
-					std::cout << "[You] " << input << "\n";
-				}
-			}
-		});
+	std::string input;
+	while (running.load()) {
+		if (!std::getline(std::cin, input)) break;
+
+		// Remove trailing CRLF or whitespace
+		input.erase(std::remove_if(input.begin(), input.end(), [](char c) {
+			return c == '\r' || c == '\n' || std::isspace(static_cast<unsigned char>(c));
+		}), input.end());
+
+		std::cout << "[Debug] Processed input = '" << input << "'\n";
+
+		if (input == "/quit") {
+			send_manual_message("/quit");
+			std::cout << "[!] Disconnect requested. Shutting down cleanly...\n";
+			std::this_thread::sleep_for(std::chrono::seconds(2));
+			stop();  // Graceful cleanup
+			std::exit(EXIT_SUCCESS);  // Terminate
+		}
+
+		if (!input.empty()) {
+			send_manual_message(input);
+			std::cout << "[You] " << input << "\n";
+		}
+	}
+});
+
+
 
 		SSL *raw_ssl = ssl_.get();
 		WINTUN_SESSION_HANDLE raw_session = session.get();

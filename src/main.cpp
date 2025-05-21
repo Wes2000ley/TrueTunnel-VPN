@@ -367,6 +367,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			if (ImGui::Button("Connect")) {
 				strcat_s(vpn_log, "[System] Connect button pressed\n");
 
+
 				// Stop and destroy previous controller if it exists
 				if (g_vpn_controller) {
 					g_vpn_controller->stop(); // ✅ Waits for thread to exit
@@ -407,6 +408,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 					strcat_s(vpn_log, "[!] Failed to start VPN controller\n");
 				}
 			}
+			ImGui::SameLine();
+			if (ImGui::Button("Disconnect")) {
+				ImGui::OpenPopup("ConfirmDisconnect");
+			}
+
+			if (ImGui::BeginPopupModal("ConfirmDisconnect", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+				ImGui::Text("Are you sure you want to disconnect and quit?");
+				if (ImGui::Button("Yes, Disconnect")) {
+					if (g_vpn_controller && g_vpn_controller->is_running()) {
+						g_vpn_controller->send_manual_message("/quit");
+						std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+					}
+					if (g_vpn_controller) {
+						g_vpn_controller->stop();
+						g_vpn_controller.reset();
+					}
+					::ExitProcess(EXIT_SUCCESS);
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel")) {
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::EndPopup();
+			}
+
 			ImGui::Separator();
 			ImGui::Text("Connection Log");
 			ImGui::SameLine();
@@ -439,32 +465,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			ImGui::EndChild();
 			ImGui::PopStyleColor();
 
-			// Label and tooltip
+			static bool focus_message_input = true; // <- new flag
+
 			ImGui::Text("Message:");
 			ImGui::SameLine();
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Enter a message to send through the VPN tunnel.");
 
-			// Track whether we need to send
-			bool send_requested = false;
+			// Focus box if requested
+			if (focus_message_input) {
+				ImGui::SetKeyboardFocusHere();
+				focus_message_input = false;
+			}
 
-			// InputText: returns true when Enter is pressed because of the flag
-			if (ImGui::InputText(
+			// Input box
+			bool enter_pressed = ImGui::InputText(
 				"##message",
 				message_input,
 				IM_ARRAYSIZE(message_input),
 				ImGuiInputTextFlags_EnterReturnsTrue
-			)) {
-				send_requested = true;
-			}
+			);
 
-			// Keep the button on the same line
+			// Send button
+			bool send_requested = enter_pressed || ImGui::Button("Send Message");
 
-			if (ImGui::Button("Send Message")) {
-				send_requested = true;
-			}
-
-			// Actual send logic
+			// Send logic
 			if (send_requested && strlen(message_input) > 0) {
 				if (g_vpn_controller && g_vpn_controller->is_running()) {
 					g_vpn_controller->send_manual_message(message_input);
@@ -477,7 +502,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
 				// Clear input
 				message_input[0] = '\0';
+
+				// Refocus input box on next frame
+				focus_message_input = true;
 			}
+
 
 			ImGui::End();
 			ImGui::PopStyleVar(3);
