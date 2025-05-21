@@ -208,12 +208,12 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 			int n = 0;
 			{
 				std::lock_guard<std::mutex> lock(ssl_read_mutex);
-				n = SSL_read(ssl, buf, sizeof(buf));
+				n = SSL_read(ssl, msg_buf, sizeof(msg_buf) - 1); // ✅ Correct buffer
 			}
 			if (n > 0) {
 				msg_buf[n] = '\0';
 
-				std::cout << "[📨] Message from peer: " << msg_buf << "\n";
+				std::cout << "[📨] Message from peer: " << msg_buf << std::endl;
 
 				if (std::string(msg_buf) == "/quit") {
 					std::cout << "[!] Peer requested disconnect. Closing tunnel.\n";
