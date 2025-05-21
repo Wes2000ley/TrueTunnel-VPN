@@ -156,10 +156,7 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 	while (running) {
 		UINT32 size = 0;
 		void *pkt = WintunReceivePacket(session, &size);
-		if (!pkt) {
-			Sleep(1);
-			continue;
-		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		uint8_t type = PACKET_TYPE_IP;
 		SSL_write(ssl, &type, 1);
 		SSL_write(ssl, pkt, size);
@@ -171,8 +168,12 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 	char buf[1600] {};
 	while (running) {
 		uint8_t pkt_type = 0;
-		if (SSL_read(ssl, &pkt_type, 1) <= 0) break;
-
+		int ret = SSL_read(ssl, &pkt_type, 1);
+		if (ret <= 0) {
+			int err = SSL_get_error(ssl, ret);
+			if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) continue;
+			break;
+		}
 		if (pkt_type == PACKET_TYPE_IP) {
 			int n = SSL_read(ssl, buf, sizeof(buf));
 			if (n <= 0) break;
