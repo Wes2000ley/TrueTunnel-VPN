@@ -51,6 +51,11 @@ using termcolor::reset;
 
 #define CHECK(cond,msg)  do{ if(!(cond)) throw std::runtime_error(msg);}while(0)
 
+std::mutex ssl_read_mutex;
+std::mutex ssl_write_mutex;
+
+
+
 void LoadWintun() {
 	static std::once_flag once;
 	std::call_once(once, []() {
@@ -160,40 +165,56 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 			Sleep(1);
 			continue;
 		}
+
 		uint8_t type = PACKET_TYPE_IP;
-		SSL_write(ssl, &type, 1);
-		SSL_write(ssl, pkt, size);
+
+		{
+			std::lock_guard<std::mutex> lock(ssl_write_mutex);
+			SSL_write(ssl, &type, 1);
+			SSL_write(ssl, pkt, size);
+		}
+
+
 		WintunReleaseReceivePacket(session, pkt);
 	}
 }
+
 
 void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running) {
 	char buf[1600] {};
 	while (running) {
 		uint8_t pkt_type = 0;
-		int ret = SSL_read(ssl, &pkt_type, 1);
-		if (ret <= 0) {
-			int err = SSL_get_error(ssl, ret);
-			if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) continue;
-			break;
+		{
+			std::lock_guard<std::mutex> lock(ssl_read_mutex);
+			if (SSL_read(ssl, &pkt_type, 1) <= 0) break;
 		}
 
+
 		if (pkt_type == PACKET_TYPE_IP) {
-			int n = SSL_read(ssl, buf, sizeof(buf));
+			int n = 0;
+			{
+				std::lock_guard<std::mutex> lock(ssl_read_mutex);
+				n = SSL_read(ssl, buf, sizeof(buf));
+			}
 			if (n <= 0) break;
+
 			void *pkt = WintunAllocateSendPacket(session, (UINT32) n);
 			if (!pkt) break;
 			memcpy(pkt, buf, n);
 			WintunSendPacket(session, pkt, (UINT32) n);
+
 		} else if (pkt_type == PACKET_TYPE_MSG) {
 			char msg_buf[1024] = {};
-			int n = SSL_read(ssl, msg_buf, sizeof(msg_buf) - 1);
+			int n = 0;
+			{
+				std::lock_guard<std::mutex> lock(ssl_read_mutex);
+				n = SSL_read(ssl, buf, sizeof(buf));
+			}
 			if (n > 0) {
 				msg_buf[n] = '\0';
 
 				std::cout << "[📨] Message from peer: " << msg_buf << "\n";
 
-				// ADD THIS: if we receive "/quit", stop running
 				if (std::string(msg_buf) == "/quit") {
 					std::cout << "[!] Peer requested disconnect. Closing tunnel.\n";
 					running = false;
@@ -205,10 +226,12 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 }
 
 
+
 std::mutex ssl_mutex;
 
+
 void send_message(SSL *ssl, const std::string &msg) {
-	std::lock_guard<std::mutex> lock(ssl_mutex);
+std::lock_guard<std::mutex> lock(ssl_write_mutex);
 	uint8_t packet_type = PACKET_TYPE_MSG;
 	SSL_write(ssl, &packet_type, 1);
 	SSL_write(ssl, msg.c_str(), static_cast<int>(msg.size()));
