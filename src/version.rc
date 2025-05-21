@@ -1,32 +1,36 @@
 #include <windows.h>
+#include <winver.h>
 #define IDI_VPN_ICON 101
 
+IDI_VPN_ICON ICON "vpn.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
-FILEOS VOS__WINDOWS32
-FILETYPE VFT_APP
-{
- BLOCK "StringFileInfo"
- {
-  BLOCK "040904b0"
-  {
-    VALUE "CompanyName",      "Wesley Atwell"
-    VALUE "FileDescription",  "TrueTunnel VPN"
-    VALUE "FileVersion",      "1.0.0"
-    VALUE "InternalName",     "truetunnel"
-    VALUE "LegalCopyright",   "Copyright (c) 2025 Wesley Atwell"
-    VALUE "LegalTrademarks",  "Licensed under MIT or GPLv2 — See LICENSE"
-    VALUE "OriginalFilename", "vpn.exe"
-    VALUE "ProductName",      "TrueTunnel VPN"
-    VALUE "ProductVersion",   "1.0.0"
-  }
- }
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L       // VOS__WINDOWS32
+ FILETYPE 0x1L         // VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "CompanyName",      "Wesley Atwell"
+      VALUE "FileDescription",  "TrueTunnel VPN"
+      VALUE "FileVersion",      "2.2.0"
+      VALUE "InternalName",     "truetunnel"
+      VALUE "LegalCopyright",   "Copyright (c) 2025 Wesley Atwell"
+      VALUE "LegalTrademarks",  "Licensed under MIT or GPLv2 — See LICENSE"
+      VALUE "OriginalFilename", "vpn.exe"
+      VALUE "ProductName",      "TrueTunnel VPN"
+      VALUE "ProductVersion",   "1.0.0.0"
+    END
+  END
 
- BLOCK "VarFileInfo"
- {
-  VALUE "Translation", 0x0409, 1200
- }
-}
-IDI_VPN_ICON ICON "vpn.ico"
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END
