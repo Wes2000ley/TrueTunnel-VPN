@@ -88,7 +88,7 @@ bool VpnController::start(std::string mode,
 
 
 void VpnController::send_manual_message(const std::string &message) {
-	std::lock_guard<std::mutex> lock(ssl_sock_mutex);
+	std::lock_guard<std::mutex> lock(ssl_io_mutex);
 
 	if (ssl_ && running) {
 		uint8_t packet_type = PACKET_TYPE_MSG;
@@ -105,7 +105,7 @@ void VpnController::send_manual_message(const std::string &message) {
 void VpnController::stop() {
 	if (running) {
 		running = false; {
-			std::lock_guard<std::mutex> lock(ssl_sock_mutex);
+std::lock_guard<std::mutex> lock(ssl_io_mutex);
 			if (ssl_) {
 				SSL_shutdown(ssl_.get());
 				ssl_.reset(); // ✅ safe cleanup
@@ -156,7 +156,7 @@ void VpnController::stop() {
 }
 
 void VpnController::cleanup_ssl_and_socket() {
-	std::lock_guard<std::mutex> lock(ssl_sock_mutex);
+std::lock_guard<std::mutex> lock(ssl_io_mutex);
 	if (ssl_) {
 		SSL_shutdown(ssl_.get());
 		ssl_.reset();
@@ -412,7 +412,7 @@ void VpnController::vpn_thread_func() {
 		// 8. Store ssl and socket
 		// Now outside the sock scope
 		{
-			std::lock_guard<std::mutex> lock(ssl_sock_mutex);
+std::lock_guard<std::mutex> lock(ssl_io_mutex);
 			sock_ = temp_sock;
 			ssl_ = std::move(temp_ssl);
 		}
