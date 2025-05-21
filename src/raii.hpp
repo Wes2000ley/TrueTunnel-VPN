@@ -223,13 +223,59 @@ private:
 	std::size_t size_;
 };
 
-struct HmacCtxDeleter {
-	void operator()(HMAC_CTX *ctx) const {
-		if (ctx) HMAC_CTX_free(ctx);
+
+class HmacCtx {
+public:
+	HmacCtx(const EVP_MD* md, const unsigned char* key, size_t key_len) {
+		EVP_MAC* mac = EVP_MAC_fetch(nullptr, "HMAC", nullptr);
+		if (!mac) throw std::runtime_error("Failed to fetch HMAC");
+
+		ctx = EVP_MAC_CTX_new(mac);
+		EVP_MAC_free(mac); // safe after context creation
+
+		if (!ctx) throw std::runtime_error("Failed to create HMAC context");
+
+		const char* digest_name = EVP_MD_get0_name(md);
+		if (!digest_name) throw std::runtime_error("Invalid digest");
+
+		OSSL_PARAM params[] = {
+			OSSL_PARAM_construct_utf8_string("digest", const_cast<char*>(digest_name), 0),
+			OSSL_PARAM_END
+		};
+
+		if (EVP_MAC_init(ctx, key, key_len, params) != 1)
+			throw std::runtime_error("Failed to initialize HMAC");
 	}
+
+	std::vector<unsigned char> compute(const unsigned char* data, size_t len) {
+		if (!ctx) throw std::runtime_error("HMAC context not initialized");
+
+		std::vector<unsigned char> result(EVP_MAX_MD_SIZE);
+		size_t out_len = 0;
+
+		if (EVP_MAC_update(ctx, data, len) != 1)
+			throw std::runtime_error("HMAC update failed");
+
+		if (EVP_MAC_final(ctx, result.data(), &out_len, result.size()) != 1)
+			throw std::runtime_error("HMAC final failed");
+
+		result.resize(out_len);
+		return result;
+	}
+
+	~HmacCtx() {
+		if (ctx) EVP_MAC_CTX_free(ctx);
+	}
+
+	HmacCtx(const HmacCtx&) = delete;
+	HmacCtx& operator=(const HmacCtx&) = delete;
+
+private:
+	EVP_MAC_CTX* ctx = nullptr;
 };
 
-using HMAC_CTX_ptr = std::unique_ptr<HMAC_CTX, HmacCtxDeleter>;
+
+
 
 
 #endif // TRUE_TUNNEL_RAII_HPP

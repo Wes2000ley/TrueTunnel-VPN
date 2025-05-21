@@ -377,7 +377,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 				g_vpn_controller->set_log_callback([](const std::string &msg) {
 					strncat_s(vpn_log, msg.c_str(), sizeof(vpn_log) - strlen(vpn_log) - 2);
 					strncat_s(vpn_log, "\n", sizeof(vpn_log) - strlen(vpn_log) - 1);
-					bool log_dirty = true;
 				});
 
 				// Start the connection with fresh params

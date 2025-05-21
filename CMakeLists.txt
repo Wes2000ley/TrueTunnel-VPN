@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Always build static binaries
 set(BUILD_SHARED_LIBS OFF)
 set(CONAN_CMAKE_FLAGS "--build=missing")
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 
 
 
@@ -27,7 +28,7 @@ set(IMGUI_MISC_DIR "${CMAKE_SOURCE_DIR}/deps/imgui/misc")
 
 
 add_executable(vpn
-        src/include/applink.c
+      #  src/include/applink.c
         src/vpn.cpp
         src/utils.cpp
         src/VpnController.cpp
@@ -36,6 +37,24 @@ add_executable(vpn
         src/ImGuiStyleManager.cpp
         src/ImGuiStyleManager.h
 )
+
+if (MSVC)
+    target_compile_options(vpn PRIVATE
+            /W4           # High warning level
+            /WX           # Treat warnings as errors
+            /permissive-  # Strict ISO C++ conformance
+    )
+else()
+    target_compile_options(vpn PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+            -Wshadow -Wnull-dereference -Wold-style-cast -Wnon-virtual-dtor
+            -Woverloaded-virtual -Wformat=2 -Wimplicit-fallthrough
+            -Wduplicated-cond -Wduplicated-branches -Wlogical-op
+            -Wuseless-cast -Wdouble-promotion -Wno-unused-parameter
+            -Werror
+    )
+endif()
+
 
 target_sources(vpn PRIVATE
         ${IMGUI_BACKENDS_DIR}/imgui_impl_win32.cpp
