@@ -8,9 +8,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(BUILD_SHARED_LIBS OFF)
 set(CONAN_CMAKE_FLAGS "--build=missing")
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+option(ENABLE_ANALYSIS "Enable static analysis tools" ON)
 
-
-
+if (ENABLE_ANALYSIS)
+    find_program(CLANG_TIDY_EXE NAMES clang-tidy)
+    if (CLANG_TIDY_EXE)
+        set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY_EXE}")
+    endif()
+endif()
 
 # On MSVC: use the static CRT
 if (MSVC)
@@ -60,12 +65,18 @@ if (MSVC)
             /guard:cf            # Control Flow Guard
             /sdl                 # Enable additional security checks
             /GS                  # Buffer security checks
+            /GL
     )
     target_link_options(vpn PRIVATE
             /guard:cf
             /HIGHENTROPYVA       # High entropy ASLR
             /DYNAMICBASE         # Enable ASLR
             /NXCOMPAT            # Mark as compatible with DEP
+            /LTCG
+            /CETCOMPAT      # Enable Intel CET shadow stack (Win10+ hardware)
+            /RELEASE        # Mark as optimized binary
+            /Qspectre
+            /DEBUG:NONE
     )
 endif()
 
@@ -95,6 +106,7 @@ target_sources(vpn PRIVATE
 set_target_properties(vpn PROPERTIES
         LINK_FLAGS "/SUBSYSTEM:WINDOWS"
         ENABLE_EXPORTS FALSE
+        POSITION_INDEPENDENT_CODE ON
 )
 
 
