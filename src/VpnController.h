@@ -5,6 +5,7 @@
 #include <thread>
 #include <functional>
 #include <atomic>
+#include <mutex>
 #include <winsock2.h>
 #include <openssl/ssl.h>
 
@@ -56,6 +57,9 @@ private:
 	std::thread vpn_thread;
 	std::string public_ip;
 	std::string real_adapter;
+
+	mutable std::mutex ssl_io_mutex;
+
 
 	WINTUN_ADAPTER_HANDLE wintun_adapter_ = nullptr;
 	WINTUN_SESSION_HANDLE wintun_session_ = nullptr;
