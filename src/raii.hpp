@@ -212,6 +212,22 @@ public:
 			OPENSSL_secure_clear_free(ptr_, size_);
 		}
 	}
+	OpenSSLSecurePtr(OpenSSLSecurePtr&& other) noexcept
+  : ptr_(std::exchange(other.ptr_, nullptr)),
+	size_(std::exchange(other.size_, 0)) {}
+
+	OpenSSLSecurePtr& operator=(OpenSSLSecurePtr&& other) noexcept {
+		if (this != &other) {
+			if (ptr_) OPENSSL_secure_clear_free(ptr_, size_);
+			ptr_ = std::exchange(other.ptr_, nullptr);
+			size_ = std::exchange(other.size_, 0);
+		}
+		return *this;
+	}
+
+	// Delete copy semantics
+	OpenSSLSecurePtr(const OpenSSLSecurePtr&) = delete;
+	OpenSSLSecurePtr& operator=(const OpenSSLSecurePtr&) = delete;
 
 	T *get() const { return ptr_; }
 	T *operator->() const { return ptr_; }

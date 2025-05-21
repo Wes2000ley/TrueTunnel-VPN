@@ -41,6 +41,8 @@ add_executable(vpn
         src/main.cpp
         src/ImGuiStyleManager.cpp
         src/ImGuiStyleManager.h
+        src/Networking.cpp
+        src/Networking.h
 )
 
 if (MSVC)

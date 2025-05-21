@@ -12,6 +12,7 @@
 #include "VpnController.h"
 #include "utils.hpp"
 #include "ImGuiStyleManager.h"
+#include "Networking.h"
 #include <openssl/crypto.h>
 #define IDI_VPN_ICON 101
 
@@ -352,8 +353,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 				if (ImGui::IsItemHovered())
 					ImGui::SetTooltip("This is adapter you bind Wintun to.");
 				ImGui::SameLine();
-				ImGui::Combo("##real_adapter", &current_adapter_idx_, adapter_labels_.data(),
-				             static_cast<int>(adapter_labels_.size()));
+				ImGui::Combo("##real_adapter", &current_adapter_idx_, adapter_cstrs_.data(),
+							 static_cast<int>(adapter_cstrs_.size()));
 			} else {
 				ImGui::Text("No network adapters found.");
 			}
