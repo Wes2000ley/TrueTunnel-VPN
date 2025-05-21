@@ -276,6 +276,4 @@ private:
 
 
 
-
-
 #endif // TRUE_TUNNEL_RAII_HPP

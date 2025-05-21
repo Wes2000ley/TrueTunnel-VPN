@@ -7,10 +7,12 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 #include <d3d11.h>
+#include <mutex>
 #include <tchar.h>
 #include "VpnController.h"
 #include "utils.hpp"
 #include "ImGuiStyleManager.h"
+#include <openssl/crypto.h>
 #define IDI_VPN_ICON 101
 
 
@@ -374,10 +376,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 				g_vpn_controller = std::make_unique<VpnController>();
 
 				// Set logging
+				static std::mutex log_mutex;
 				g_vpn_controller->set_log_callback([](const std::string &msg) {
+					std::lock_guard<std::mutex> lock(log_mutex);
 					strncat_s(vpn_log, msg.c_str(), sizeof(vpn_log) - strlen(vpn_log) - 2);
 					strncat_s(vpn_log, "\n", sizeof(vpn_log) - strlen(vpn_log) - 1);
 				});
+
+
+				int port_num = 0;
+				try {
+					port_num = std::stoi(port);
+					if (port_num < 1 || port_num > 65535)
+						throw std::out_of_range("Invalid port range");
+				} catch (...) {
+					strcat_s(vpn_log, "[!] Invalid port entered\n");
+					port_num = 0; // or abort connection
+				}
 
 				// Start the connection with fresh params
 				bool success = g_vpn_controller->start(

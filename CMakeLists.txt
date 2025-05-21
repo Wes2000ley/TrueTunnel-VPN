@@ -55,6 +55,34 @@ else()
     )
 endif()
 
+if (MSVC)
+    target_compile_options(vpn PRIVATE
+            /guard:cf            # Control Flow Guard
+            /sdl                 # Enable additional security checks
+            /GS                  # Buffer security checks
+    )
+    target_link_options(vpn PRIVATE
+            /guard:cf
+            /HIGHENTROPYVA       # High entropy ASLR
+            /DYNAMICBASE         # Enable ASLR
+            /NXCOMPAT            # Mark as compatible with DEP
+    )
+endif()
+
+if (CMAKE_BUILD_TYPE STREQUAL "Release")
+    set_target_properties(vpn PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION TRUE # already enabled globally, but safe to reinforce
+    )
+    if (MSVC)
+        target_compile_options(vpn PRIVATE /Zo-) # Disable debug info
+    else()
+        target_compile_options(vpn PRIVATE -g0)
+    endif()
+endif()
+
+
+
+
 
 target_sources(vpn PRIVATE
         ${IMGUI_BACKENDS_DIR}/imgui_impl_win32.cpp
