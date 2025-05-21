@@ -385,7 +385,7 @@ void VpnController::vpn_thread_func() {
 
 			// 5. Create ssl_CTX
 			using SslCtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
-			SslCtxPtr ctx(make_ssl_ctx(is_server), SSL_CTX_free);
+			SslCtxPtr ctx((make_ssl_ctx(is_server).get()), SSL_CTX_free);
 
 
 			// 6. Create ssl and bind to socket

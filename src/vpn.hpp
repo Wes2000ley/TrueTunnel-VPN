@@ -83,13 +83,18 @@ void LoadWintun();
 
 
 // ─── FIPS–compliant key + certificate helpers ──────────────────────────
-EVP_PKEY *generate_fips_rsa_key();
+using EVPKeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
+using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
+using SSL_CTX_Ptr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
+EVPKeyPtr generate_fips_rsa_key();
 
 X509 *generate_self_signed_cert(EVP_PKEY *pkey,
                                 const char *common_name);
 
 /* Build a TLS context that only offers FIPS-approved suites */
-SSL_CTX *make_ssl_ctx(bool is_server);
+using SslCtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
+using EvpKeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
+SslCtxPtr make_ssl_ctx(bool is_server);
 
 enum vpn_packet_type : uint8_t;
 
