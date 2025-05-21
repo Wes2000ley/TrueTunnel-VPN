@@ -23,8 +23,10 @@ public:
 
 	// destructor → restore original rdbuf
 	~redirect_stream() override {
+		flush_buffer();  // flush remaining buffered text
 		stream_.rdbuf(original_buf_);
 	}
+
 
 private:
 	//------------------------------------------------------------------

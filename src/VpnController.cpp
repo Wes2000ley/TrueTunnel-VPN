@@ -3,6 +3,7 @@
 #include "utils.hpp"
 #include "redirect_stream.hpp"
 #include "raii.hpp"
+#include "Networking.h"
 
 
 #include <iostream>
