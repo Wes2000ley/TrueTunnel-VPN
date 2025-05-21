@@ -191,8 +191,8 @@ std::vector<network_adapter_info> list_real_network_adapters() {
 
 		network_adapter_info info;
 		info.name = adapter->FriendlyName
-			            ? std::wstring_convert<std::codecvt_utf8<wchar_t> >().to_bytes(adapter->FriendlyName)
-			            : "Unknown";
+			? wide_to_utf8(adapter->FriendlyName)
+			: "Unknown";
 
 		for (IP_ADAPTER_UNICAST_ADDRESS *ua = adapter->FirstUnicastAddress; ua; ua = ua->Next) {
 			if (ua->Address.lpSockaddr->sa_family == AF_INET) {
@@ -304,7 +304,9 @@ void SetStaticIPv4Address(const std::string &adapter_name,
 	inet_pton(AF_INET, ip_address.c_str(), &row.Address.Ipv4.sin_addr);
 
 	// Convert subnet mask to prefix length
-	ULONG mask = ntohl(inet_addr(subnet_mask.c_str()));
+	IN_ADDR addr {};
+	InetPtonA(AF_INET, subnet_mask.c_str(), &addr);
+	ULONG mask = ntohl(addr.S_un.S_addr);
 	ULONG prefix_length = 0;
 	while (mask & 0x80000000) {
 		prefix_length++;
@@ -342,9 +344,8 @@ void populate_real_adapters() {
 		if (adapter->OperStatus != IfOperStatusUp || adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
 			continue;
 
-		std::string name = adapter->FriendlyName
-			                   ? std::wstring_convert<std::codecvt_utf8<wchar_t> >().to_bytes(adapter->FriendlyName)
-			                   : "Unknown";
+std::string name = wide_to_utf8(adapter->FriendlyName);
+
 
 		std::string ip;
 		for (IP_ADAPTER_UNICAST_ADDRESS *ua = adapter->FirstUnicastAddress; ua; ua = ua->Next) {
@@ -401,8 +402,9 @@ std::string get_ipv4_for_adapter(const std::string &adapter_name) {
 
 	for (IP_ADAPTER_ADDRESSES *adapter = adapters; adapter; adapter = adapter->Next) {
 		std::wstring wname(adapter->FriendlyName);
-		std::string friendly = std::wstring_convert<std::codecvt_utf8<wchar_t> >().to_bytes(wname);
+		std::string friendly = wide_to_utf8(wname);
 		if (friendly != adapter_name) continue;
+
 
 		for (IP_ADAPTER_UNICAST_ADDRESS *unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
 			SOCKADDR_IN *sa_in = reinterpret_cast<SOCKADDR_IN *>(unicast->Address.lpSockaddr);
@@ -412,4 +414,37 @@ std::string get_ipv4_for_adapter(const std::string &adapter_name) {
 		}
 	}
 	return "";
+}
+
+std::string wide_to_utf8(const std::wstring& wide) {
+	if (wide.empty()) return {};
+
+	int size_needed = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+	if (size_needed <= 0) return {};
+
+	std::string result(size_needed, 0);
+	WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &result[0], size_needed, nullptr, nullptr);
+
+	// Remove null terminator if present
+	if (!result.empty() && result.back() == '\0')
+		result.pop_back();
+
+	return result;
+}
+
+ULONG convert_mask_to_prefix(const std::string& subnet_mask) {
+	IN_ADDR addr {};
+	if (InetPtonA(AF_INET, subnet_mask.c_str(), &addr) != 1) {
+		throw std::invalid_argument("Invalid subnet mask: " + subnet_mask);
+	}
+
+	ULONG mask = ntohl(addr.S_un.S_addr);
+	ULONG prefix_length = 0;
+
+	while (mask & 0x80000000) {
+		++prefix_length;
+		mask <<= 1;
+	}
+
+	return prefix_length;
 }

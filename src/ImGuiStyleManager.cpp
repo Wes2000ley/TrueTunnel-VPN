@@ -50,7 +50,7 @@ void ImGuiStyleManager::SetupColors(ImVec4 *colors) {
 	// Add more ImGuiCol_ if needed...
 }
 
-void ImGuiStyleManager::LoadDefaultFont(float size) {
+void ImGuiStyleManager::LoadDefaultFont() {
 	ImFontConfig config;
 	config.OversampleH = 3;
 	config.OversampleV = 3;

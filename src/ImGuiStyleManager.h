@@ -8,7 +8,7 @@ class ImGuiStyleManager final {
 public:
 	void ApplyCustomDarkTheme();
 
-	void LoadDefaultFont(float size = 18.0f);
+	static void LoadDefaultFont();
 
 	void LoadFontFromPath(const std::string &path, float size = 18.0f);
 

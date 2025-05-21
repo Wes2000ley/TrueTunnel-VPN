@@ -10,7 +10,7 @@
 #include <ppltasks.h>
 #include <stdexcept>
 #include <thread>
-#include <chrono>>   //for using the function sleep
+#include <chrono>  //for using the function sleep
 #include <iphlpapi.h>
 #include <regex>
 
@@ -47,27 +47,44 @@ VpnController::~VpnController() {
 
 std::mutex ssl_sock_mutex;
 
-bool VpnController::start(const std::string &mode, const std::string &server_ip, int port,
-                          const std::string &local_ip, const std::string &gateway, const std::string &password,
-                          const std::string &adaptername, const std::string &subnetmask,
-                          const std::string &public_ip, const std::string &real_adapter) {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4458)
+#endif
+
+bool VpnController::start(std::string mode,
+						  std::string server_ip,
+						  int port,
+						  std::string local_ip,
+						  std::string gateway,
+						  std::string password,
+						  std::string adaptername,
+						  std::string subnetmask,
+						  std::string public_ip,
+						  std::string real_adapter) {
 	if (running) return false;
 
-	this->mode = mode;
-	this->server_ip = server_ip; // UNUSED!!!
+	this->mode = std::move(mode);
+	this->server_ip = std::move(server_ip);
 	this->port = port;
-	this->local_ip = local_ip;
-	this->gateway = gateway;
-	this->password = password;
-	this->adaptername = adaptername;
-	this->subnetmask = subnetmask;
-	this->public_ip = public_ip;
-	this->real_adapter = real_adapter;
+	this->local_ip = std::move(local_ip);
+	this->gateway = std::move(gateway);
+	this->password = std::move(password);
+	this->adaptername = std::move(adaptername);
+	this->subnetmask = std::move(subnetmask);
+	this->public_ip = std::move(public_ip);
+	this->real_adapter = std::move(real_adapter);
 
 	running = true;
 	vpn_thread = std::thread(&VpnController::vpn_thread_func, this);
 	return true;
 }
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+
 
 void VpnController::send_manual_message(const std::string &message) {
 	std::lock_guard<std::mutex> lock(ssl_sock_mutex);
@@ -231,8 +248,8 @@ void VpnController::vpn_thread_func() {
 			std::cout << "[CMD] " << cmd1 << "\n"
 					<< "[CMD] " << cmd2 << "\n";
 
-			bool rc1 = run_command_hidden(cmd1);
-			bool rc2 = run_command_hidden(cmd2);
+			run_command_hidden(cmd1);
+			run_command_hidden(cmd2);
 
 
 			std::cout << "[✓] Adapter configuration complete\n";
@@ -286,7 +303,10 @@ void VpnController::vpn_thread_func() {
 			// 3. Prepare address
 			sockaddr_in addr{};
 			addr.sin_family = AF_INET;
-			addr.sin_port = htons(port);
+			if (port < 0 || port > 65535)
+				throw std::out_of_range("Port number must be between 0 and 65535");
+
+			addr.sin_port = htons(static_cast<uint16_t>(port));
 			if (is_server) {
 				std::string bind_ip = get_ipv4_for_adapter(real_adapter);
 				if (bind_ip.empty()) {
@@ -428,25 +448,26 @@ void VpnController::vpn_thread_func() {
 			memcpy(data.get(), my_nonce.get(), NONCE_SIZE);
 			memcpy(data.get() + NONCE_SIZE, peer_nonce.get(), NONCE_SIZE);
 		}
-
 		// 4) Compute the HMAC-SHA256 over that buffer using password
 		OpenSSLSecurePtr<unsigned char> my_hmac(MAX_HMAC_SIZE);
 		CHECK(my_hmac, "Secure malloc failed");
-		unsigned int hlen;
-		HMAC_CTX_ptr hctx(HMAC_CTX_new());
-		CHECK(hctx, "HMAC_CTX_new");
-		CHECK(HMAC_Init_ex(hctx.get(),
-			      (unsigned char*)password.data(),
-			      password.size(),
-			      EVP_sha256(),
-			      nullptr) == 1, "HMAC_Init");
-		CHECK(HMAC_Update(hctx.get(), data.get(), HMAC_DATA_SIZE) == 1, "HMAC_Update");
-		CHECK(HMAC_Final(hctx.get(), my_hmac.get(), &hlen) == 1, "HMAC_Final");
+
+		HmacCtx hmac(EVP_sha256(),
+					 reinterpret_cast<const unsigned char*>(password.data()),
+					 password.size());
+
+		std::vector<unsigned char> mac_result = hmac.compute(data.get(), HMAC_DATA_SIZE);
+		CHECK(mac_result.size() <= MAX_HMAC_SIZE, "HMAC overflow");
+
+		std::memcpy(my_hmac.get(), mac_result.data(), mac_result.size());
+		unsigned int hlen = static_cast<unsigned int>(mac_result.size());
 
 		// 5) Exchange HMACs
 		SSL_write(ssl_.get(), my_hmac.get(), hlen);
+
 		OpenSSLSecurePtr<unsigned char> peer_hmac(MAX_HMAC_SIZE);
 		CHECK(peer_hmac, "Secure malloc failed");
+
 		SSL_read(ssl_.get(), peer_hmac.get(), hlen);
 
 		// 6) Compare in constant time
