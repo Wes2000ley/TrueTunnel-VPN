@@ -43,6 +43,7 @@ add_executable(vpn
         src/ImGuiStyleManager.h
         src/Networking.cpp
         src/Networking.h
+        src/HmacAuthenticator.h
 )
 
 if (MSVC)

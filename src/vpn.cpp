@@ -16,6 +16,8 @@
 #include <netioapi.h>
 #include "vpn.hpp"
 #include "utils.hpp"
+#include "VpnController.h"
+#include "Networking.h"
 
 #include <iostream>
 #include <filesystem>
@@ -34,6 +36,14 @@
 #include <openssl/provider.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+
+#include <ppltasks.h>
+
+#include <regex>
+
+
+
+#include "raii.hpp"
 
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib,"ole32.lib")
@@ -216,10 +226,11 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 				std::cout << "[📨] Message from peer: " << msg_buf << std::endl;
 
 				if (std::string(msg_buf) == "/quit") {
-					std::cout << "[!] Peer requested disconnect. Closing tunnel.\n";
-					running = false;
-					break;
+					std::cout << "[!] Peer requested disconnect. Terminating.\n";
+					std::this_thread::sleep_for(std::chrono::seconds(5));  // Optional: let message print
+					::ExitProcess(EXIT_SUCCESS);
 				}
+
 			}
 		}
 	}

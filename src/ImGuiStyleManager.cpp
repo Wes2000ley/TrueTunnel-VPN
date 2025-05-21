@@ -9,7 +9,7 @@ void ImGuiStyleManager::ApplyCustomDarkTheme() {
 }
 
 void ImGuiStyleManager::SetupStyle(ImGuiStyle &style) {
-	style.WindowRounding = 0.0f;
+	style.WindowRounding = 5.0f;
 	style.FrameRounding = 3.0f;
 	style.ScrollbarRounding = 2.0f;
 	style.FramePadding = ImVec2(8, 6);
