@@ -33,7 +33,6 @@ set(IMGUI_MISC_DIR "${CMAKE_SOURCE_DIR}/deps/imgui/misc")
 
 
 add_executable(vpn
-      #  src/include/applink.c
         src/vpn.cpp
         src/utils.cpp
         src/VpnController.cpp
@@ -78,7 +77,6 @@ if (MSVC)
             /LTCG
             /CETCOMPAT      # Enable Intel CET shadow stack (Win10+ hardware)
             /RELEASE        # Mark as optimized binary
-            /Qspectre
             /DEBUG:NONE
     )
 endif()
@@ -133,6 +131,7 @@ target_include_directories(vpn PRIVATE
 
 # Link against the static .lib's, not DLL import libs
 target_link_libraries(vpn PRIVATE
+        openssl::openssl
         OpenSSL::SSL
         OpenSSL::Crypto
         ws2_32
