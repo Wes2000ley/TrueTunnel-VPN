@@ -358,15 +358,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			} else {
 				ImGui::Text("No network adapters found.");
 			}
-
-			// Static buffers for logging and message input
-			static char vpn_log[2048] = "";
+// Static buffers for logging and message input
+			static std::vector<std::string> log_lines;
 			static char message_input[256] = "";
+			const size_t max_log_lines = 5000;
 
 			// Connect button
 			if (ImGui::Button("Connect")) {
-				strcat_s(vpn_log, "[System] Connect button pressed\n");
-
+				log_lines.emplace_back("[System] Connect button pressed");
 
 				// Stop and destroy previous controller if it exists
 				if (g_vpn_controller) {
@@ -381,10 +380,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 				static std::mutex log_mutex;
 				g_vpn_controller->set_log_callback([](const std::string &msg) {
 					std::lock_guard<std::mutex> lock(log_mutex);
-					strncat_s(vpn_log, msg.c_str(), sizeof(vpn_log) - strlen(vpn_log) - 2);
-					strncat_s(vpn_log, "\n", sizeof(vpn_log) - strlen(vpn_log) - 1);
+					log_lines.emplace_back(msg);
+					if (log_lines.size() > max_log_lines) {
+						log_lines.erase(log_lines.begin(), log_lines.begin() + 100);
+					}
 				});
-
 
 				int port_num = 0;
 				try {
@@ -392,7 +392,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 					if (port_num < 1 || port_num > 65535)
 						throw std::out_of_range("Invalid port range");
 				} catch (...) {
-					strcat_s(vpn_log, "[!] Invalid port entered\n");
+					log_lines.emplace_back("[!] Invalid port entered");
 					port_num = 0; // or abort connection
 				}
 
@@ -405,7 +405,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 						: "Unknown");
 
 				if (!success) {
-					strcat_s(vpn_log, "[!] Failed to start VPN controller\n");
+					log_lines.emplace_back("[!] Failed to start VPN controller");
 				}
 			}
 			ImGui::SameLine();
@@ -417,7 +417,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 				ImGui::Text("Are you sure you want to disconnect and quit?");
 				if (ImGui::Button("Yes, Disconnect")) {
 					if (g_vpn_controller && g_vpn_controller->is_running()) {
-						g_vpn_controller->send_manual_message("/quit");
+						//g_vpn_controller->send_manual_message("/quit");
 						std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 					}
 					if (g_vpn_controller) {
@@ -437,7 +437,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			ImGui::Text("Connection Log");
 			ImGui::SameLine();
 			if (ImGui::Button("Clear")) {
-				vpn_log[0] = '\0';
+				log_lines.clear();
 			}
 			ImGui::SameLine();
 			static bool auto_scroll = true;
@@ -448,21 +448,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
 			// Track previous content size
 			static int last_log_length = 0;
-			int current_log_length = static_cast<int>(strlen(vpn_log));
-
+			int current_log_length = static_cast<int>(log_lines.size());
 			// Begin log display
 			ImGui::BeginChild("log_box", ImVec2(0, available_height), true,
 			                  ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
 
-			ImGui::TextUnformatted(vpn_log);
+			for (const auto &line: log_lines)
+				ImGui::TextUnformatted(line.c_str());
 
-			// Scroll to bottom only when new content is added
-			if (auto_scroll && current_log_length > last_log_length) {
+			if (auto_scroll && log_lines.size() > last_log_length) {
 				ImGui::SetScrollHereY(1.0f);
-				last_log_length = current_log_length;
+				last_log_length = static_cast<int>(log_lines.size());
 			}
 
 			ImGui::EndChild();
+
 			ImGui::PopStyleColor();
 
 			static bool focus_message_input = true; // <- new flag
@@ -492,13 +492,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			// Send logic
 			if (send_requested && strlen(message_input) > 0) {
 				if (g_vpn_controller && g_vpn_controller->is_running()) {
-					g_vpn_controller->send_manual_message(message_input);
+					//g_vpn_controller->send_manual_message(message_input);
 				}
 
 				// Append to log
 				char formatted[256];
 				snprintf(formatted, sizeof(formatted), "[You] %s\n", message_input);
-				strcat_s(vpn_log, formatted);
+				log_lines.emplace_back(formatted);
 
 				// Clear input
 				message_input[0] = '\0';

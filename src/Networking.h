@@ -62,3 +62,5 @@ struct network_adapter_info {
 inline void SafeRelease(IUnknown *ptr) {
 	if (ptr) ptr->Release();
 }
+
+std::string extract_ipv4_string(const BYTE* bytes);

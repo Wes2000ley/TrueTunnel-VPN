@@ -168,6 +168,8 @@ SslCtxPtr make_ssl_ctx(bool is_server) {
 
 
 void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running) {
+	std::cout << "[tun_to_tls] Started packet forwarding thread\n";
+
 	while (running) {
 		UINT32 size = 0;
 		void *pkt = WintunReceivePacket(session, &size);
@@ -175,6 +177,8 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 			Sleep(1);
 			continue;
 		}
+
+		std::cout << "[tun_to_tls] Captured packet of size " << size << "\n";
 
 		uint8_t type = PACKET_TYPE_IP;
 
@@ -190,7 +194,8 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 }
 
 
-void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running) {
+void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running, std::mutex &session_mutex) {
+	std::cout << "[tls_to_tun] Started packet receiving thread\n";
 	char buf[1600] {};
 	while (running) {
 		uint8_t pkt_type = 0;
@@ -199,18 +204,23 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 			if (SSL_read(ssl, &pkt_type, 1) <= 0) break;
 		}
 
+if (pkt_type == PACKET_TYPE_IP) {
+	int n = 0; {
+		std::lock_guard<std::mutex> lock(ssl_read_mutex);
+		n = SSL_read(ssl, buf, sizeof(buf));
+		if (n <= 0) {
+			int err = SSL_get_error(ssl, n);
+			if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+				continue;
+			break;
+		}
+	}
 
-		if (pkt_type == PACKET_TYPE_IP) {
-			int n = 0;
-			{
-				std::lock_guard<std::mutex> lock(ssl_read_mutex);
-				n = SSL_read(ssl, buf, sizeof(buf));
-			}
-			if (n <= 0) break;
-
+	std::lock_guard<std::mutex> lock(session_mutex);  // ✅ protect Wintun write
 			void *pkt = WintunAllocateSendPacket(session, (UINT32) n);
 			if (!pkt) break;
 			memcpy(pkt, buf, n);
+			std::cout << "[tls_to_tun] Writing packet of size " << n << "\n";
 			WintunSendPacket(session, pkt, (UINT32) n);
 
 		} else if (pkt_type == PACKET_TYPE_MSG) {
@@ -218,7 +228,7 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 			int n = 0;
 			{
 				std::lock_guard<std::mutex> lock(ssl_read_mutex);
-				n = SSL_read(ssl, msg_buf, sizeof(msg_buf) - 1); // ✅ Correct buffer
+				n = SSL_read(ssl, msg_buf, sizeof(msg_buf) - 1);
 			}
 			if (n > 0) {
 				msg_buf[n] = '\0';
@@ -226,16 +236,13 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 				std::cout << "[📨] Message from peer: " << msg_buf << std::endl;
 
 				if (std::string(msg_buf) == "/quit") {
-					std::cout << "[!] Peer requested disconnect. Terminating.\n";
-					std::this_thread::sleep_for(std::chrono::seconds(5));  // Optional: let message print
-					::ExitProcess(EXIT_SUCCESS);
+					std::cout << "[!] Peer requested disconnect. Closing session.\n";
+					break;
 				}
-
 			}
 		}
 	}
 }
-
 
 
 std::mutex ssl_mutex;

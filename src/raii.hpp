@@ -10,6 +10,8 @@
 #include <memory>
 #include <openssl/ssl.h>
 
+#include "vpn.hpp"
+
 // ─────────────────────────────────────────────────────────────────────────────
 // COM Initialization Guard (RAII for CoInitializeEx / CoUninitialize)
 class ComInit {
@@ -139,14 +141,13 @@ private:
 
 
 // Wintun Adapter Guard (RAII wrapper for WINTUN_ADAPTER_HANDLE)
+// Wintun Adapter Guard (RAII wrapper for WINTUN_ADAPTER_HANDLE)
 class WintunAdapterGuard {
 public:
-	explicit WintunAdapterGuard(WINTUN_ADAPTER_HANDLE adapter) : adapter_(adapter) {
-	}
+	explicit WintunAdapterGuard(WINTUN_ADAPTER_HANDLE adapter) : adapter_(adapter) {}
 
 	// Disallow copy
 	WintunAdapterGuard(const WintunAdapterGuard &) = delete;
-
 	WintunAdapterGuard &operator=(const WintunAdapterGuard &) = delete;
 
 	// Allow move
@@ -178,6 +179,7 @@ public:
 private:
 	WINTUN_ADAPTER_HANDLE adapter_ = nullptr;
 };
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OpenSSL SSL_CTX Smart Pointer

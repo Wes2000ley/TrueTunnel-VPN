@@ -1,51 +1,39 @@
-#ifndef VPNCONTROLLER_H
-#define VPNCONTROLLER_H
+#pragma once
 
 #include <string>
 #include <thread>
-#include <functional>
 #include <atomic>
 #include <mutex>
-#include <winsock2.h>
-#include <openssl/ssl.h>
+#include <functional>
 
-#include "vpn.hpp"
-
+class VpnServer;
+class VpnClient;
 
 class VpnController {
 public:
 	VpnController();
-
 	~VpnController();
-	void cleanup_ssl_and_socket();
 
-	void send_manual_message(const std::string &message);
-
-	bool start(std::string mode,
-			   std::string server_ip,
-			   int port,
-			   std::string local_ip,
-			   std::string gateway,
-			   std::string password,
-			   std::string adaptername,
-			   std::string subnetmask,
-			   std::string public_ip,
-			   std::string real_adapter);
+	bool start(std::string m, std::string s_ip, int p, std::string l_ip,
+							  std::string g, std::string pw, std::string a_name,
+							  std::string mask, std::string pub_ip, std::string real_ad);
 
 
 	void stop();
-
 	bool is_running() const;
 
+	std::function<void(const std::string&)> log_callback;
+	void set_log_callback(std::function<void(const std::string&)> cb);
 
-	void set_log_callback(std::function<void(const std::string &)> callback) {
-		log_callback = std::move(callback);
-	}
 
 private:
 	void vpn_thread_func();
 
 	std::string mode;
+	std::thread vpn_thread;
+	std::atomic<bool> running;
+
+	// user-provided fields
 	std::string server_ip;
 	int port;
 	std::string local_ip;
@@ -53,26 +41,9 @@ private:
 	std::string password;
 	std::string adaptername;
 	std::string subnetmask;
-	std::atomic<bool> running;
-	std::thread vpn_thread;
 	std::string public_ip;
 	std::string real_adapter;
 
-	mutable std::mutex ssl_io_mutex;
-
-
-	WINTUN_ADAPTER_HANDLE wintun_adapter_ = nullptr;
-	WINTUN_SESSION_HANDLE wintun_session_ = nullptr;
-
-
-	SOCKET sock_;
-	SOCKET listen_sock_ = INVALID_SOCKET;
-	using SSLPtr = std::unique_ptr<SSL, decltype(&SSL_free)>;
-	SSLPtr ssl_{nullptr, SSL_free};
-	WINTUN_ADAPTER_HANDLE adapter_handle_ = nullptr;
-
-
-	std::function<void(const std::string &)> log_callback;
+	std::unique_ptr<VpnClient> client;
+	std::unique_ptr<VpnServer> server;
 };
-
-#endif // VPNCONTROLLER_H
