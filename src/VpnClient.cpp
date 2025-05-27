@@ -183,7 +183,7 @@ void VpnClient::configureAdapter() {
 
      std::string cmd1 = "netsh interface ipv4 add route prefix=10.10.100.0/24 "
                         "interface=\"" + adaptername_ + "\" "
-                        "metric=1 store=persistent";
+                        "nexthop=10.10.100.1 metric=1 store=persistent";
 
     std::string cmd2 = "netsh interface ipv4 set subinterface \"" + adaptername_ + "\" mtu=1380 store=persistent";
 
