@@ -35,6 +35,7 @@
 #pragma comment(lib,"iphlpapi.lib")
 #pragma comment(lib, "Shell32.lib")
 
+#define LOG(msg) if (log_callback) log_callback(msg); else std::cout << msg << "\n";
 
 using termcolor::bold;
 using termcolor::green;

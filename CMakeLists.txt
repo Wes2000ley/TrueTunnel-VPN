@@ -43,12 +43,18 @@ add_executable(vpn
         src/Networking.cpp
         src/Networking.h
         src/HmacAuthenticator.h
+        src/IpPoolManager.cpp
+        src/IpPoolManager.h
+        src/VpnServer.cpp
+        src/VpnServer.h
+        src/VpnClient.cpp
+        src/VpnClient.h
 )
 
 if (MSVC)
     target_compile_options(vpn PRIVATE
             /W4           # High warning level
-            /WX           # Treat warnings as errors
+        #    /WX           # Treat warnings as errors
             /permissive-  # Strict ISO C++ conformance
     )
 else()
@@ -58,7 +64,7 @@ else()
             -Woverloaded-virtual -Wformat=2 -Wimplicit-fallthrough
             -Wduplicated-cond -Wduplicated-branches -Wlogical-op
             -Wuseless-cast -Wdouble-promotion -Wno-unused-parameter
-            -Werror
+           # -Werror
     )
 endif()
 

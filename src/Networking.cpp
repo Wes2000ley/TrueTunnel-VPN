@@ -294,3 +294,9 @@ std::vector<network_adapter_info> list_real_network_adapters() {
 
 	return adapters;
 }
+std::string extract_ipv4_string(const BYTE* bytes) {
+	char buf[16];
+	snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+			 bytes[0], bytes[1], bytes[2], bytes[3]);
+	return std::string(buf);
+}
