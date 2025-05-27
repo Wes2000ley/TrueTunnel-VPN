@@ -66,22 +66,3 @@ inline void SafeRelease(IUnknown *ptr) {
 }
 
 std::string extract_ipv4_string(const BYTE* bytes);
-
-// Enable or disable the global IP forwarding registry bit
-inline void set_global_ip_forwarding(bool enable)
-{
-	std::string cmd = "reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\" "
-					  "/v IPEnableRouter /t REG_DWORD /d " +
-					  std::string(enable ? "1" : "0") + " /f";
-	run_command_admin(cmd);
-	util::logInfo(cmd);
-}
-
-// Set per-interface forwarding state
-inline void set_interface_forwarding(const std::string& iface, bool enable)
-{
-	std::string cmd = "netsh interface ipv4 set interface name=\"" + iface +
-					  "\" forwarding=" + (enable ? "enabled" : "disabled");
-	run_command_admin(cmd);
-	util::logInfo(cmd);
-}

@@ -38,11 +38,11 @@
 
 
 
-
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib,"ole32.lib")
 #pragma comment(lib,"iphlpapi.lib")
 
+class VpnServer;
 using termcolor::bold;
 using termcolor::green;
 using termcolor::yellow;
@@ -105,6 +105,13 @@ SslCtxPtr make_ssl_ctx(bool is_server);
 enum vpn_packet_type : uint8_t;
 
 
+inline std::mutex ssl_read_mutex;
+inline std::mutex ssl_write_mutex;
+
+constexpr uint8_t PACKET_TYPE_IP  = 0x01;
+constexpr uint8_t PACKET_TYPE_MSG = 0x02;
+
+
 //— Packet pumps
 void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running);
 
@@ -112,5 +119,62 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 
 void send_message(SSL *ssl, const std::string &msg);
 
-constexpr uint8_t PACKET_TYPE_IP  = 0x01;
-constexpr uint8_t PACKET_TYPE_MSG = 0x02;
+template<typename ForwardFn>
+inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
+					   SSL*                  ssl,
+					   std::atomic<bool>&    running,
+					   std::mutex&           session_mutex,
+					   ForwardFn             maybe_forward)          // 👈
+{
+	char buf[1600]{};
+	while (running) {
+		uint8_t tag;
+		{
+			std::lock_guard<std::mutex> lg(ssl_read_mutex);
+			if (SSL_read(ssl, &tag, 1) <= 0) break;
+		}
+
+		if (tag == PACKET_TYPE_IP) {
+			int n;
+			{
+				std::lock_guard<std::mutex> lg(ssl_read_mutex);
+				n = SSL_read(ssl, buf, sizeof(buf));
+				if (n <= 0) {
+					int err = SSL_get_error(ssl, n);
+					if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+						continue;
+					break;
+				}
+			}
+
+			/* ① server may short-circuit here */
+			if (maybe_forward(reinterpret_cast<BYTE*>(buf), static_cast<UINT>(n)))
+				continue;
+
+			/* ② otherwise inject into local Wintun */
+			std::lock_guard<std::mutex> lg(session_mutex);
+			void* pkt = WintunAllocateSendPacket(session, static_cast<UINT>(n));
+			if (!pkt) break;
+			std::memcpy(pkt, buf, n);
+			WintunSendPacket(session, pkt, n);
+		}
+		else if (tag == PACKET_TYPE_MSG) {
+			char msg_buf[1024] = {};
+			int n = 0;
+			{
+				std::lock_guard<std::mutex> lock(ssl_read_mutex);
+				n = SSL_read(ssl, msg_buf, sizeof(msg_buf) - 1);
+			}
+			if (n > 0) {
+				msg_buf[n] = '\0';
+
+				std::cout << "[📨] Message from peer: " << msg_buf << std::endl;
+
+				if (std::string(msg_buf) == "/quit") {
+					std::cout << "[!] Peer requested disconnect. Closing session.\n";
+					break;
+				}
+			}
+		}
+	}
+}

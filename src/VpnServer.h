@@ -63,6 +63,7 @@ private:
     void acceptLoop();                    // accepts TCP and spawns handleClient
     void tunReaderEntry();                // single reader: tun → tls (calls tun_to_tls)
 
+
     // ───────── per-client handling ──────
     void handleClient(SOCKET client_sock);
     void tlsClientEntry(std::shared_ptr<SSL> ssl,
@@ -71,6 +72,8 @@ private:
 
     // ───────── types / helpers ──────────
     using SSLPtr = std::unique_ptr<SSL, decltype(&::SSL_free)>;
+    bool forward_to_client_if_known(const BYTE *packet, UINT size);
+
 
     struct ClientEntry {
         std::shared_ptr<SSL> ssl;
@@ -109,4 +112,16 @@ private:
 
     std::thread tun_reader_thread_;   // tun → tls dispatcher
     std::thread accept_thread_;       // TCP accept loop
+    static void tls_to_tun_server(VpnServer*           self,
+                                  WINTUN_SESSION_HANDLE session,
+                                  SSL*                  ssl,
+                                  std::atomic<bool>&    running,
+                                  std::mutex&           session_mutex)
+    {
+        auto fwd = [self](BYTE* pkt, UINT sz) {
+            return self->forward_to_client_if_known(pkt, sz);
+        };
+        tls_to_tun_common(session, ssl, running, session_mutex, fwd);
+    }
+
 };
