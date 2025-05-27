@@ -54,6 +54,8 @@ void VpnClient::stop() {
     // Delete route
     std::string cmd_delete_route = "route delete 10.10.100.0 mask 255.255.255.0 10.10.100.1";
     std::string cmd_delete_route2 = "route delete 10.10.100.0 mask 255.255.255.0 10.10.100.2";
+     std::string cmd_delete_route3 =
++    "route delete 10.10.100.0 mask 255.255.255.0";
 
 
     // Reset IP address (optional)
@@ -65,6 +67,7 @@ void VpnClient::stop() {
 
     run_command_hidden(cmd_delete_route);
     run_command_hidden(cmd_delete_route2);
+    run_command_hidden(cmd_delete_route3);
     run_command_hidden(cmd_reset_ip);
     run_command_hidden(cmd_clear_mtu);
 
@@ -178,8 +181,9 @@ void VpnClient::configureAdapter() {
 
     SetStaticIPv4Address(adaptername_, local_ip_, subnetmask_);
 
-    std::string cmd1 = "netsh interface ipv4 add route prefix=10.10.100.0/24 "
-                       "interface=\"" + adaptername_ + "\" nexthop=" + gateway_ + " metric=1 store=persistent";
+     std::string cmd1 = "netsh interface ipv4 add route prefix=10.10.100.0/24 "
+                        "interface=\"" + adaptername_ + "\" "
+                        "metric=1 store=persistent";
 
     std::string cmd2 = "netsh interface ipv4 set subinterface \"" + adaptername_ + "\" mtu=1380 store=persistent";
 

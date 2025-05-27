@@ -178,7 +178,7 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 			continue;
 		}
 
-		std::cout << "[tun_to_tls] Captured packet of size " << size << "\n";
+	//	std::cout << "[tun_to_tls] Captured packet of size " << size << "\n";
 
 		uint8_t type = PACKET_TYPE_IP;
 
@@ -220,7 +220,7 @@ if (pkt_type == PACKET_TYPE_IP) {
 			void *pkt = WintunAllocateSendPacket(session, (UINT32) n);
 			if (!pkt) break;
 			memcpy(pkt, buf, n);
-			std::cout << "[tls_to_tun] Writing packet of size " << n << "\n";
+		//	std::cout << "[tls_to_tun] Writing packet of size " << n << "\n";
 			WintunSendPacket(session, pkt, (UINT32) n);
 
 		} else if (pkt_type == PACKET_TYPE_MSG) {

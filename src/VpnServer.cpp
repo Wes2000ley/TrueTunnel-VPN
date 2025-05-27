@@ -136,6 +136,18 @@ void VpnServer::setupServer()
         "'} | Set-NetConnectionProfile -NetworkCategory Private");
 
     AddICMPv4Rule();
+
+    // ─── NEW: turn Windows into a router ─────────────────────────
+    try {
+        set_global_ip_forwarding(true);
+        set_interface_forwarding(adaptername_,  true);  // Wintun
+        set_interface_forwarding(real_adapter_, true);  // public NIC
+        std::cout << "[✓] IP forwarding enabled\n";
+    }
+    catch (const std::exception& ex) {
+        std::cerr << "[!] Could not enable routing: " << ex.what()
+                  << "\n    Run the server as Administrator.\n";
+    }
 }
 
 void VpnServer::createAdapter()
@@ -150,7 +162,7 @@ void VpnServer::createAdapter()
 
     SetStaticIPv4Address(adaptername_, local_ip_, subnetmask_);
     run_command_hidden("netsh interface ipv4 add route prefix=10.10.100.0/24 interface=\"" +
-                       adaptername_ + "\" nexthop=" + gateway_ + " metric=1");
+                   adaptername_ + "\" metric=1 store=persistent");
     run_command_hidden("netsh interface ipv4 set subinterface \"" + adaptername_ +
                        "\" mtu=1380 store=persistent");
 }
@@ -180,15 +192,23 @@ inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
     std::cout << "[*] Listening on " << ip << ':' << port_ << '\n';
 }
 
-void VpnServer::cleanupNetwork()
-{
+void VpnServer::cleanupNetwork() {
     run_command_hidden("route delete 10.10.100.0 mask 255.255.255.0 10.10.100.1");
     run_command_hidden("route delete 10.10.100.0 mask 255.255.255.0 10.10.100.2");
     run_command_hidden("netsh interface ipv4 set address name=\"" + adaptername_ + "\" dhcp");
     run_command_hidden("netsh interface ipv4 set subinterface \"" + adaptername_ +
                        "\" mtu=1500 store=persistent");
-    run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_  + '"');
-    run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_  + '"');
+    run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_ + '"');
+    run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_ + '"');
+
+    // ─── NEW: disable forwarding we enabled at start ─────────────
+    try {
+        set_interface_forwarding(adaptername_, false);
+        set_interface_forwarding(real_adapter_, false);
+        set_global_ip_forwarding(false);
+    } catch (...) {
+        // best-effort; ignore if user disabled it manually
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -264,7 +284,7 @@ void VpnServer::handleClient(SOCKET sock)
         CHECK(ip_opt, "no free IPs");
         std::string ip = *ip_opt;
 
-        std::string cfg = "VPN_CFG:IP=" + ip + ";GW=10.10.100.1;MASK=255.255.255.0";
+        std::string cfg = "VPN_CFG:IP=" + ip + ";GW=10.10.100.1;MASK=255.255.255.255";
         SSL_write(raw, cfg.c_str(), (int)cfg.size());
 
         auto ssl = std::shared_ptr<SSL>(raw, SSL_free);
