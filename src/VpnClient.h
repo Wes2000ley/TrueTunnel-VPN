@@ -49,4 +49,12 @@ private:
 	std::shared_ptr<WintunSessionGuard> session_;  // <-- use shared_ptr to manage ownership
 	std::mutex session_mutex_;
 
+	static void tls_to_tun_client(WINTUN_SESSION_HANDLE session,
+	                              SSL*                  ssl,
+	                              std::atomic<bool>&    running,
+	                              std::mutex&           session_mutex)
+	{
+		auto noop = [](BYTE*, UINT) { return false; };
+		tls_to_tun_common(session, ssl, running, session_mutex, noop);
+	}
 };

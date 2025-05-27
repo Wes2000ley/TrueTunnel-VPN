@@ -137,19 +137,7 @@ void VpnServer::setupServer()
 
     AddICMPv4Rule();
 
-    // ─── NEW: turn Windows into a router ─────────────────────────
-    try {
-        run_command_admin("sc query RemoteAccess | find \"RUNNING\" || sc start RemoteAccess");
-        std::cout << "[✓] RemoteAccess service running\n";
 
-        set_global_ip_forwarding(true);
-        set_interface_forwarding(adaptername_, true); // Wintun
-        set_interface_forwarding(real_adapter_, true); // public NIC
-        std::cout << "[✓] IP forwarding enabled\n";
-    } catch (const std::exception &ex) {
-        std::cerr << "[!] Could not enable routing: " << ex.what()
-                << "\n    Run the server as Administrator.\n";
-    }
 }
 
 void VpnServer::createAdapter()
@@ -203,14 +191,7 @@ void VpnServer::cleanupNetwork() {
     run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_ + '"');
     run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_ + '"');
 
-    // ─── NEW: disable forwarding we enabled at start ─────────────
-    try {
-        set_interface_forwarding(adaptername_, false);
-        set_interface_forwarding(real_adapter_, false);
-        set_global_ip_forwarding(false);
-    } catch (...) {
-        // best-effort; ignore if user disabled it manually
-    }
+
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -316,7 +297,7 @@ void VpnServer::tlsClientEntry(std::shared_ptr<SSL>               ssl,
                     const std::string&                 src_ip,
                     std::shared_ptr<std::atomic<bool>> alive)
 {
-    tls_to_tun(session_->get(), ssl.get(), *alive, session_mutex_);
+    tls_to_tun_server(this, session_->get(), ssl.get(), *alive, session_mutex_);
 
     {   // remove client from map
         std::lock_guard lg(client_map_mutex_);
@@ -327,3 +308,19 @@ void VpnServer::tlsClientEntry(std::shared_ptr<SSL>               ssl,
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
+bool VpnServer::forward_to_client_if_known(const BYTE* packet, UINT size)
+{
+    std::string dst = extract_ipv4_string(packet + 16);
+
+    std::shared_lock rlk(client_map_mutex_);
+    auto it = client_map_.find(dst);
+    if (it == client_map_.end())
+        return false;                       // not a VPN peer
+
+    std::lock_guard lg(it->second.write_mutex);
+    std::vector<uint8_t> frame(size + 1);
+    frame[0] = PACKET_TYPE_IP;
+    std::memcpy(frame.data() + 1, packet, size);
+    SSL_write(it->second.ssl.get(), frame.data(), static_cast<int>(frame.size()));
+    return true;
+}

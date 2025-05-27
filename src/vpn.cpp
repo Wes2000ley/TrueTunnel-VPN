@@ -61,9 +61,6 @@ using termcolor::reset;
 
 #define CHECK(cond,msg)  do{ if(!(cond)) throw std::runtime_error(msg);}while(0)
 
-std::mutex ssl_read_mutex;
-std::mutex ssl_write_mutex;
-
 
 
 void LoadWintun() {
@@ -194,7 +191,7 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 }
 
 
-void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running, std::mutex &session_mutex) {
+/*void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running, std::mutex &session_mutex) {
 	std::cout << "[tls_to_tun] Started packet receiving thread\n";
 	char buf[1600] {};
 	while (running) {
@@ -242,7 +239,10 @@ if (pkt_type == PACKET_TYPE_IP) {
 			}
 		}
 	}
-}
+}*/
+
+
+
 
 
 std::mutex ssl_mutex;

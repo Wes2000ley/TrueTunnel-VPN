@@ -203,7 +203,7 @@ void VpnClient::configureAdapter() {
     WINTUN_SESSION_HANDLE raw_session = session_->get();
 
     std::thread(tun_to_tls, raw_session, raw_ssl, std::ref(running_)).detach();
-    std::thread(tls_to_tun, raw_session, raw_ssl, std::ref(running_), std::ref(session_mutex_)).detach();
+    std::thread(tls_to_tun_client, raw_session, raw_ssl, std::ref(running_), std::ref(session_mutex_)).detach();
 
     run_command_admin(
     "Get-NetConnectionProfile | "
