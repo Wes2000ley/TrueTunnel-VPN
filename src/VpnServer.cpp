@@ -139,14 +139,16 @@ void VpnServer::setupServer()
 
     // ─── NEW: turn Windows into a router ─────────────────────────
     try {
+        run_command_admin("sc query RemoteAccess | find \"RUNNING\" || sc start RemoteAccess");
+        std::cout << "[✓] RemoteAccess service running\n";
+
         set_global_ip_forwarding(true);
-        set_interface_forwarding(adaptername_,  true);  // Wintun
-        set_interface_forwarding(real_adapter_, true);  // public NIC
+        set_interface_forwarding(adaptername_, true); // Wintun
+        set_interface_forwarding(real_adapter_, true); // public NIC
         std::cout << "[✓] IP forwarding enabled\n";
-    }
-    catch (const std::exception& ex) {
+    } catch (const std::exception &ex) {
         std::cerr << "[!] Could not enable routing: " << ex.what()
-                  << "\n    Run the server as Administrator.\n";
+                << "\n    Run the server as Administrator.\n";
     }
 }
 
