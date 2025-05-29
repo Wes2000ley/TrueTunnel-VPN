@@ -1,136 +1,117 @@
-TrueTunnel VPN
-A secure, minimalist, FIPS-capable VPN over TCP using TLS and the Wintun driver.
-Designed for simple, authenticated IP tunnels between trusted peers — no third-party servers, just you and your traffic.
+# TrueTunnel VPN
 
-⚠️ Disclaimer: While this software uses the OpenSSL FIPS 140-3 validated module (fips.dll),
-this project and its author have not been certified or validated under FIPS 140-3 by NIST or CMVP.
-Use of this module does not imply your usage or distribution is FIPS-compliant or certified.
+*A secure, minimalist, FIPS-capable VPN for Windows that speaks raw IP over a
+TLS-encrypted TCP stream*.
 
-✨ Features
-🔒 Encrypted tunneling over TLS 1.2/1.3 using OpenSSL FIPS provider
+TrueTunnel creates a point-to-point or **multi-point** (one server, many
+clients) virtual /24 network with static addresses.  There are **no third-party
+servers or SaaS accounts** – only you and the peers you trust.
 
-🔐 Mutual authentication via HMAC-SHA256 over nonces + password
+> **FIPS disclaimer**  
+> This project **bundles the OpenSSL 3.1.2 FIPS 140-3 validated module
+> (`fips.dll`)**, but the TrueTunnel application itself has **not** been
+> submitted to NIST/CMVP for validation.  Using the module does *not* make your
+> deployment automatically FIPS-certified.
 
-💬 Interactive messaging channel over the encrypted tunnel
+---
 
-🧠 Raw IP tunnel via Wintun — handles TCP, UDP, ICMP, etc.
+## ✨ Features
 
-🌐 Static IP scheme for consistent point-to-point routing (new in V2)
+| Category          | Details                                                        |
+|-------------------|----------------------------------------------------------------|
+| **Crypto**        | TLS 1.2/1.3 with AES-GCM only • OpenSSL FIPS provider          |
+| **Auth**          | Mutual HMAC-SHA-256 over nonces + shared passphrase            |
+| **Tunnel**        | Raw IPv4 via **Wintun** (handles TCP/UDP/ICMP etc.)            |
+| **Topology**      | /24 static pool – now supports **multiple clients per server** |
+| **NAT-friendly**  | Client dials outbound TCP – no port-forwarding required        |
+| **Zero-install**  | Single portable EXE, no registry writes                        |
+| **Control-plane** | Optional in-band chat channel (`PACKET_TYPE_MSG`)              |
+| **GUI**           | Custom ImGui front-end with themed dropdowns & sliders         |
+| **Performance**   | Dual-threaded packet pumps, TCP NODELAY, zero-alloc fast path  |
+| **Code quality**  | C++23, static CRT, LTO, Control-Flow-Guard, `/guard:cf`        |
+| **Build**         | Pure CMake; all deps (Wintun, OpenSSL, ImGui) fetched locally  |
 
-🧱 Works through NAT (client side — no port forwarding required)
+---
 
-🎨 Custom GUI powered by Dear ImGui with stylized dropdowns and controls (new in V2)
+## 🧰 Requirements
 
-🪪 Single binary, no install, no registry modification
+* Windows 10/11 **with Administrator rights**
+* `wintun.dll` (bundled)
+* OpenSSL 3.x + `fips.dll`, `fipsmodule.cnf`, `openssl.cnf` (bundled)
+* A single TCP port open on the **server** 
 
-🧵 Dual-threaded packet pump with optional control channel
+---
 
-🖥️ Full Windows compatibility — ideal for power users or lab setups
+## 🛠️ Building
 
-🚀 Getting Started
-🧰 Requirements
-Windows 10/11 (admin privileges required)
-
-Wintun driver (wintun.dll must be present)
-
-OpenSSL 3.x with FIPS module (fips.dll, fipsmodule.cnf, openssl.cnf)
-
-🛠️ Building
-bash
-Copy
-Edit
-git clone https://github.com/yourname/vpn
-cd vpn
+```bash
+git clone https://github.com/<your-handle>/truetunnel
+cd truetunnel
 cmake -B build
 cmake --build build --config Release
-⚠️ First-Time Setup
-Run the FIPS install script once:
+On first run execute run_fipsinstall.bat once to initialise the FIPS
+module.
 
-bash
-Copy
-Edit
-run_fipsinstall.bat
-This sets up fipsmodule.cnf and configures OpenSSL to use the validated FIPS provider.
+🚀 Usage
+Role	Command	Notes
+Server	vpn.exe --mode server --port 4433 --password "<secret>"	Needs public IP or port-forward
+Client	vpn.exe --mode client --host <server-ip> --port 4433 --password "<secret>"	Works behind NAT
 
-🌐 Usage
-✅ Server (public IP or port-forwarded)
-Run vpn.exe in server mode and share your public IP with the client.
-The server will listen for connections on the configured port.
+Each client receives 10.10.100.x where x is deterministic for that client,
+so routes stay stable across reconnects.
 
-✅ Client (can be behind NAT)
-Run vpn.exe in client mode and provide:
+🧭 Network Behaviour
+Works through NAT and most firewalls (TCP outbound)
 
-Server IP and port
+Multi-client routing: server forwards peer-to-peer traffic in user-space
+before it hits the kernel, reducing latency
 
-Shared password
+Handles any IPv4 protocol (SSH, DNS, games, etc.)
 
-🧭 Network Behavior
-✅ Fully NAT-compatible client
-
-✅ Static IP point-to-point routing
-
-✅ Supports TCP, UDP, ICMP, DNS, and more
-
-✅ Compatible with tools like ping, curl, ssh, etc.
-
-⚠️ Server must be reachable from the client
+MTU fixed at 1380 (safe default through TLS/TCP)
 
 🔐 Security Design
-Layer	Technology	Details
-Transport	TCP	Encrypted with OpenSSL
-Encryption	TLS 1.2/1.3	AES-128/256-GCM only (FIPS only)
-Authentication	HMAC-SHA256	Derived from shared passphrase
-Tunnel Interface	Wintun	High-performance IP adapter
-Key Management	Ephemeral	3072-bit RSA self-signed per run
-Memory Security	OpenSSL Secure	Nonces & HMAC buffers zeroed
+Layer	Tech	Notes
+Transport	TCP	NODELAY + backlog tuning
+Encryption	TLS 1.2/1.3	AES-256-GCM / AES-128-GCM only
+Authentication	HMAC-SHA-256	Nonce + password, no PKI required
+Key exchange	Ephemeral RSA-3072	Generated at each start-up
+Tunnel IF	Wintun	In-kernel virtual NIC
+Memory hygiene	OpenSSL secure calloc	Key material cleansed on free
 
 📛 FIPS 140-3 Notice
-This project includes the OpenSSL FIPS 140-3 validated module (version 3.1.2, certificate #A3548)
-as provided by The OpenSSL Project. It is redistributed unmodified, alongside its official security policy.
+The OpenSSL 3.1.2 FIPS module (certificate #A3548) is redistributed unmodified
+along with its official security policy. You must perform your own
+validation to claim FIPS compliance for any regulated deployment.
 
-⚠️ FIPS Validation Disclaimer:
+CMVP site → https://csrc.nist.gov/projects/cryptographic-module-validation-program
 
-This software has not itself been validated by NIST or the CMVP.
-
-The author makes no claim of FIPS 140-3 certification for this application.
-
-Deployment in regulated environments requires your own compliance validation.
-
-For official CMVP guidance:
-👉 https://csrc.nist.gov/projects/cryptographic-module-validation-program
-
-📦 File Structure
-File	Description
-vpn.exe	Compiled VPN binary
-wintun.dll	Wintun driver DLL
-fips.dll	OpenSSL FIPS shared object
-fipsmodule.cnf	FIPS module configuration
-openssl.cnf	OpenSSL base config (loads FIPS module)
-run_fipsinstall.bat	One-time FIPS initialization script
+📦 Directory Layout (release ZIP)
+File	Purpose
+vpn.exe	TrueTunnel binary
+wintun.dll	WireGuard’s TUN driver
+fips.dll	OpenSSL validated module
+fipsmodule.cnf / openssl.cnf	FIPS & global OpenSSL config
+run_fipsinstall.bat	One-time FIPS initialisation script
 
 ⚠️ Known Limitations
-Single client per server instance
+IPv4 only (IPv6 roadmap)
 
-IPv4 only
+Static addresses (no built-in DHCP/DNS)
 
-Static IPs only — no DHCP, DNS, or dynamic routing
+No automatic reconnect/heartbeat yet
 
-Manual MTU tuning (1380 is a safe default)
+MTU hard-coded to 1380
 
-No reconnect or heartbeat logic (yet)
+Windows-only (Linux/macOS ports planned)
 
-Server must be run as Administrator
-
-🧪 Tested Scenarios
+✅ Test Matrix
 Scenario	Status
-NAT client ↔ public server	✅ Works
-LAN-only client/server	✅ Works
-TLS tunnel with ping, curl, SSH	✅ Works
-UDP (e.g., DNS, games)	✅ Works
-Large packets (> MTU)	⚠️ Limit
-Cellular network (client side)	✅ Works
-
-🛰---
+NAT client → public server	✅
+Multiple clients (3+)	✅ (latency ≤ 5 ms added)
+Large UDP bursts (gaming)	✅
+Cellular 4G client	✅
+> MTU fragmentation	⚠️ Passes but defers to TCP-MSS
 
 ## 🛰️ Traffic Flow (Client ↔ Server)
 
@@ -174,29 +155,26 @@ CLIENT (behind NAT)                            SERVER (public IP)
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+🧠 Roadmap
+UDP / QUIC transport option
 
-🧠 Future Ideas
-UDP or QUIC-based transport mode
+TUN/TAP support on Linux & macOS
 
-Linux/macOS support (via tun)
+Automatic reconnect & keep-alive
 
-Multi-client support on server
+Optional LZ4/Zstd compression
 
-NAT traversal helpers / punch-through
-
-Optional data compression
+GUI profile manager & QR import
 
 📜 License
-Dual-licensed under MIT or GPLv2 — your choice.
-
-⚠️ Use responsibly. Not certified for production use or export-controlled environments.
+Dual-licensed under MIT or GPL v2 – choose whichever suits your
+project.
 
 🙏 Credits
-Wintun by WireGuard
+WireGuard – Wintun
 
-OpenSSL (with FIPS provider)
+OpenSSL (FIPS provider)
 
-Dear ImGui for GUI
+Dear ImGui – GUI
 
-termcolor — Terminal styling helper
+termcolor – console styling
