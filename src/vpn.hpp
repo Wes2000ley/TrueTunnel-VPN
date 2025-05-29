@@ -10,6 +10,7 @@
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 
+#include <array>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -105,8 +106,6 @@ SslCtxPtr make_ssl_ctx(bool is_server);
 enum vpn_packet_type : uint8_t;
 
 
-inline std::mutex ssl_read_mutex;
-inline std::mutex ssl_write_mutex;
 
 constexpr uint8_t PACKET_TYPE_IP  = 0x01;
 constexpr uint8_t PACKET_TYPE_MSG = 0x02;
@@ -120,61 +119,66 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 void send_message(SSL *ssl, const std::string &msg);
 
 template<typename ForwardFn>
+// ─── single header / translation-unit ─────────────────────────────────────────
 inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
-					   SSL*                  ssl,
-					   std::atomic<bool>&    running,
-					   std::mutex&           session_mutex,
-					   ForwardFn             maybe_forward)          // 👈
+                              SSL*                  ssl,
+                              std::atomic<bool>&    running,
+                              std::mutex&           session_mutex,
+                              ForwardFn&&           maybe_forward)   // ← perfect-fwd
 {
-	char buf[1600]{};
-	while (running) {
-		uint8_t tag;
-		{
-			std::lock_guard<std::mutex> lg(ssl_read_mutex);
-			if (SSL_read(ssl, &tag, 1) <= 0) break;
-		}
+    thread_local std::array<uint8_t, 1600> buf;          // re-usable RX buffer
 
-		if (tag == PACKET_TYPE_IP) {
-			int n;
-			{
-				std::lock_guard<std::mutex> lg(ssl_read_mutex);
-				n = SSL_read(ssl, buf, sizeof(buf));
-				if (n <= 0) {
-					int err = SSL_get_error(ssl, n);
-					if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
-						continue;
-					break;
-				}
-			}
+    while (running)
+    {
+        uint8_t tag{};
+        if (SSL_read(ssl, &tag, 1) <= 0)
+            break;                                       // connection closed / error
 
-			/* ① server may short-circuit here */
-			if (maybe_forward(reinterpret_cast<BYTE*>(buf), static_cast<UINT>(n)))
-				continue;
+        if (tag == PACKET_TYPE_IP)
+        {
+            int n = SSL_read(ssl,
+                             buf.data(),
+                             static_cast<int>(buf.size()));
+            if (n <= 0)
+            {
+                int err = SSL_get_error(ssl, n);
+                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+                    continue;
+                break;
+            }
 
-			/* ② otherwise inject into local Wintun */
-			std::lock_guard<std::mutex> lg(session_mutex);
-			void* pkt = WintunAllocateSendPacket(session, static_cast<UINT>(n));
-			if (!pkt) break;
-			std::memcpy(pkt, buf, n);
-			WintunSendPacket(session, pkt, n);
-		}
-		else if (tag == PACKET_TYPE_MSG) {
-			char msg_buf[1024] = {};
-			int n = 0;
-			{
-				std::lock_guard<std::mutex> lock(ssl_read_mutex);
-				n = SSL_read(ssl, msg_buf, sizeof(msg_buf) - 1);
-			}
-			if (n > 0) {
-				msg_buf[n] = '\0';
+            /* (1) server can short-circuit to the destination client */
+            if (maybe_forward(reinterpret_cast<BYTE*>(buf.data()),
+                              static_cast<UINT>(n)))
+                continue;
 
-				std::cout << "[📨] Message from peer: " << msg_buf << std::endl;
+            /* (2) otherwise inject into local Wintun */
+            std::lock_guard<std::mutex> lg(session_mutex);
+            void* pkt = WintunAllocateSendPacket(session,
+                                                 static_cast<UINT>(n));
+            if (!pkt) break;
 
-				if (std::string(msg_buf) == "/quit") {
-					std::cout << "[!] Peer requested disconnect. Closing session.\n";
-					break;
-				}
-			}
-		}
-	}
+            std::memcpy(pkt, buf.data(), n);
+            WintunSendPacket(session, pkt, static_cast<UINT>(n));
+        }
+        else if (tag == PACKET_TYPE_MSG)
+        {
+            char msg_buf[1024]{};
+            int  n = SSL_read(ssl, msg_buf,
+                              static_cast<int>(sizeof(msg_buf) - 1));
+            if (n > 0)
+            {
+                msg_buf[n] = '\0';
+                std::cout << "[📨] Message from peer: "
+                          << msg_buf << '\n';
+
+                if (std::string_view(msg_buf) == "/quit")
+                {
+                    std::cout << "[!] Peer requested disconnect. "
+                                 "Closing session.\n";
+                    break;
+                }
+            }
+        }
+    }
 }

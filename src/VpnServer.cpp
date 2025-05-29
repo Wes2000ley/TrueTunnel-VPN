@@ -3,6 +3,8 @@
 //  FULL SOURCE — no omissions
 //  ──────────────────────────────────────────────────────────────────────────────
 
+#include <array>
+
 namespace std {
     class mutex;
 }
@@ -212,15 +214,13 @@ void VpnServer::tunReaderEntry()
         if (it != client_map_.end()) {
             std::lock_guard lg(it->second.write_mutex);
 
-            /* --- build one contiguous buffer: 1-byte tag + payload --- */
-            std::vector<uint8_t> frame(size + 1);
-            frame[0] = PACKET_TYPE_IP;
-            std::memcpy(frame.data() + 1, pkt, size);
+/* --- reuse thread-local buffer for zero allocations --- */
+            thread_local std::array<uint8_t, 1600 + 1> out;
+            out[0] = PACKET_TYPE_IP;
+            std::memcpy(out.data() + 1, pkt, size);
 
             /* --- single TLS record --- */
-            SSL_write(it->second.ssl.get(),
-                      frame.data(),
-                      static_cast<int>(frame.size()));
+            SSL_write(it->second.ssl.get(), out.data(), size + 1);
         }
         rlk.unlock();
 
@@ -229,9 +229,7 @@ void VpnServer::tunReaderEntry()
 }
 
 
-
-void VpnServer::acceptLoop()
-{
+void VpnServer::acceptLoop() {
     while (running_) {
         SOCKET c = accept(listen_sock_, nullptr, nullptr);
         if (c == INVALID_SOCKET) {
@@ -254,6 +252,9 @@ void VpnServer::handleClient(SOCKET sock)
         CHECK(raw, "SSL_new");
         CHECK(SSL_set_fd(raw, (int)sock) == 1, "SSL_set_fd");
         CHECK(SSL_accept(raw) > 0, "SSL_accept");
+
+        int flag = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));  // ✅ actual client socket
 
         HmacAuthenticator auth(raw, password_, true);
         CHECK(auth.succeeded(), "HMAC failed");
@@ -318,9 +319,9 @@ bool VpnServer::forward_to_client_if_known(const BYTE* packet, UINT size)
         return false;                       // not a VPN peer
 
     std::lock_guard lg(it->second.write_mutex);
-    std::vector<uint8_t> frame(size + 1);
+    thread_local std::array<uint8_t, 1600 + 1> frame;
     frame[0] = PACKET_TYPE_IP;
     std::memcpy(frame.data() + 1, packet, size);
-    SSL_write(it->second.ssl.get(), frame.data(), static_cast<int>(frame.size()));
+    SSL_write(it->second.ssl.get(), frame.data(), size + 1);
     return true;
 }
