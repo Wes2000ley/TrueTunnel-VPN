@@ -119,6 +119,10 @@ void VpnClient::connectToServer() {
         std::this_thread::sleep_for(std::chrono::seconds(3));
     }
 
+    // ✅ 2.5 Disable Nagle's Algorithm to reduce latency on small packets
+    setsockopt(sock.get(), IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(flag));
+
+
     sock_ = sock.release();
     std::cout << "[✓] Connected to server\n";
 }

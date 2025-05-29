@@ -1,10 +1,10 @@
-#include "VpnController.h"
-#include "vpn.hpp"
-#include "utils.hpp"
-#include "redirect_stream.hpp"
-#include "raii.hpp"
-#include "Networking.h"
-#include "HmacAuthenticator.h"
+#include "../VpnController.h"
+#include "../vpn.hpp"
+#include "../utils.hpp"
+#include "../redirect_stream.hpp"
+#include "../raii.hpp"
+#include "../Networking.h"
+#include "../HmacAuthenticator.h"
 
 
 #include <iostream>

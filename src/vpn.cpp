@@ -180,7 +180,6 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &runn
 		uint8_t type = PACKET_TYPE_IP;
 
 		{
-			std::lock_guard<std::mutex> lock(ssl_write_mutex);
 			SSL_write(ssl, &type, 1);
 			SSL_write(ssl, pkt, size);
 		}
@@ -248,9 +247,9 @@ if (pkt_type == PACKET_TYPE_IP) {
 std::mutex ssl_mutex;
 
 
-void send_message(SSL *ssl, const std::string &msg) {
-std::lock_guard<std::mutex> lock(ssl_write_mutex);
-	uint8_t packet_type = PACKET_TYPE_MSG;
-	SSL_write(ssl, &packet_type, 1);
-	SSL_write(ssl, msg.c_str(), static_cast<int>(msg.size()));
-}
+// void send_message(SSL *ssl, const std::string &msg) {
+// std::lock_guard<std::mutex> lock(ssl_write_mutex);
+// 	uint8_t packet_type = PACKET_TYPE_MSG;
+// 	SSL_write(ssl, &packet_type, 1);
+// 	SSL_write(ssl, msg.c_str(), static_cast<int>(msg.size()));
+// }
