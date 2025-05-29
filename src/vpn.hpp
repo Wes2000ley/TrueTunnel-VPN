@@ -27,7 +27,7 @@
 #include <functional>		  //  ← ask() validator
 #include <mutex>
 
-#include "termcolor.hpp"
+
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -44,11 +44,7 @@
 #pragma comment(lib,"iphlpapi.lib")
 
 class VpnServer;
-using termcolor::bold;
-using termcolor::green;
-using termcolor::yellow;
-using termcolor::red;
-using termcolor::reset;
+
 
 #define CHECK(cond,msg)  do{ if(!(cond)) throw std::runtime_error(msg);}while(0)
 

@@ -176,5 +176,3 @@ WireGuard – Wintun
 OpenSSL (FIPS provider)
 
 Dear ImGui – GUI
-
-termcolor – console styling

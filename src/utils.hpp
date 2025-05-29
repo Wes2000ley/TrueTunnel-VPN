@@ -17,7 +17,6 @@
 #include <stdexcept>
 #include <string>
 #include <functional>		  //  ← ask() validator
-#include "termcolor.hpp"
 
 
 #pragma comment(lib, "oleaut32.lib")
@@ -36,12 +35,6 @@
 #pragma comment(lib, "Shell32.lib")
 
 #define LOG(msg) if (log_callback) log_callback(msg); else std::cout << msg << "\n";
-
-using termcolor::bold;
-using termcolor::green;
-using termcolor::yellow;
-using termcolor::red;
-using termcolor::reset;
 
 // ─── pretty logging helpers ───────────────────────────────────
 namespace util {

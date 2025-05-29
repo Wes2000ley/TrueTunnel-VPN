@@ -40,13 +40,6 @@ Purpose: Renders the in-app graphical user interface, including dropdowns, butto
 
 Dear ImGui is statically linked and unmodified in this project.
 
-🎨 termcolor
-Repository: https://github.com/ikalnytskyi/termcolor
-
-License: BSD-3-Clause
-
-Purpose: Provides cross-platform terminal color output for better CLI readability.
-
 📄 License Summary
 This third-party license summary is current as of May 2025.
 If you redistribute TrueTunnel VPN or incorporate it into another product, you are responsible for ensuring your own compliance with all applicable third-party license terms — particularly in commercial, redistributed, or closed-source settings.
