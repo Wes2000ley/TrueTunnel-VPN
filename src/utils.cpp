@@ -20,7 +20,6 @@
 #include <string>
 #include <functional>		  //  ← ask() validator
 #include <regex>
-#include "termcolor.hpp"
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -37,24 +36,20 @@
 #pragma comment(lib,"ole32.lib")
 #pragma comment(lib,"iphlpapi.lib")
 
-using termcolor::bold;
-using termcolor::green;
-using termcolor::yellow;
-using termcolor::red;
-using termcolor::reset;
+
 
 // ─── pretty logging helpers ───────────────────────────────────
 namespace util {
 	void logInfo(const std::string &s) {
-		std::cout << bold << green << "[INFO] " << reset << s << std::endl;
+		std::cout << "[INFO] " << s << std::endl;
 	}
 
 	void logWarn(const std::string &s) {
-		std::cout << bold << yellow << "[WARN] " << reset << s << std::endl;
+		std::cout  << "[WARN] "  << s << std::endl;
 	}
 
 	void logErr(const std::string &s) {
-		std::cerr << bold << red << "[ERR ] " << reset << s << std::endl;
+		std::cerr  << "[ERR ] "  << s << std::endl;
 	}
 
 	bool looksLikeIp(const std::string &v) {
