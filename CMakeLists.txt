@@ -36,6 +36,7 @@ add_executable(vpn
         src/vpn.cpp
         src/utils.cpp
         src/VpnController.cpp
+        src/core/VpnDaemon.cpp
         src/raii.hpp
         src/main.cpp
         src/ImGuiStyleManager.cpp
@@ -163,6 +164,20 @@ if (MSVC)
         endif ()
     endforeach ()
 endif ()
+
+# Headless harness to exercise the VPN daemon abstraction without GUI dependencies
+add_executable(vpn_daemon_harness
+        tests/VpnDaemonHarness.cpp
+        src/core/VpnDaemon.cpp
+)
+
+target_include_directories(vpn_daemon_harness PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_definitions(vpn_daemon_harness PRIVATE
+        VPN_DAEMON_DISABLE_DEFAULT_FACTORY
+)
 
 # Embed a manifest so the EXE auto-elevates on Windows 
 set(EXE_MANIFEST "${CMAKE_SOURCE_DIR}/vpn.exe.manifest")
