@@ -8,8 +8,16 @@
 #include "imgui_impl_dx11.h"
 #include <d3d11.h>
 #include <mutex>
+#include <memory>
+#include <sstream>
+#include <iomanip>
+#include <ctime>
+#include <chrono>
+#include <thread>
+#include <vector>
+#include <stdexcept>
 #include <tchar.h>
-#include "VpnController.h"
+#include "core/VpnDaemon.h"
 #include "utils.hpp"
 #include "ImGuiStyleManager.h"
 #include "Networking.h"
@@ -17,7 +25,7 @@
 #define IDI_VPN_ICON 101
 
 
-static std::unique_ptr<VpnController> g_vpn_controller;
+static std::unique_ptr<VpnDaemon> g_vpn_daemon;
 
 
 // Data
@@ -358,56 +366,102 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			} else {
 				ImGui::Text("No network adapters found.");
 			}
-// Static buffers for logging and message input
-			static std::vector<std::string> log_lines;
-			static char message_input[256] = "";
-			const size_t max_log_lines = 5000;
+                        // Static buffers for logging and message input
+                        static std::vector<std::string> log_lines;
+                        static std::mutex log_mutex;
+                        static char message_input[256] = "";
+                        const size_t max_log_lines = 5000;
 
-			// Connect button
-			if (ImGui::Button("Connect")) {
-				log_lines.emplace_back("[System] Connect button pressed");
+                        // Connect button
+                        if (ImGui::Button("Connect")) {
+                                const auto format_with_timestamp = [](const std::string &message,
+                                                                       std::chrono::system_clock::time_point when) {
+                                        std::time_t tt = std::chrono::system_clock::to_time_t(when);
+                                        std::tm tm_buf{};
+#ifdef _WIN32
+                                        localtime_s(&tm_buf, &tt);
+#else
+                                        localtime_r(&tt, &tm_buf);
+#endif
+                                        std::ostringstream oss;
+                                        oss << "[" << std::put_time(&tm_buf, "%H:%M:%S") << "] " << message;
+                                        return oss.str();
+                                };
 
-				// Stop and destroy previous controller if it exists
-				if (g_vpn_controller) {
-					g_vpn_controller->stop(); // ✅ Waits for thread to exit
-					g_vpn_controller.reset(); // ✅ Destroys the object safely
-				}
+                                auto append_line = [&, format_with_timestamp](const std::string &message,
+                                                                              std::chrono::system_clock::time_point when =
+                                                                                  std::chrono::system_clock::now()) {
+                                        std::lock_guard<std::mutex> lock(log_mutex);
+                                        log_lines.emplace_back(format_with_timestamp(message, when));
+                                        if (log_lines.size() > max_log_lines) {
+                                                log_lines.erase(log_lines.begin(), log_lines.begin() + 100);
+                                        }
+                                };
 
-				// Create a new VPN controller
-				g_vpn_controller = std::make_unique<VpnController>();
+                                append_line("[System] Connect button pressed");
 
-				// Set logging
-				static std::mutex log_mutex;
-				g_vpn_controller->set_log_callback([](const std::string &msg) {
-					std::lock_guard<std::mutex> lock(log_mutex);
-					log_lines.emplace_back(msg);
-					if (log_lines.size() > max_log_lines) {
-						log_lines.erase(log_lines.begin(), log_lines.begin() + 100);
-					}
-				});
+                                if (g_vpn_daemon) {
+                                        g_vpn_daemon->stop();
+                                        g_vpn_daemon.reset();
+                                }
 
-				int port_num = 0;
-				try {
-					port_num = std::stoi(port);
-					if (port_num < 1 || port_num > 65535)
-						throw std::out_of_range("Invalid port range");
-				} catch (...) {
-					log_lines.emplace_back("[!] Invalid port entered");
-					port_num = 0; // or abort connection
-				}
+                                g_vpn_daemon = std::make_unique<VpnDaemon>();
 
-				// Start the connection with fresh params
-				bool success = g_vpn_controller->start(
-					mode, server_ip, std::stoi(port), local_ip, gateway, password,
-					adapter_name, subnet_mask, public_ip,
-					(current_adapter_idx_ >= 0 && current_adapter_idx_ < static_cast<int>(real_adapters_.size()))
-						? real_adapters_[current_adapter_idx_].name
-						: "Unknown");
+                                g_vpn_daemon->set_event_callback([format_with_timestamp, max_log_lines](
+                                                                     const VpnDaemon::TelemetryEvent &event) {
+                                        std::string payload;
+                                        switch (event.type) {
+                                                case VpnDaemon::EventType::Log:
+                                                        payload = event.message;
+                                                        break;
+                                                case VpnDaemon::EventType::Started:
+                                                        payload = "[*] " + event.message;
+                                                        break;
+                                                case VpnDaemon::EventType::Stopped:
+                                                        payload = "[*] " + event.message;
+                                                        break;
+                                                case VpnDaemon::EventType::Error:
+                                                        payload = "[!] " + event.message;
+                                                        break;
+                                        }
+                                        std::lock_guard<std::mutex> lock(log_mutex);
+                                        log_lines.emplace_back(format_with_timestamp(payload, event.timestamp));
+                                        if (log_lines.size() > max_log_lines) {
+                                                log_lines.erase(log_lines.begin(), log_lines.begin() + 100);
+                                        }
+                                });
 
-				if (!success) {
-					log_lines.emplace_back("[!] Failed to start VPN controller");
-				}
-			}
+                                int port_num = 0;
+                                try {
+                                        port_num = std::stoi(port);
+                                        if (port_num < 1 || port_num > 65535)
+                                                throw std::out_of_range("Invalid port range");
+                                } catch (...) {
+                                        append_line("[!] Invalid port entered");
+                                        port_num = 0; // or abort connection
+                                }
+
+                                VpnDaemon::SessionConfig config{};
+                                config.mode = mode;
+                                config.server_ip = server_ip;
+                                config.port = port_num;
+                                config.local_ip = local_ip;
+                                config.gateway = gateway;
+                                config.password = password;
+                                config.adapter_name = adapter_name;
+                                config.subnet_mask = subnet_mask;
+                                config.public_ip = public_ip;
+                                config.real_adapter = (current_adapter_idx_ >= 0 &&
+                                                      current_adapter_idx_ < static_cast<int>(real_adapters_.size()))
+                                                     ? real_adapters_[current_adapter_idx_].name
+                                                     : "Unknown";
+
+                                if (port_num == 0) {
+                                        append_line("[!] Aborting connection attempt due to invalid port");
+                                } else {
+                                        g_vpn_daemon->start(config);
+                                }
+                        }
 			ImGui::SameLine();
 			if (ImGui::Button("Disconnect")) {
 				ImGui::OpenPopup("ConfirmDisconnect");
@@ -416,14 +470,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			if (ImGui::BeginPopupModal("ConfirmDisconnect", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 				ImGui::Text("Are you sure you want to disconnect and quit?");
 				if (ImGui::Button("Yes, Disconnect")) {
-					if (g_vpn_controller && g_vpn_controller->is_running()) {
-						//g_vpn_controller->send_manual_message("/quit");
-						std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-					}
-					if (g_vpn_controller) {
-						g_vpn_controller->stop();
-						g_vpn_controller.reset();
-					}
+                                        if (g_vpn_daemon && g_vpn_daemon->is_running()) {
+                                                //g_vpn_daemon->send_manual_message("/quit");
+                                                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                                        }
+                                        if (g_vpn_daemon) {
+                                                g_vpn_daemon->stop();
+                                                g_vpn_daemon.reset();
+                                        }
 					::ExitProcess(EXIT_SUCCESS);
 				}
 				ImGui::SameLine();
@@ -491,9 +545,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
 			// Send logic
 			if (send_requested && strlen(message_input) > 0) {
-				if (g_vpn_controller && g_vpn_controller->is_running()) {
-					//g_vpn_controller->send_manual_message(message_input);
-				}
+                                if (g_vpn_daemon && g_vpn_daemon->is_running()) {
+                                        //g_vpn_daemon->send_manual_message(message_input);
+                                }
 
 				// Append to log
 				char formatted[256];
@@ -543,10 +597,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 	CleanupDeviceD3D();
 	::DestroyWindow(hwnd);
 	::UnregisterClassW(wc.lpszClassName, wc.hInstance);
-	if (g_vpn_controller) {
-		g_vpn_controller->stop();
-		g_vpn_controller.reset();
-	}
+        if (g_vpn_daemon) {
+                g_vpn_daemon->stop();
+                g_vpn_daemon.reset();
+        }
 
 	return 0;
 }
