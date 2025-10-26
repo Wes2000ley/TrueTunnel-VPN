@@ -70,6 +70,8 @@ public:
 private:
         void publish_event(EventType type, const std::string& message);
         void publish_event(const TelemetryEvent& event);
+        void dispatch_event(const TelemetryEvent& event);
+        void check_controller_health();
         void handle_log(const std::string& message);
         std::unique_ptr<IVpnController> make_controller();
 

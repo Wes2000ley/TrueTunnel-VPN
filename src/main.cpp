@@ -1,4 +1,5 @@
 #include <cstdio>
+#define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -20,6 +21,7 @@
 #include <vector>
 #include <stdexcept>
 #include <tchar.h>
+#include <algorithm>
 #include "core/VpnDaemon.h"
 #include "secure/CipherSuite.h"
 #include "utils.hpp"
@@ -30,6 +32,86 @@
 
 
 static std::unique_ptr<VpnDaemon> g_vpn_daemon;
+
+namespace {
+constexpr std::size_t kMaxLogLines    = 5000;
+constexpr std::size_t kLogPruneBatch  = 100;
+
+std::mutex g_log_mutex;
+std::vector<std::string> g_log_lines;
+
+std::string format_with_timestamp(const std::string& message,
+                                  std::chrono::system_clock::time_point when = std::chrono::system_clock::now()) {
+        std::time_t tt = std::chrono::system_clock::to_time_t(when);
+        std::tm tm_buf{};
+#ifdef _WIN32
+        localtime_s(&tm_buf, &tt);
+#else
+        localtime_r(&tt, &tm_buf);
+#endif
+        std::ostringstream oss;
+        oss << "[" << std::put_time(&tm_buf, "%H:%M:%S") << "] " << message;
+        return oss.str();
+}
+
+void append_log(const std::string& message,
+                std::chrono::system_clock::time_point when = std::chrono::system_clock::now()) {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        g_log_lines.emplace_back(format_with_timestamp(message, when));
+        if (g_log_lines.size() > kMaxLogLines) {
+                auto excess = g_log_lines.size() - kMaxLogLines;
+                auto prune  = std::max<std::size_t>(excess, kLogPruneBatch);
+                prune = std::min(prune, g_log_lines.size());
+                g_log_lines.erase(g_log_lines.begin(), g_log_lines.begin() + static_cast<std::ptrdiff_t>(prune));
+        }
+}
+
+std::vector<std::string> snapshot_logs() {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        return g_log_lines;
+}
+
+void clear_logs() {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        g_log_lines.clear();
+}
+
+const char* state_to_cstr(VpnDaemon::State state) {
+        switch (state) {
+                case VpnDaemon::State::Idle: return "Idle";
+                case VpnDaemon::State::Starting: return "Starting";
+                case VpnDaemon::State::Running: return "Running";
+                case VpnDaemon::State::Stopping: return "Stopping";
+        }
+        return "Unknown";
+}
+
+void handle_daemon_event(const VpnDaemon::TelemetryEvent& event) {
+        std::string payload;
+        switch (event.type) {
+                case VpnDaemon::EventType::Log:
+                        payload = event.message;
+                        break;
+                case VpnDaemon::EventType::Started:
+                        payload = "[*] " + event.message;
+                        break;
+                case VpnDaemon::EventType::Stopped:
+                        payload = "[*] " + event.message;
+                        break;
+                case VpnDaemon::EventType::Error:
+                        payload = "[!] " + event.message;
+                        break;
+        }
+        append_log(payload, event.timestamp);
+}
+
+void ensure_daemon() {
+        if (!g_vpn_daemon) {
+                g_vpn_daemon = std::make_unique<VpnDaemon>();
+                g_vpn_daemon->set_event_callback(handle_daemon_event);
+        }
+}
+} // namespace
 
 
 // Data
@@ -114,6 +196,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 	ScopedTimerResolution timer_res(1);
 
 	populate_real_adapters();
+	ensure_daemon();
 	SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM) h_icon);
 	SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM) h_icon_small);
 
@@ -418,212 +501,161 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			} else {
 				ImGui::Text("No network adapters found.");
 			}
-                        // Static buffers for logging and message input
-                        static std::vector<std::string> log_lines;
-                        static std::mutex log_mutex;
                         static char message_input[256] = "";
-                        const size_t max_log_lines = 5000;
+                        static bool auto_scroll = true;
+                        static int last_log_length = 0;
+                        static bool focus_message_input = true;
 
-                        // Connect button
+                        VpnDaemon::State daemon_state = g_vpn_daemon ? g_vpn_daemon->state() : VpnDaemon::State::Idle;
+                        const bool is_idle = (daemon_state == VpnDaemon::State::Idle);
+                        const bool is_running = (daemon_state == VpnDaemon::State::Running);
+                        const bool is_starting = (daemon_state == VpnDaemon::State::Starting);
+                        const bool is_stopping = (daemon_state == VpnDaemon::State::Stopping);
+
+                        ImVec4 state_color(0.70f, 0.70f, 0.70f, 1.0f);
+                        if (is_running) {
+                                state_color = ImVec4(0.20f, 0.80f, 0.30f, 1.0f);
+                        } else if (is_starting) {
+                                state_color = ImVec4(0.90f, 0.75f, 0.20f, 1.0f);
+                        } else if (is_stopping) {
+                                state_color = ImVec4(0.90f, 0.40f, 0.20f, 1.0f);
+                        }
+
+                        ImGui::TextColored(state_color, "Status: %s", state_to_cstr(daemon_state));
+
+                        bool connect_disabled = !g_vpn_daemon || !is_idle;
+                        ImGui::BeginDisabled(connect_disabled);
                         if (ImGui::Button("Connect")) {
-                                const auto format_with_timestamp = [](const std::string &message,
-                                                                       std::chrono::system_clock::time_point when) {
-                                        std::time_t tt = std::chrono::system_clock::to_time_t(when);
-                                        std::tm tm_buf{};
-#ifdef _WIN32
-                                        localtime_s(&tm_buf, &tt);
-#else
-                                        localtime_r(&tt, &tm_buf);
-#endif
-                                        std::ostringstream oss;
-                                        oss << "[" << std::put_time(&tm_buf, "%H:%M:%S") << "] " << message;
-                                        return oss.str();
-                                };
-
-                                auto append_line = [&, format_with_timestamp](const std::string &message,
-                                                                              std::chrono::system_clock::time_point when =
-                                                                                  std::chrono::system_clock::now()) {
-                                        std::lock_guard<std::mutex> lock(log_mutex);
-                                        log_lines.emplace_back(format_with_timestamp(message, when));
-                                        if (log_lines.size() > max_log_lines) {
-                                                log_lines.erase(log_lines.begin(), log_lines.begin() + 100);
-                                        }
-                                };
-
-                                append_line("[System] Connect button pressed");
-
-                                if (g_vpn_daemon) {
-                                        g_vpn_daemon->stop();
-                                        g_vpn_daemon.reset();
-                                }
-
-                                g_vpn_daemon = std::make_unique<VpnDaemon>();
-
-                                g_vpn_daemon->set_event_callback([format_with_timestamp, max_log_lines](
-                                                                     const VpnDaemon::TelemetryEvent &event) {
-                                        std::string payload;
-                                        switch (event.type) {
-                                                case VpnDaemon::EventType::Log:
-                                                        payload = event.message;
-                                                        break;
-                                                case VpnDaemon::EventType::Started:
-                                                        payload = "[*] " + event.message;
-                                                        break;
-                                                case VpnDaemon::EventType::Stopped:
-                                                        payload = "[*] " + event.message;
-                                                        break;
-                                                case VpnDaemon::EventType::Error:
-                                                        payload = "[!] " + event.message;
-                                                        break;
-                                        }
-                                        std::lock_guard<std::mutex> lock(log_mutex);
-                                        log_lines.emplace_back(format_with_timestamp(payload, event.timestamp));
-                                        if (log_lines.size() > max_log_lines) {
-                                                log_lines.erase(log_lines.begin(), log_lines.begin() + 100);
-                                        }
-                                });
+                                append_log("[System] Connect requested");
 
                                 int port_num = 0;
                                 try {
                                         port_num = std::stoi(port);
-                                        if (port_num < 1 || port_num > 65535)
-                                                throw std::out_of_range("Invalid port range");
                                 } catch (...) {
-                                        append_line("[!] Invalid port entered");
-                                        port_num = 0; // or abort connection
+                                        port_num = 0;
                                 }
 
-                                VpnDaemon::SessionConfig config{};
-                                config.mode = mode;
-                                config.server_ip = server_ip;
-                                config.port = port_num;
-                                config.local_ip = local_ip;
-                                config.gateway = gateway;
-                                config.password = password;
-                                config.adapter_name = adapter_name;
-                                config.subnet_mask = subnet_mask;
-                                config.public_ip = public_ip;
-                                config.real_adapter = (current_adapter_idx_ >= 0 &&
-                                                      current_adapter_idx_ < static_cast<int>(real_adapters_.size()))
-                                                     ? real_adapters_[current_adapter_idx_].name
-                                                     : "Unknown";
-                                const int cipher_count = static_cast<int>(IM_ARRAYSIZE(cipher_labels));
-                                int cipher_index = (selected_cipher >= 0 && selected_cipher < cipher_count)
-                                                   ? selected_cipher
-                                                   : 0;
-                                const secure::CipherSuite chosen_cipher = cipher_values[cipher_index];
-                                config.cipher_suite = chosen_cipher;
-                                append_line(std::string("[*] Cipher suite: ") + cipher_labels[cipher_index]);
-                                config.transport = (selected_transport == 0)
-                                                   ? TransportProtocol::Tcp
-                                                   : TransportProtocol::Udp;
-                                append_line(std::string("[*] Transport: ") + transport_labels[selected_transport]);
-
-                                if (port_num == 0) {
-                                        append_line("[!] Aborting connection attempt due to invalid port");
+                                if (port_num < 1 || port_num > 65535) {
+                                        append_log("[!] Invalid port entered");
                                 } else {
-                                        g_vpn_daemon->start(config);
+                                        VpnDaemon::SessionConfig config{};
+                                        config.mode = mode;
+                                        config.server_ip = server_ip;
+                                        config.port = port_num;
+                                        config.local_ip = local_ip;
+                                        config.gateway = gateway;
+                                        config.password = password;
+                                        config.adapter_name = adapter_name;
+                                        config.subnet_mask = subnet_mask;
+                                        config.public_ip = public_ip;
+                                        config.real_adapter = (current_adapter_idx_ >= 0 &&
+                                                               current_adapter_idx_ < static_cast<int>(real_adapters_.size()))
+                                                              ? real_adapters_[current_adapter_idx_].alias
+                                                              : "Unknown";
+
+                                        const int cipher_count = static_cast<int>(IM_ARRAYSIZE(cipher_labels));
+                                        int cipher_index = (selected_cipher >= 0 && selected_cipher < cipher_count)
+                                                           ? selected_cipher
+                                                           : 0;
+                                        config.cipher_suite = cipher_values[cipher_index];
+                                        append_log(std::string("[*] Cipher suite: ") + cipher_labels[cipher_index]);
+
+                                        config.transport = (selected_transport == 0)
+                                                           ? TransportProtocol::Tcp
+                                                           : TransportProtocol::Udp;
+                                        append_log(std::string("[*] Transport: ") + transport_labels[selected_transport]);
+
+                                        bool started = g_vpn_daemon->start(config);
+                                        if (!started) {
+                                                append_log("[!] Failed to start VPN session");
+                                        }
                                 }
                         }
-			ImGui::SameLine();
-			if (ImGui::Button("Disconnect")) {
-				ImGui::OpenPopup("ConfirmDisconnect");
-			}
+                        ImGui::EndDisabled();
 
-			if (ImGui::BeginPopupModal("ConfirmDisconnect", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-				ImGui::Text("Are you sure you want to disconnect and quit?");
-				if (ImGui::Button("Yes, Disconnect")) {
-                                        if (g_vpn_daemon && g_vpn_daemon->is_running()) {
-                                                //g_vpn_daemon->send_manual_message("/quit");
-                                                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                                        }
+                        ImGui::SameLine();
+                        bool can_disconnect = g_vpn_daemon && (is_running || is_starting);
+                        ImGui::BeginDisabled(!can_disconnect);
+                        if (ImGui::Button("Disconnect")) {
+                                ImGui::OpenPopup("ConfirmDisconnect");
+                        }
+                        ImGui::EndDisabled();
+
+                        if (ImGui::BeginPopupModal("ConfirmDisconnect", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                                ImGui::Text("Disconnect the active VPN session?");
+                                if (ImGui::Button("Yes, Disconnect")) {
+                                        append_log("[System] Disconnect requested");
                                         if (g_vpn_daemon) {
                                                 g_vpn_daemon->stop();
-                                                g_vpn_daemon.reset();
                                         }
-					::ExitProcess(EXIT_SUCCESS);
-				}
-				ImGui::SameLine();
-				if (ImGui::Button("Cancel")) {
-					ImGui::CloseCurrentPopup();
-				}
-				ImGui::EndPopup();
-			}
+                                        ImGui::CloseCurrentPopup();
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::Button("Cancel")) {
+                                        ImGui::CloseCurrentPopup();
+                                }
+                                ImGui::EndPopup();
+                        }
 
-			ImGui::Separator();
-			ImGui::Text("Connection Log");
-			ImGui::SameLine();
-			if (ImGui::Button("Clear")) {
-				log_lines.clear();
-			}
-			ImGui::SameLine();
-			static bool auto_scroll = true;
-			ImGui::Checkbox("Auto-scroll", &auto_scroll);
+                        ImGui::Separator();
+                        ImGui::Text("Connection Log");
+                        ImGui::SameLine();
+                        if (ImGui::Button("Clear")) {
+                                clear_logs();
+                                last_log_length = 0;
+                        }
+                        ImGui::SameLine();
+                        ImGui::Checkbox("Auto-scroll", &auto_scroll);
 
-			float available_height = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f;
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.69f, 0.51f, 0.89f, 1.00f));
+                        float available_height = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f;
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.69f, 0.51f, 0.89f, 1.00f));
 
-			// Track previous content size
-			static int last_log_length = 0;
-			int current_log_length = static_cast<int>(log_lines.size());
-			// Begin log display
-			ImGui::BeginChild("log_box", ImVec2(0, available_height), true,
-			                  ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
+                        std::vector<std::string> log_snapshot = snapshot_logs();
+                        ImGui::BeginChild("log_box", ImVec2(0, available_height), true,
+                                          ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
 
-			for (const auto &line: log_lines)
-				ImGui::TextUnformatted(line.c_str());
+                        for (const auto &line : log_snapshot) {
+                                ImGui::TextUnformatted(line.c_str());
+                        }
 
-			if (auto_scroll && log_lines.size() > last_log_length) {
-				ImGui::SetScrollHereY(1.0f);
-				last_log_length = static_cast<int>(log_lines.size());
-			}
+                        if (auto_scroll && log_snapshot.size() > static_cast<std::size_t>(last_log_length)) {
+                                ImGui::SetScrollHereY(1.0f);
+                        }
+                        last_log_length = static_cast<int>(log_snapshot.size());
 
-			ImGui::EndChild();
+                        ImGui::EndChild();
+                        ImGui::PopStyleColor();
 
-			ImGui::PopStyleColor();
+                        ImGui::Text("Message:");
+                        ImGui::SameLine();
+                        if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Enter a message to send through the VPN tunnel.");
+                        }
 
-			static bool focus_message_input = true; // <- new flag
+                        if (focus_message_input) {
+                                ImGui::SetKeyboardFocusHere();
+                                focus_message_input = false;
+                        }
 
-			ImGui::Text("Message:");
-			ImGui::SameLine();
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Enter a message to send through the VPN tunnel.");
+                        bool enter_pressed = ImGui::InputText(
+                                "##message",
+                                message_input,
+                                IM_ARRAYSIZE(message_input),
+                                ImGuiInputTextFlags_EnterReturnsTrue
+                        );
 
-			// Focus box if requested
-			if (focus_message_input) {
-				ImGui::SetKeyboardFocusHere();
-				focus_message_input = false;
-			}
+                        bool send_requested = enter_pressed || ImGui::Button("Send Message");
 
-			// Input box
-			bool enter_pressed = ImGui::InputText(
-				"##message",
-				message_input,
-				IM_ARRAYSIZE(message_input),
-				ImGuiInputTextFlags_EnterReturnsTrue
-			);
-
-			// Send button
-			bool send_requested = enter_pressed || ImGui::Button("Send Message");
-
-			// Send logic
-			if (send_requested && strlen(message_input) > 0) {
+                        if (send_requested && message_input[0] != '\0') {
                                 bool sent = false;
                                 if (g_vpn_daemon && g_vpn_daemon->is_running()) {
                                         sent = g_vpn_daemon->send_message(message_input);
                                 }
+                                append_log(std::string(sent ? "[You] " : "[!] Failed to send: ") + message_input);
 
-				// Append to log
-				char formatted[512];
-				snprintf(formatted, sizeof(formatted), sent ? "[You] %s" : "[!] Failed to send: %s", message_input);
-				log_lines.emplace_back(formatted);
-
-				// Clear input
-				message_input[0] = '\0';
-
-				// Refocus input box on next frame
-				focus_message_input = true;
-			}
+                                message_input[0] = '\0';
+                                focus_message_input = true;
+                        }
 
 
 			ImGui::End();

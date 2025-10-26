@@ -35,7 +35,7 @@
 // ─── pretty logging helpers ───────────────────────────────────
 namespace util {
 	void logInfo(const std::string &s) {
-		std::cout << "[INFO] " << s << std::endl;
+	std::cout << "[INFO] " << s << std::endl;
 	}
 
 	void logWarn(const std::string &s) {
@@ -198,7 +198,7 @@ bool run_command_admin(const std::string& command) {
 
 
 std::string sanitize_shell_string(const std::string &input) {
-	static const std::regex allowed(R"(^[a-zA-Z0-9 _\.\-]{1,64}$)");
+	static const std::regex allowed(R"(^[a-zA-Z0-9 _\.\-#\(\)]{1,128}$)");
 	if (!std::regex_match(input, allowed)) {
 		throw std::runtime_error("Unsafe characters in input string for shell command");
 	}

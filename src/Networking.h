@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <functional>		  //  ← ask() validator
+#include <optional>
 
 
 
@@ -42,16 +43,19 @@ void SetStaticIPv4Address(const std::string &adapter_name,
 
 void populate_real_adapters();
 
-inline std::vector<network_adapter_info> real_adapters_;     // name, IP
+inline std::vector<network_adapter_info> real_adapters_;     // alias/description/ip
 inline std::vector<std::string> adapter_labels_;             // owns the memory
 inline std::vector<const char*> adapter_cstrs_;              // points into adapter_labels_
 inline int current_adapter_idx_ = -1;
 
 std::string get_ipv4_for_adapter(const std::string &adapter_name);
+std::optional<std::string> get_gateway_for_adapter(const std::string& adapter_name);
 
 struct network_adapter_info {
-	std::string name;
+	std::string alias;       // Friendly name (used by netsh)
+	std::string description; // Adapter description
 	std::string ip;
+	ULONG if_index{0};
 };
 
 

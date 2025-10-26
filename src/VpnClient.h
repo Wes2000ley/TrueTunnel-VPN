@@ -9,6 +9,7 @@
 #include <optional>
 #include <string_view>
 #include <vector>
+#include <thread>
 #include <atomic>
 #include <mutex>
 
@@ -65,9 +66,16 @@ private:
 	std::unique_ptr<secure::SecureSocket> tls_;
 	std::atomic<bool> running_ = false;
 	std::optional<WintunAdapterGuard> adapter_;
-	std::shared_ptr<WintunSessionGuard> session_;  // <-- use shared_ptr to manage ownership
+	std::unique_ptr<WintunSessionGuard> session_;
 	std::mutex session_mutex_;
 	std::mutex tls_write_mutex_;
 	mutable std::mutex message_mutex_;
 	std::vector<std::string> received_messages_;
+	std::thread tun_thread_;
+	std::thread tls_thread_;
+	bool network_configured_ = false;
+	bool nat_public_installed_ = false;
+	bool nat_private_installed_ = false;
+	bool protected_route_installed_ = false;
+	std::string protected_route_gateway_;
 };

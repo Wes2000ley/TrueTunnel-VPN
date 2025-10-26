@@ -127,12 +127,23 @@ public:
 	}
 
 	~WintunSessionGuard() {
-		if (session_) {
-			WintunEndSession(session_);
-		}
+		reset();
 	}
 
 	WINTUN_SESSION_HANDLE get() const { return session_; }
+
+	void reset(WINTUN_SESSION_HANDLE session = nullptr) {
+		if (session_) {
+			WintunEndSession(session_);
+		}
+		session_ = session;
+	}
+
+	WINTUN_SESSION_HANDLE release() {
+		WINTUN_SESSION_HANDLE tmp = session_;
+		session_ = nullptr;
+		return tmp;
+	}
 
 private:
 	WINTUN_SESSION_HANDLE session_;

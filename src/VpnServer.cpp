@@ -26,6 +26,7 @@
 #include <iostream>
 #include <cstring>
 #include <utility>
+#include <system_error>
 
 // ——— Project headers ——————————————————————————————————————————
 #include "VpnServer.h"
@@ -70,17 +71,49 @@ void VpnServer::start()
     if (running_) return;
     running_ = true;
 
+    std::cout << "[INFO] Starting VPN server on port " << port_
+              << " using " << to_string(transport_) << "\n";
+
     LoadWintun();
     setupServer();
 }
 
 void VpnServer::stop()
 {
+    std::cout << "[INFO] Stopping VPN server; notifying clients\n";
     running_ = false;
 
     {   // tell clients to leave recv()
         std::unique_lock<std::shared_mutex> lk(client_map_mutex_);
         for (auto& [_, e] : client_map_) e.tls->close();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(tcp_workers_mutex_);
+        for (auto& worker : tcp_workers_) {
+            if (worker.alive) {
+                worker.alive->store(false);
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(udp_workers_mutex_);
+        for (auto& worker : udp_workers_) {
+            if (worker.alive) {
+                worker.alive->store(false);
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(udp_peers_mutex_);
+        for (auto& [_, state] : udp_peers_) {
+            if (!state) continue;
+            std::lock_guard<std::mutex> slk(state->mutex);
+            state->closed = true;
+            state->cv.notify_all();
+        }
     }
 
     if (listen_sock_ != INVALID_SOCKET) {
@@ -91,23 +124,33 @@ void VpnServer::stop()
         listen_sock_ = INVALID_SOCKET;
     }
 
+    if (session_) {
+        session_->reset();
+    }
+
     if (tun_reader_thread_.joinable()) tun_reader_thread_.join();
 
     if (transport_ == TransportProtocol::Tcp) {
         if (accept_thread_.joinable()) accept_thread_.join();
     } else {
-        {
-            std::lock_guard<std::mutex> lock(udp_peers_mutex_);
-            for (auto& [_, state] : udp_peers_) {
-                if (!state) continue;
-                std::lock_guard<std::mutex> slk(state->mutex);
-                state->closed = true;
-                state->cv.notify_all();
-            }
-        }
         if (udp_dispatch_thread_.joinable()) udp_dispatch_thread_.join();
-        udp_peers_.clear();
     }
+
+    pruneWorkers(tcp_workers_, tcp_workers_mutex_);
+    pruneWorkers(udp_workers_, udp_workers_mutex_);
+
+    session_.reset();
+
+    if (adapter_) {
+        adapter_->Reset();
+        adapter_.reset();
+    }
+
+    {
+        std::unique_lock<std::shared_mutex> lk(client_map_mutex_);
+        client_map_.clear();
+    }
+    udp_peers_.clear();
 
     cleanupNetwork();
     std::cout << "[✓] Server shutdown complete\n";
@@ -136,7 +179,7 @@ void VpnServer::setupServer()
 
     auto sess = WintunStartSession(adapter_->get(), 0x400000);
     CHECK(sess != nullptr, "WintunStartSession failed");
-    session_ = std::make_shared<WintunSessionGuard>(sess);
+    session_ = std::make_unique<WintunSessionGuard>(sess);
 
     // ——— Threads ——————————————————————————————————————————————
     tun_reader_thread_ = std::thread(&VpnServer::tunReaderEntry, this);
@@ -167,10 +210,38 @@ void VpnServer::createAdapter()
     adapter_.emplace(raw);
 
     SetStaticIPv4Address(adaptername_, local_ip_, subnetmask_);
+    run_command_hidden("netsh interface ipv4 delete route prefix=10.10.100.0/24 interface=\"" +
+                   adaptername_ + "\" store=active >nul 2>&1");
+    run_command_hidden("netsh interface ipv4 delete route prefix=10.10.100.0/24 interface=\"" +
+                   adaptername_ + "\" store=persistent >nul 2>&1");
     run_command_hidden("netsh interface ipv4 add route prefix=10.10.100.0/24 interface=\"" +
-                   adaptername_ + "\" metric=1 store=persistent");
+                   adaptername_ + "\" metric=1");
     run_command_hidden("netsh interface ipv4 set subinterface \"" + adaptername_ +
                        "\" mtu=1380 store=persistent");
+
+    // Recreate NAT bindings for tunnel ⇄ uplink interfaces
+    run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_ + "\" >nul 2>&1");
+    run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_ + "\" >nul 2>&1");
+
+    const std::string nat_public_cmd =
+        "netsh routing ip nat add interface \"" + real_adapter_ + "\" mode=full";
+    if (run_command_hidden(nat_public_cmd)) {
+        nat_public_installed_ = true;
+        std::cout << "[INFO] Enabled NAT on uplink interface '" << real_adapter_ << "'\n";
+    } else {
+        std::cerr << "[!] Failed to enable NAT on uplink interface '" << real_adapter_ << "'\n"
+                  << "      -> Install/enable the 'Routing and Remote Access' feature on Windows." << std::endl;
+    }
+
+    const std::string nat_private_cmd =
+        "netsh routing ip nat add interface \"" + adaptername_ + "\" mode=private";
+    if (run_command_hidden(nat_private_cmd)) {
+        nat_private_installed_ = true;
+        std::cout << "[INFO] Enabled NAT on tunnel interface '" << adaptername_ << "'\n";
+    } else {
+        std::cerr << "[!] Failed to enable NAT on tunnel interface '" << adaptername_ << "'\n"
+                  << "      -> Install/enable the 'Routing and Remote Access' feature on Windows." << std::endl;
+    }
 }
 
 void VpnServer::createListener() {
@@ -227,14 +298,56 @@ void VpnServer::createUdpListener()
     std::cout << "[*] Listening (UDP) on " << ip << ':' << port_ << '\n';
 }
 
+void VpnServer::addWorker(std::vector<ThreadBundle>& workers,
+                          std::mutex& mutex,
+                          std::shared_ptr<std::atomic<bool>> alive,
+                          std::thread&& worker)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    workers.emplace_back(std::move(alive), std::move(worker));
+}
+
+void VpnServer::pruneWorkers(std::vector<ThreadBundle>& workers, std::mutex& mutex)
+{
+    std::vector<std::thread> to_join;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = workers.begin();
+        while (it != workers.end()) {
+            if (!it->alive || !*(it->alive)) {
+                if (it->thread.joinable()) {
+                    to_join.emplace_back(std::move(it->thread));
+                }
+                it = workers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    for (auto& thread : to_join) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+}
+
 void VpnServer::cleanupNetwork() {
     run_command_hidden("route delete 10.10.100.0 mask 255.255.255.0 10.10.100.1");
     run_command_hidden("route delete 10.10.100.0 mask 255.255.255.0 10.10.100.2");
     run_command_hidden("netsh interface ipv4 set address name=\"" + adaptername_ + "\" dhcp");
     run_command_hidden("netsh interface ipv4 set subinterface \"" + adaptername_ +
                        "\" mtu=1500 store=persistent");
-    run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_ + "\"");
-    run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_ + "\"");
+    if (nat_public_installed_) {
+        run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_ + "\" >nul 2>&1");
+        nat_public_installed_ = false;
+    }
+    if (nat_private_installed_) {
+        run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_ + "\" >nul 2>&1");
+        nat_private_installed_ = false;
+    }
+    run_command_hidden("netsh interface ipv4 delete route prefix=10.10.100.0/24 interface=\"" + adaptername_ + "\" store=active >nul 2>&1");
+    run_command_hidden("netsh interface ipv4 delete route prefix=10.10.100.0/24 interface=\"" + adaptername_ + "\" store=persistent >nul 2>&1");
 
 
 }
@@ -247,13 +360,15 @@ void VpnServer::tunReaderEntry()
     // Elevate this pump
     ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     // Proper event usage: wait only when ring is empty
-    const HANDLE ev = WintunGetReadWaitEvent ? WintunGetReadWaitEvent(session_->get()) : nullptr;
+    WINTUN_SESSION_HANDLE session_handle = session_ ? session_->get() : nullptr;
+    if (!session_handle) return;
+    const HANDLE ev = WintunGetReadWaitEvent ? WintunGetReadWaitEvent(session_handle) : nullptr;
 
     while (running_) {
         // Drain all available packets
         for (;;) {
             UINT  size = 0;
-            BYTE* pkt  = static_cast<BYTE*>(WintunReceivePacket(session_->get(), &size));
+            BYTE* pkt  = static_cast<BYTE*>(WintunReceivePacket(session_handle, &size));
             if (!pkt) break;
             if (size >= 20) {
                 std::string dst_ip = extract_ipv4_string(pkt + 16);
@@ -265,7 +380,7 @@ void VpnServer::tunReaderEntry()
                 }
                 rlk.unlock();
             }
-            WintunReleaseReceivePacket(session_->get(), pkt);
+            WintunReleaseReceivePacket(session_handle, pkt);
         }
         if (!running_) break;
         const DWORD err = ::GetLastError();
@@ -295,11 +410,24 @@ void VpnServer::acceptLoop() {
     while (running_) {
         SOCKET c = accept(listen_sock_, nullptr, nullptr);
         if (c == INVALID_SOCKET) {
-            if (running_)
-                std::cerr << "[!] accept: " << WSAGetLastError() << '\n';
+            if (!running_) break;
+            std::cerr << "[!] accept: " << WSAGetLastError() << '\n';
             continue;
         }
-        std::thread(&VpnServer::handleClient, this, c).detach();
+        auto alive = std::make_shared<std::atomic<bool>>(true);
+        try {
+            std::thread worker(&VpnServer::handleClient, this, c, alive);
+            addWorker(tcp_workers_, tcp_workers_mutex_, alive, std::move(worker));
+        } catch (const std::system_error& ex) {
+            std::cerr << "[!] failed to launch client worker: " << ex.what() << '\n';
+            alive->store(false);
+            closesocket(c);
+        } catch (...) {
+            std::cerr << "[!] failed to launch client worker\n";
+            alive->store(false);
+            closesocket(c);
+        }
+        pruneWorkers(tcp_workers_, tcp_workers_mutex_);
     }
 }
 
@@ -379,7 +507,36 @@ void VpnServer::udpDispatchLoop() {
         }
 
         if (new_peer) {
-            std::thread(&VpnServer::handleUdpClient, this, state, std::move(key)).detach();
+            auto alive = std::make_shared<std::atomic<bool>>(true);
+            try {
+                std::thread worker(&VpnServer::handleUdpClient, this, state, key, alive);
+                addWorker(udp_workers_, udp_workers_mutex_, alive, std::move(worker));
+            } catch (const std::system_error& ex) {
+                std::cerr << "[!] failed to launch UDP worker: " << ex.what() << '\n';
+                alive->store(false);
+                {
+                    std::lock_guard<std::mutex> lock(udp_peers_mutex_);
+                    udp_peers_.erase(key);
+                }
+                {
+                    std::lock_guard<std::mutex> guard(state->mutex);
+                    state->closed = true;
+                    state->cv.notify_all();
+                }
+            } catch (...) {
+                std::cerr << "[!] failed to launch UDP worker\n";
+                alive->store(false);
+                {
+                    std::lock_guard<std::mutex> lock(udp_peers_mutex_);
+                    udp_peers_.erase(key);
+                }
+                {
+                    std::lock_guard<std::mutex> guard(state->mutex);
+                    state->closed = true;
+                    state->cv.notify_all();
+                }
+            }
+            pruneWorkers(udp_workers_, udp_workers_mutex_);
         }
     }
 }
@@ -387,9 +544,27 @@ void VpnServer::udpDispatchLoop() {
 // ───────────────────────────────────────────────────────────────────────────────
 //  private – per-client handling
 // ───────────────────────────────────────────────────────────────────────────────
-void VpnServer::handleClient(SOCKET sock)
+void VpnServer::handleClient(SOCKET sock,
+                             std::shared_ptr<std::atomic<bool>> alive)
 {
+    if (!alive) {
+        alive = std::make_shared<std::atomic<bool>>(true);
+    }
+
+    std::string cid;
+    std::string remote_ip = "unknown";
     try {
+        sockaddr_storage peer{};
+        int peer_len = sizeof(peer);
+        if (getpeername(sock, reinterpret_cast<sockaddr*>(&peer), &peer_len) == 0 &&
+            peer.ss_family == AF_INET) {
+            char buf[INET_ADDRSTRLEN] = {};
+            const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(&peer);
+            if (inet_ntop(AF_INET, &ipv4->sin_addr, buf, sizeof(buf))) {
+                remote_ip = buf;
+            }
+        }
+
         auto tls = std::make_shared<secure::SecureSocket>(sock,
                                                           password_,
                                                           /*is_server=*/true,
@@ -406,7 +581,7 @@ void VpnServer::handleClient(SOCKET sock)
         req[rn]=0;
         CHECK(std::strcmp((char*)req.data(), "VPN_REQUEST_CONFIG") == 0, "bad cfg tag");
 
-        std::string cid = std::to_string(reinterpret_cast<uintptr_t>(tls.get()));
+        cid = std::to_string(reinterpret_cast<uintptr_t>(tls.get()));
         auto ip_opt     = ip_pool.assignTentative(cid);
         CHECK(ip_opt, "no free IPs");
         std::string ip = *ip_opt;
@@ -424,29 +599,40 @@ void VpnServer::handleClient(SOCKET sock)
 
         ip_pool.confirm(cid);
 
-        auto alive = std::make_shared<std::atomic<bool>>(true);
+        std::cout << "[+] Client " << remote_ip << " assigned " << ip << "\n";
 
-        // Launch client handler. Default arguments on member functions are not applied
-        // when invoking through a pointer-to-member, so wrap in a lambda and pass them.
-        std::thread([this, tls, ip, cid, alive]() {
-            this->tlsClientEntry(tls,
-                                 ip,
-                                 cid,
-                                 alive,
-                                 std::shared_ptr<UdpPeerState>{},
-                                 std::string{});
-        }).detach();
+        tlsClientEntry(tls,
+                       ip,
+                       cid,
+                       alive,
+                       std::shared_ptr<UdpPeerState>{},
+                       std::string{});
     }
     catch (const std::exception& e) {
         std::cerr << "[!] client: " << e.what() << '\n';
+        if (!cid.empty()) {
+            ip_pool.release(cid);
+        }
         closesocket(sock);
+    }
+
+    if (alive) {
+        alive->store(false);
+    }
+
+    if (!cid.empty()) {
+        std::cout << "[-] Client " << cid << " disconnected\n";
     }
 }
 
 void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
-                                std::string peer_key)
+                                std::string peer_key,
+                                std::shared_ptr<std::atomic<bool>> alive)
 {
     if (!state) return;
+    if (!alive) {
+        alive = std::make_shared<std::atomic<bool>>(true);
+    }
     // Per-peer processing thread
     ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
@@ -531,16 +717,14 @@ void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
                                 std::forward_as_tuple(tls, cid));
         }
 
-        auto alive = std::make_shared<std::atomic<bool>>(true);
+        std::cout << "[+] UDP client " << peer_key << " assigned " << ip << "\n";
 
-        std::thread(&VpnServer::tlsClientEntry,
-                    this,
-                    tls,
-                    ip,
-                    cid,
-                    alive,
-                    state,
-                    std::move(peer_key)).detach();
+        tlsClientEntry(tls,
+                       ip,
+                       cid,
+                       alive,
+                       state,
+                       peer_key);
     }
     catch (const std::exception& e) {
         std::cerr << "[!] udp-client: " << e.what() << '\n';
@@ -548,7 +732,18 @@ void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
         if (!cid.empty()) {
             ip_pool.release(cid);
         }
+        if (alive) {
+            alive->store(false);
+        }
+        std::cout << "[-] UDP client " << peer_key << " disconnected\n";
+        return;
     }
+
+    if (alive) {
+        alive->store(false);
+    }
+
+    std::cout << "[-] UDP client " << peer_key << " disconnected\n";
 }
 
 bool VpnServer::broadcast_payload(const std::string& payload, const std::string* skip_client_id) {
@@ -626,6 +821,10 @@ void VpnServer::tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
             std::lock_guard<std::mutex> lock(udp_peers_mutex_);
             udp_peers_.erase(peer_key);
         }
+    }
+
+    if (alive) {
+        alive->store(false);
     }
 }
 

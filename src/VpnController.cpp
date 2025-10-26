@@ -151,6 +151,20 @@ void VpnController::vpn_thread_func() {
 		}
 
 		while (running) {
+			if (client && !client->is_active()) {
+				util::logWarn("[!] Client session ended unexpectedly; shutting down");
+				client->stop();
+				client.reset();
+				running = false;
+				break;
+			}
+			if (server && !server->is_active()) {
+				util::logWarn("[!] Server stopped unexpectedly; shutting down");
+				server->stop();
+				server.reset();
+				running = false;
+				break;
+			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		}
 	} catch (const std::exception &ex) {

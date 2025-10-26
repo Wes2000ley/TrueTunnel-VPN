@@ -146,4 +146,6 @@ inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
             }
         }
     }
+
+    running = false;
 }

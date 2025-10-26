@@ -124,10 +124,12 @@ void VpnDaemon::stop() {
 }
 
 bool VpnDaemon::is_running() const {
+        const_cast<VpnDaemon*>(this)->check_controller_health();
         return state_.load() == State::Running;
 }
 
 VpnDaemon::State VpnDaemon::state() const {
+        const_cast<VpnDaemon*>(this)->check_controller_health();
         return state_.load();
 }
 
@@ -141,21 +143,8 @@ void VpnDaemon::publish_event(EventType type, const std::string &message) {
 }
 
 void VpnDaemon::publish_event(const TelemetryEvent &event) {
-        EventCallback cb;
-        {
-                std::lock_guard<std::mutex> lock(callback_mutex_);
-                cb = event_callback_;
-        }
-
-        if (!cb) {
-                return;
-        }
-
-        try {
-                cb(event);
-        } catch (...) {
-                // Swallow exceptions from user-provided callbacks to keep daemon stable
-        }
+        dispatch_event(event);
+        check_controller_health();
 }
 
 void VpnDaemon::handle_log(const std::string &message) {
@@ -179,4 +168,44 @@ bool VpnDaemon::send_message(const std::string& text) {
                 publish_event(EventType::Error, "Failed to send message");
         }
         return ok;
+}
+
+void VpnDaemon::dispatch_event(const TelemetryEvent& event) {
+        EventCallback cb;
+        {
+                std::lock_guard<std::mutex> lock(callback_mutex_);
+                cb = event_callback_;
+        }
+
+        if (!cb) {
+                return;
+        }
+
+        try {
+                cb(event);
+        } catch (...) {
+                // Swallow exceptions from user-provided callbacks to keep daemon stable
+        }
+}
+
+void VpnDaemon::check_controller_health() {
+        if (state_.load() != State::Running) {
+                return;
+        }
+
+        std::unique_ptr<IVpnController> controller;
+        {
+                std::lock_guard<std::mutex> guard(controller_mutex_);
+                if (!controller_ || controller_->is_running()) {
+                        return;
+                }
+                controller = std::move(controller_);
+        }
+
+        if (controller) {
+                controller->stop();
+        }
+
+        state_.store(State::Idle);
+        dispatch_event(make_event(EventType::Stopped, "VPN daemon detected controller shutdown"));
 }

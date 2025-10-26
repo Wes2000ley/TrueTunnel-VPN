@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include "Networking.h"
 
 
@@ -22,6 +23,7 @@
 #include <string>
 #include <functional>		  //  ← ask() validator
 #include <regex>
+#include <limits>
 
 
 #include <netfw.h>
@@ -60,49 +62,156 @@ std::string get_ipv4_for_adapter(const std::string &adapter_name) {
 	return "";
 }
 
+std::optional<std::string> get_gateway_for_adapter(const std::string& adapter_name) {
+	ULONG size = 0;
+	GetAdaptersAddresses(AF_INET,
+	                    GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST,
+	                    nullptr,
+	                    nullptr,
+	                    &size);
+
+	if (size == 0) {
+		return std::nullopt;
+	}
+
+	std::vector<BYTE> buffer(size);
+	IP_ADAPTER_ADDRESSES* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+
+	if (GetAdaptersAddresses(AF_INET,
+	                        GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST,
+	                        nullptr,
+	                        adapters,
+	                        &size) != NO_ERROR) {
+		return std::nullopt;
+	}
+
+	std::wstring target(adapter_name.begin(), adapter_name.end());
+	IP_ADAPTER_ADDRESSES* match = nullptr;
+
+	for (auto* adapter = adapters; adapter; adapter = adapter->Next) {
+		if (adapter->FriendlyName && target == adapter->FriendlyName) {
+			match = adapter;
+			break;
+		}
+	}
+
+	if (!match) {
+		return std::nullopt;
+	}
+
+	for (auto* gw = match->FirstGatewayAddress; gw; gw = gw->Next) {
+		if (!gw->Address.lpSockaddr || gw->Address.lpSockaddr->sa_family != AF_INET) {
+			continue;
+		}
+		auto* sa = reinterpret_cast<sockaddr_in*>(gw->Address.lpSockaddr);
+		char buf[INET_ADDRSTRLEN] = {};
+		if (inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf))) {
+			return std::string(buf);
+		}
+	}
+
+	PMIB_IPFORWARD_TABLE2 table = nullptr;
+	if (GetIpForwardTable2(AF_INET, &table) != NO_ERROR || !table) {
+		return std::nullopt;
+	}
+
+	std::optional<std::string> fallback_gateway;
+	ULONG best_metric = std::numeric_limits<ULONG>::max();
+
+	for (ULONG i = 0; i < table->NumEntries; ++i) {
+		const MIB_IPFORWARD_ROW2& row = table->Table[i];
+		if (row.InterfaceIndex != match->IfIndex)
+			continue;
+
+		if (row.DestinationPrefix.Prefix.si_family != AF_INET ||
+		    row.DestinationPrefix.PrefixLength != 0) {
+			continue;
+		}
+
+		if (row.NextHop.si_family != AF_INET)
+			continue;
+
+		char buf[INET_ADDRSTRLEN] = {};
+		if (!inet_ntop(AF_INET, &row.NextHop.Ipv4.sin_addr, buf, sizeof(buf)))
+			continue;
+
+		if (row.Metric < best_metric) {
+			best_metric = row.Metric;
+			fallback_gateway = std::string(buf);
+		}
+	}
+
+	if (table) {
+		FreeMibTable(table);
+	}
+
+	return fallback_gateway;
+}
+
 void populate_real_adapters() {
 	real_adapters_.clear();
 	adapter_labels_.clear();
 	adapter_cstrs_.clear();
 
 	ULONG out_buf_len = 0;
-	GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, nullptr, &out_buf_len);
+	GetAdaptersAddresses(AF_INET,
+	                     GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST,
+	                     nullptr,
+	                     nullptr,
+	                     &out_buf_len);
+
+	if (out_buf_len == 0) {
+		current_adapter_idx_ = -1;
+		return;
+	}
 
 	std::vector<BYTE> buffer(out_buf_len);
 	IP_ADAPTER_ADDRESSES* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
 
-	if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST, nullptr, addresses,
-							 &out_buf_len) != NO_ERROR) {
+	if (GetAdaptersAddresses(AF_INET,
+	                         GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_ANYCAST,
+	                         nullptr,
+	                         addresses,
+	                         &out_buf_len) != NO_ERROR) {
+		current_adapter_idx_ = -1;
 		return;
-							 }
+	}
 
 	for (IP_ADAPTER_ADDRESSES* adapter = addresses; adapter; adapter = adapter->Next) {
 		if (adapter->OperStatus != IfOperStatusUp || adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
 			continue;
 
-		std::string name = wide_to_utf8(adapter->FriendlyName);
-		std::string ip;
+		network_adapter_info info{};
+		info.alias = wide_to_utf8(adapter->FriendlyName ? adapter->FriendlyName : L"");
+		info.description = wide_to_utf8(adapter->Description ? adapter->Description : L"");
+		info.if_index = adapter->IfIndex;
 
 		for (IP_ADAPTER_UNICAST_ADDRESS* ua = adapter->FirstUnicastAddress; ua; ua = ua->Next) {
-			if (ua->Address.lpSockaddr->sa_family == AF_INET) {
+			if (ua->Address.lpSockaddr && ua->Address.lpSockaddr->sa_family == AF_INET) {
 				char ip_buf[INET_ADDRSTRLEN] = {};
-				sockaddr_in* ipv4 = reinterpret_cast<sockaddr_in*>(ua->Address.lpSockaddr);
-				inet_ntop(AF_INET, &ipv4->sin_addr, ip_buf, sizeof(ip_buf));
-				ip = ip_buf;
-				break;
+				const sockaddr_in* ipv4 = reinterpret_cast<const sockaddr_in*>(ua->Address.lpSockaddr);
+				if (inet_ntop(AF_INET, &ipv4->sin_addr, ip_buf, sizeof(ip_buf))) {
+					info.ip = ip_buf;
+					break;
+				}
 			}
 		}
 
-		real_adapters_.push_back({ name, ip });
+		if (info.alias.empty())
+			continue;
 
-		std::string label = name;
-		if (!ip.empty()) {
-			label += " (" + ip + ")";
+		std::string label = info.alias;
+        if (!info.description.empty()) {
+            label += " - " + info.description;
+        }
+		if (!info.ip.empty()) {
+			label += " (" + info.ip + ")";
 		}
+		label += " [ifIndex:" + std::to_string(info.if_index) + "]";
 
+		real_adapters_.push_back(info);
 		adapter_labels_.push_back(label);
 		adapter_cstrs_.push_back(adapter_labels_.back().c_str());
-
 	}
 
 	current_adapter_idx_ = adapter_cstrs_.empty() ? -1 : 0;
@@ -264,10 +373,10 @@ std::vector<network_adapter_info> list_real_network_adapters() {
 		if (adapter->OperStatus != IfOperStatusUp || adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
 			continue; // Skip loopback or down interfaces
 
-		network_adapter_info info;
-		info.name = adapter->FriendlyName
-			? wide_to_utf8(adapter->FriendlyName)
-			: "Unknown";
+	network_adapter_info info{};
+	info.alias = adapter->FriendlyName ? wide_to_utf8(adapter->FriendlyName) : "Unknown";
+	info.description = adapter->Description ? wide_to_utf8(adapter->Description) : std::string{};
+	info.if_index = adapter->IfIndex;
 
 		for (IP_ADAPTER_UNICAST_ADDRESS *ua = adapter->FirstUnicastAddress; ua; ua = ua->Next) {
 			if (ua->Address.lpSockaddr->sa_family == AF_INET) {

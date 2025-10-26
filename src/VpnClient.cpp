@@ -11,6 +11,7 @@
 #include <array>
 #include <limits>
 #include <string_view>
+#include <exception>
 
 #include "redirect_stream.hpp"
 
@@ -36,20 +37,50 @@ VpnClient::~VpnClient() {
 }
 
 void VpnClient::start() {
+    if (running_) {
+        std::cout << "[!] VpnClient already running; start request ignored\n";
+        return;
+    }
+
+    std::cout << "[INFO] Starting VPN client using " << to_string(transport_)
+              << " and cipher " << secure::to_string(cipher_suite_) << "\n";
+
     running_ = true;
-    connectToServer();
-    performHandshake();
-    requestConfig();
-    LoadWintun();
-    configureAdapter();
-   // startPacketForwarding();
-  //  startInputLoop();
+
+    try {
+        connectToServer();
+        performHandshake();
+        requestConfig();
+        LoadWintun();
+        configureAdapter();
+        std::cout << "[INFO] VPN client ready; forwarding packets\n";
+    } catch (...) {
+        running_ = false;
+        stop();
+        throw;
+    }
 }
 
 void VpnClient::stop() {
+    std::cout << "[INFO] Stopping VPN client\n";
     running_ = false;
 
-    if (tls_) { tls_->close(); tls_.reset(); }
+    if (tls_) {
+        tls_->close();
+    }
+
+    if (session_) {
+        session_->reset();
+    }
+
+    if (tun_thread_.joinable()) {
+        tun_thread_.join();
+    }
+    if (tls_thread_.joinable()) {
+        tls_thread_.join();
+    }
+
+    tls_.reset();
 
     if (sock_ != INVALID_SOCKET) {
         if (transport_ == TransportProtocol::Tcp) {
@@ -59,36 +90,47 @@ void VpnClient::stop() {
         sock_ = INVALID_SOCKET;
     }
 
-    // Delete route
-    std::string cmd_delete_route = "route delete 10.10.100.0 mask 255.255.255.0 10.10.100.1";
-    std::string cmd_delete_route2 = "route delete 10.10.100.0 mask 255.255.255.0 10.10.100.2";
-    std::string cmd_delete_route3 = "route delete 10.10.100.0 mask 255.255.255.0";
+    session_.reset();
 
-
-    // Reset IP address (optional)
-    std::string cmd_reset_ip = "netsh interface ipv4 set address name=\"" + adaptername_ + "\" dhcp";
-
-    // Remove MTU override (optional but cleaner)
-    std::string cmd_clear_mtu = "netsh interface ipv4 set subinterface \"" + adaptername_ +
-                                "\" mtu=1500 store=persistent";
-
-    run_command_hidden(cmd_delete_route);
-    run_command_hidden(cmd_delete_route2);
-    run_command_hidden(cmd_delete_route3);
-    run_command_hidden(cmd_reset_ip);
-    run_command_hidden(cmd_clear_mtu);
-
-
-        std::cout << "[*] Removing NAT rules\n";
-        std::string cmd_nat_pub = "netsh routing ip nat delete interface \"" + real_adapter_ + "\"";
-        std::string cmd_nat_priv = "netsh routing ip nat delete interface \"" + adaptername_ + "\"";
-
-        run_command_hidden(cmd_nat_pub);
-        run_command_hidden(cmd_nat_priv);
-        std::cout << "[*] Removing public IP route protection\n";
-        std::string cmd_remove_protect = "route delete " + public_ip_ + " >nul 2>&1";
-        run_command_hidden(cmd_remove_protect);
+    if (adapter_) {
+        adapter_->Reset();
+        adapter_.reset();
     }
+
+    if (network_configured_) {
+        const std::string cmd_delete_route  = "route delete 10.10.100.0 mask 255.255.255.0 10.10.100.1";
+        const std::string cmd_delete_route2 = "route delete 10.10.100.0 mask 255.255.255.0 10.10.100.2";
+        const std::string cmd_delete_route3 = "route delete 10.10.100.0 mask 255.255.255.0";
+        const std::string cmd_reset_ip      = "netsh interface ipv4 set address name=\"" + adaptername_ + "\" dhcp";
+        const std::string cmd_clear_mtu     = "netsh interface ipv4 set subinterface \"" + adaptername_ +
+                                              "\" mtu=1500 store=persistent";
+        run_command_hidden(cmd_delete_route);
+        run_command_hidden(cmd_delete_route2);
+        run_command_hidden(cmd_delete_route3);
+        run_command_hidden(cmd_reset_ip);
+        run_command_hidden(cmd_clear_mtu);
+
+        network_configured_ = false;
+    }
+    run_command_hidden("netsh interface ipv4 delete route prefix=10.10.100.0/24 interface=\"" + adaptername_ + "\" store=active >nul 2>&1");
+    run_command_hidden("netsh interface ipv4 delete route prefix=10.10.100.0/24 interface=\"" + adaptername_ + "\" store=persistent >nul 2>&1");
+
+    if (nat_public_installed_) {
+        run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_ + "\" >nul 2>&1");
+        nat_public_installed_ = false;
+    }
+    if (nat_private_installed_) {
+        run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_ + "\" >nul 2>&1");
+        nat_private_installed_ = false;
+    }
+    if (protected_route_installed_) {
+        run_command_hidden("route delete " + public_ip_ + " >nul 2>&1");
+        protected_route_installed_ = false;
+        protected_route_gateway_.clear();
+    }
+
+    std::cout << "[✓] VPN client stopped\n";
+}
 
 
 void VpnClient::connectToServer() {
@@ -198,6 +240,11 @@ void VpnClient::configureAdapter() {
     real_adapter_ = sanitize_shell_string(real_adapter_);
     gateway_ = sanitize_ip(gateway_);
 
+    nat_public_installed_ = false;
+    nat_private_installed_ = false;
+    protected_route_installed_ = false;
+    protected_route_gateway_.clear();
+
     GUID guid;
     CHECK(CoCreateGuid(&guid) == S_OK, "CoCreateGuid failed");
 
@@ -207,33 +254,90 @@ void VpnClient::configureAdapter() {
     WINTUN_ADAPTER_HANDLE raw = WintunCreateAdapter(wname.c_str(), L"Wintun", &guid);
     CHECK(raw != nullptr, "WintunCreateAdapter failed");
 
-    adapter_ = WintunAdapterGuard(raw);
+    adapter_.emplace(raw);
     std::cout << "[✓] Wintun adapter created\n";
 
     SetStaticIPv4Address(adaptername_, local_ip_, subnetmask_);
 
+    run_command_hidden("netsh interface ipv4 delete route prefix=10.10.100.0/24 interface=\"" + adaptername_ + "\" store=active >nul 2>&1");
+    run_command_hidden("netsh interface ipv4 delete route prefix=10.10.100.0/24 interface=\"" + adaptername_ + "\" store=persistent >nul 2>&1");
+
      std::string cmd1 = "netsh interface ipv4 add route prefix=10.10.100.0/24 "
                         "interface=\"" + adaptername_ + "\" "
-                        "nexthop=10.10.100.1 metric=1 store=persistent";
+                        "nexthop=10.10.100.1 metric=1";
 
     std::string cmd2 = "netsh interface ipv4 set subinterface \"" + adaptername_ + "\" mtu=1380 store=persistent";
 
     CHECK(run_command_hidden(cmd1), "route add failed");
     CHECK(run_command_hidden(cmd2), "set mtu failed");
+    network_configured_ = true;
 
     std::cout << "[✓] Adapter configured\n";
 
 
-    session_ = std::make_shared<WintunSessionGuard>(
-        WintunStartSession(adapter_->get(), 0x400000)
-    );
-    CHECK(session_->get(), "WintunStartSession failed");
-    std::cout << "Joining Threads\n";
+    WINTUN_SESSION_HANDLE session_handle = WintunStartSession(adapter_->get(), 0x400000);
+    CHECK(session_handle != nullptr, "WintunStartSession failed");
+    session_ = std::make_unique<WintunSessionGuard>(session_handle);
+
+    // Ensure the server endpoint always routes via the physical uplink once the tunnel is active
+    if (!public_ip_.empty()) {
+        run_command_hidden("route delete " + public_ip_ + " >nul 2>&1");
+        if (auto gw = get_gateway_for_adapter(real_adapter_); gw && !gw->empty() && *gw != public_ip_) {
+            protected_route_gateway_ = *gw;
+            const std::string protect_cmd =
+                "route add " + public_ip_ + " mask 255.255.255.255 " + protected_route_gateway_ + " metric 1";
+            if (run_command_hidden(protect_cmd)) {
+                protected_route_installed_ = true;
+                std::cout << "[*] Keeping server " << public_ip_ << " on uplink via "
+                          << protected_route_gateway_ << "\n";
+            } else {
+                std::cerr << "[!] Failed to protect route for server " << public_ip_ << "\n";
+            }
+        } else {
+            std::cerr << "[!] Unable to determine gateway for adapter '" << real_adapter_
+                      << "'; server route not pinned\n"
+                      << "      -> Ensure the adapter has a valid IPv4 gateway configured." << std::endl;
+        }
+    }
+
+    // Refresh NAT bindings so the tunnel can reach the internet
+    run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_ + "\" >nul 2>&1");
+    run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_ + "\" >nul 2>&1");
+
+    const std::string nat_public_cmd =
+        "netsh routing ip nat add interface \"" + real_adapter_ + "\" mode=full";
+    if (run_command_hidden(nat_public_cmd)) {
+        nat_public_installed_ = true;
+        std::cout << "[INFO] Enabled NAT on uplink interface '" << real_adapter_ << "'\n";
+    } else {
+        std::cerr << "[!] Failed to enable NAT on uplink interface '" << real_adapter_ << "'\n"
+                  << "      -> Install/enable the 'Routing and Remote Access' feature on Windows." << std::endl;
+    }
+
+    const std::string nat_private_cmd =
+        "netsh routing ip nat add interface \"" + adaptername_ + "\" mode=private";
+    if (run_command_hidden(nat_private_cmd)) {
+        nat_private_installed_ = true;
+        std::cout << "[INFO] Enabled NAT on tunnel interface '" << adaptername_ << "'\n";
+    } else {
+        std::cerr << "[!] Failed to enable NAT on tunnel interface '" << adaptername_ << "'\n"
+                  << "      -> Install/enable the 'Routing and Remote Access' feature on Windows." << std::endl;
+    }
 
     secure::SecureSocket* raw_tls = tls_.get();
     WINTUN_SESSION_HANDLE raw_session = session_->get();
-    std::thread(tun_to_tls, raw_session, raw_tls, std::ref(running_)).detach();
-    std::thread([this, raw_session, raw_tls]() {
+    auto tun_worker = [this, raw_session, raw_tls]() {
+        try {
+            tun_to_tls(raw_session, raw_tls, std::ref(running_));
+        } catch (const std::exception& ex) {
+            std::cerr << "[!] tun_to_tls thread error: " << ex.what() << "\n";
+            running_ = false;
+        }
+        std::cout << "[INFO] Stopped forwarding Wintun -> TLS\n";
+    };
+    tun_thread_ = std::thread(std::move(tun_worker));
+
+    auto tls_worker = [this, raw_session, raw_tls]() {
         auto noop = [](BYTE*, UINT) { return false; };
         auto on_message = [this](std::string_view msg) {
             handle_incoming_message(msg);
@@ -244,7 +348,12 @@ void VpnClient::configureAdapter() {
                           session_mutex_,
                           noop,
                           on_message);
-    }).detach();
+        if (running_) {
+            std::cerr << "[!] Secure channel closed by peer; stopping client\n";
+        }
+        running_ = false;
+    };
+    tls_thread_ = std::thread(std::move(tls_worker));
 
     run_command_admin(
     "Get-NetConnectionProfile | "

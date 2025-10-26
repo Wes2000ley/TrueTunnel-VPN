@@ -60,6 +60,7 @@ public:
     void start();   // idempotent
     void stop();    // blocks until fully shut down
     bool send_chat(const std::string& text);
+    [[nodiscard]] bool is_active() const { return running_.load(); }
 
 private:
     // ───────── setup / teardown ─────────
@@ -77,7 +78,8 @@ private:
 
 
     // ───────── per-client handling ──────
-    void handleClient(SOCKET client_sock);
+    void handleClient(SOCKET client_sock,
+                      std::shared_ptr<std::atomic<bool>> alive);
     struct UdpPeerState;
     void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
                         const std::string &src_ip,
@@ -86,7 +88,8 @@ private:
                         std::shared_ptr<UdpPeerState> udp_state = std::shared_ptr<UdpPeerState>{},
                         std::string peer_key = std::string{});
     void handleUdpClient(std::shared_ptr<UdpPeerState> state,
-                         std::string peer_key);
+                         std::string peer_key,
+                         std::shared_ptr<std::atomic<bool>> alive);
     void handle_client_message(secure::SecureSocket* tls, std::string_view message);
     std::optional<std::pair<std::string, std::string>> find_client_info_for_tls(secure::SecureSocket* tls) const;
     bool broadcast_payload(const std::string& payload, const std::string* skip_client_id = nullptr);
@@ -119,6 +122,18 @@ private:
         bool closed{false};
     };
 
+    struct ThreadBundle {
+        std::shared_ptr<std::atomic<bool>> alive;
+        std::thread thread;
+
+        ThreadBundle(std::shared_ptr<std::atomic<bool>> flag, std::thread&& worker)
+            : alive(std::move(flag)), thread(std::move(worker)) {}
+
+        ThreadBundle(ThreadBundle&&) noexcept = default;
+        ThreadBundle& operator=(ThreadBundle&&) noexcept = default;
+        ThreadBundle(const ThreadBundle&) = delete;
+        ThreadBundle& operator=(const ThreadBundle&) = delete;
+    };
 
     // ───────── configuration ─────────────
     int         port_;
@@ -135,7 +150,7 @@ private:
     // ───────── sockets / wintun / ssl ───
     SOCKET                                  listen_sock_ = INVALID_SOCKET;
     std::optional<WintunAdapterGuard>       adapter_;
-    std::shared_ptr<WintunSessionGuard>     session_;
+    std::unique_ptr<WintunSessionGuard>     session_;
 
     // ───────── global state ──────────────
     std::atomic<bool>                       running_{false};
@@ -152,6 +167,18 @@ private:
     std::thread udp_dispatch_thread_;
     std::unordered_map<std::string, std::shared_ptr<UdpPeerState>> udp_peers_;
     std::mutex udp_peers_mutex_;
+    std::mutex tcp_workers_mutex_;
+    std::vector<ThreadBundle> tcp_workers_;
+    std::mutex udp_workers_mutex_;
+    std::vector<ThreadBundle> udp_workers_;
+    bool nat_public_installed_ = false;
+    bool nat_private_installed_ = false;
+
+    void addWorker(std::vector<ThreadBundle>& workers,
+                   std::mutex& mutex,
+                   std::shared_ptr<std::atomic<bool>> alive,
+                   std::thread&& worker);
+    void pruneWorkers(std::vector<ThreadBundle>& workers, std::mutex& mutex);
     static void tls_to_tun_server(VpnServer *self,
                                   WINTUN_SESSION_HANDLE session,
                                   secure::SecureSocket *ssl,
