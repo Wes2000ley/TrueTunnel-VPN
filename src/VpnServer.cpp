@@ -238,30 +238,53 @@ void VpnServer::cleanupNetwork() {
 // ───────────────────────────────────────────────────────────────────────────────
 void VpnServer::tunReaderEntry()
 {
+    // Elevate this pump
+    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    // Proper event usage: wait only when ring is empty
+    const HANDLE ev = WintunGetReadWaitEvent ? WintunGetReadWaitEvent(session_->get()) : nullptr;
+
     while (running_) {
-        UINT  size = 0;
-        BYTE* pkt  = static_cast<BYTE*>(WintunReceivePacket(session_->get(), &size));
-        if (!pkt) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); continue; }
-        if (size < 20) { WintunReleaseReceivePacket(session_->get(), pkt); continue; }
-
-        std::string dst_ip = extract_ipv4_string(pkt + 16);
-
-        std::shared_lock<std::shared_mutex> rlk(client_map_mutex_);
-        auto it = client_map_.find(dst_ip);
-        if (it != client_map_.end()) {
-            std::lock_guard<std::mutex> lg(it->second.write_mutex);
-
-            /* --- single TLS record --- */
-            it->second.tls->send_record(PACKET_TYPE_IP, (const uint8_t*)pkt, (uint16_t)size);
+        // Drain all available packets
+        for (;;) {
+            UINT  size = 0;
+            BYTE* pkt  = static_cast<BYTE*>(WintunReceivePacket(session_->get(), &size));
+            if (!pkt) break;
+            if (size >= 20) {
+                std::string dst_ip = extract_ipv4_string(pkt + 16);
+                std::shared_lock<std::shared_mutex> rlk(client_map_mutex_);
+                auto it = client_map_.find(dst_ip);
+                if (it != client_map_.end()) {
+                    std::lock_guard<std::mutex> lg(it->second.write_mutex);
+                    it->second.tls->send_record(PACKET_TYPE_IP, pkt, static_cast<uint16_t>(size));
+                }
+                rlk.unlock();
+            }
+            WintunReleaseReceivePacket(session_->get(), pkt);
         }
-        rlk.unlock();
-
-        WintunReleaseReceivePacket(session_->get(), pkt);
+        if (!running_) break;
+        const DWORD err = ::GetLastError();
+        if (err == ERROR_NO_MORE_ITEMS) {
+            if (ev) {
+                DWORD wait_rc = ::WaitForSingleObject(ev, INFINITE);
+                if (wait_rc == WAIT_FAILED) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        } else if (err == ERROR_HANDLE_EOF) {
+            break;
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
 }
 
 
 void VpnServer::acceptLoop() {
+    // Make accept loop responsive under load
+    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
     if (transport_ != TransportProtocol::Tcp) return;
     while (running_) {
         SOCKET c = accept(listen_sock_, nullptr, nullptr);
@@ -291,6 +314,9 @@ std::string peer_key_from_addr(const sockaddr_storage& addr, int len) {
 } // namespace
 
 void VpnServer::udpDispatchLoop() {
+    // Dispatcher is latency sensitive
+    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
     constexpr std::size_t kMaxDatagram = 65535;
     std::vector<uint8_t> buffer(kMaxDatagram);
 
@@ -412,6 +438,9 @@ void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
                                 std::string peer_key)
 {
     if (!state) return;
+    // Per-peer processing thread
+    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
 
     std::string allocated_ip;
 

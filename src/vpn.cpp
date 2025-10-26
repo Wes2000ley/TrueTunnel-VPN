@@ -28,6 +28,10 @@
 #include <mutex>
 
 
+#include <mmsystem.h>     // timeBeginPeriod/timeEndPeriod
+#pragma comment(lib, "winmm.lib")
+
+
 #include "secure/SecureSocket.h"
 
 #include <ppltasks.h>
@@ -67,6 +71,7 @@ void LoadWintun() {
 		load_fn(WintunSendPacket, "WintunSendPacket");
 		load_fn(WintunReceivePacket, "WintunReceivePacket");
 		load_fn(WintunReleaseReceivePacket, "WintunReleaseReceivePacket");
+		load_fn(WintunGetReadWaitEvent, "WintunGetReadWaitEvent");
 	});
 }
 
@@ -74,20 +79,37 @@ void LoadWintun() {
 void tun_to_tls(WINTUN_SESSION_HANDLE session, secure::SecureSocket* tls, std::atomic<bool> &running) {
 	std::cout << "[tun_to_tls] Started packet forwarding thread\n";
 
+	// Raise priority for lower wake latency
+	::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
+	// Use Wintun read-wait event correctly (wait only when ring is empty)
+	const HANDLE ev = WintunGetReadWaitEvent ? WintunGetReadWaitEvent(session) : nullptr;
+
 	while (running) {
-		UINT32 size = 0;
-		void *pkt = WintunReceivePacket(session, &size);
-		if (!pkt) {
-			Sleep(1);
-			continue;
+		// Drain all available packets
+		for (;;) {
+			UINT32 size = 0;
+			BYTE *pkt = static_cast<BYTE*>(WintunReceivePacket(session, &size));
+			if (!pkt) break;
+			tls->send_record(PACKET_TYPE_IP, pkt, static_cast<uint16_t>(size));
+			WintunReleaseReceivePacket(session, pkt);
 		}
-
-	//	std::cout << "[tun_to_tls] Captured packet of size " << size << "\n";
-
-		tls->send_record(PACKET_TYPE_IP, (const uint8_t*)pkt, (uint16_t)size);
-
-
-		WintunReleaseReceivePacket(session, pkt);
+		if (!running) break;
+		const DWORD err = ::GetLastError();
+		if (err == ERROR_NO_MORE_ITEMS) {
+			if (ev) {
+				DWORD wait_rc = ::WaitForSingleObject(ev, INFINITE);
+				if (wait_rc == WAIT_FAILED) {
+					::Sleep(1);
+				}
+			} else {
+				::Sleep(1);
+			}
+		} else if (err == ERROR_HANDLE_EOF) {
+			break; // session ending
+		} else {
+			::Sleep(1); // transient/unknown
+		}
 	}
 }
 

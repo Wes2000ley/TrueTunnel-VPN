@@ -28,6 +28,7 @@
 #include <mutex>
 
 
+#include <windows.h>
 
 #include "secure/SecureSocket.h"
 
@@ -62,6 +63,9 @@ typedef void * (WINAPI *WINTUN_RECEIVE_PACKET_FUNC)(WINTUN_SESSION_HANDLE, UINT3
 
 typedef void (WINAPI *WINTUN_RELEASE_RECEIVE_PACKET_FUNC)(WINTUN_SESSION_HANDLE, void *);
 
+// New: waitable read event for blocking receive
+typedef HANDLE (WINAPI *WINTUN_GET_READ_WAIT_EVENT_FUNC)(WINTUN_SESSION_HANDLE);
+
 
 // ─── Inline globals ───────────────────────────────────────────────────────────
 // C++17 inline variables: exactly one definition, external linkage
@@ -74,6 +78,7 @@ inline WINTUN_ALLOCATE_SEND_PACKET_FUNC WintunAllocateSendPacket = nullptr;
 inline WINTUN_SEND_PACKET_FUNC WintunSendPacket = nullptr;
 inline WINTUN_RECEIVE_PACKET_FUNC WintunReceivePacket = nullptr;
 inline WINTUN_RELEASE_RECEIVE_PACKET_FUNC WintunReleaseReceivePacket = nullptr;
+inline WINTUN_GET_READ_WAIT_EVENT_FUNC WintunGetReadWaitEvent = nullptr;
 
 // ─── Load entry points ────────────────────────────────────────────────────────
 void LoadWintun();
@@ -102,6 +107,9 @@ inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
                               std::mutex&           session_mutex,
                               ForwardFn&&           maybe_forward)   // ← perfect-fwd
 {
+    // elevate this data-plane thread
+    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
     thread_local std::array<uint8_t, 1600> buf;          // re-usable RX buffer
 
     while (running)

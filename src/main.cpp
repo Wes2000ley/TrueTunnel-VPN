@@ -9,6 +9,9 @@
 #include <d3d11.h>
 #include <mutex>
 #include <memory>
+#include <mmsystem.h>   // timeBeginPeriod/timeEndPeriod
+#pragma comment(lib, "winmm.lib")
+
 #include <sstream>
 #include <iomanip>
 #include <ctime>
@@ -36,6 +39,30 @@ static IDXGISwapChain *g_pSwapChain = nullptr;
 static bool g_SwapChainOccluded = false;
 static UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 static ID3D11RenderTargetView *g_mainRenderTargetView = nullptr;
+
+namespace {
+class ScopedTimerResolution {
+public:
+	explicit ScopedTimerResolution(UINT period_ms) : period_(period_ms) {
+		if (timeBeginPeriod(period_) == TIMERR_NOERROR) {
+			active_ = true;
+		}
+	}
+	ScopedTimerResolution(const ScopedTimerResolution&) = delete;
+	ScopedTimerResolution& operator=(const ScopedTimerResolution&) = delete;
+	ScopedTimerResolution(ScopedTimerResolution&&) = delete;
+	ScopedTimerResolution& operator=(ScopedTimerResolution&&) = delete;
+	~ScopedTimerResolution() {
+		if (active_) {
+			timeEndPeriod(period_);
+		}
+	}
+	[[nodiscard]] bool active() const noexcept { return active_; }
+private:
+	UINT period_{1};
+	bool active_{false};
+};
+} // namespace
 
 // Forward declarations of helper functions
 bool CreateDeviceD3D(HWND hWnd);
@@ -82,6 +109,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
 	HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"True Tunnel VPN", WS_OVERLAPPEDWINDOW,
 	                            pos_x, pos_y, width, height, nullptr, nullptr, wc.hInstance, nullptr);
+
+	// Improve timer granularity for lower end-to-end latency
+	ScopedTimerResolution timer_res(1);
 
 	populate_real_adapters();
 	SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM) h_icon);
@@ -630,6 +660,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 	CleanupDeviceD3D();
 	::DestroyWindow(hwnd);
 	::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+
         if (g_vpn_daemon) {
                 g_vpn_daemon->stop();
                 g_vpn_daemon.reset();
