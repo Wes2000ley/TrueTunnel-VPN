@@ -16,14 +16,16 @@ VpnClient::VpnClient(const std::string& server_ip,
                      const std::string& adaptername,
                      const std::string& real_adapter,
                      const std::string& public_ip,
-                     secure::CipherSuite cipher)
+                     secure::CipherSuite cipher,
+                     TransportProtocol transport)
     : server_ip_(server_ip),
       port_(port),
       password_(password),
       adaptername_(adaptername),
       real_adapter_(real_adapter),
       public_ip_(public_ip),
-      cipher_suite_(cipher) {}
+      cipher_suite_(cipher),
+      transport_(transport) {}
 
 VpnClient::~VpnClient() {
     stop();
@@ -46,7 +48,9 @@ void VpnClient::stop() {
     if (tls_) { tls_->close(); tls_.reset(); }
 
     if (sock_ != INVALID_SOCKET) {
-        shutdown(sock_, SD_BOTH);
+        if (transport_ == TransportProtocol::Tcp) {
+            shutdown(sock_, SD_BOTH);
+        }
         closesocket(sock_);
         sock_ = INVALID_SOCKET;
     }
@@ -84,7 +88,8 @@ void VpnClient::stop() {
 
 
 void VpnClient::connectToServer() {
-    SOCKET raw_sock = socket(AF_INET, SOCK_STREAM, 0);
+    int type = (transport_ == TransportProtocol::Tcp) ? SOCK_STREAM : SOCK_DGRAM;
+    SOCKET raw_sock = socket(AF_INET, type, 0);
     CHECK(raw_sock != INVALID_SOCKET, "socket() failed");
 
     SocketGuard sock(raw_sock);
@@ -92,10 +97,10 @@ void VpnClient::connectToServer() {
     int reuse = 1;
     setsockopt(sock.get(), SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
 
-    // ✅ 2.5 Disable Nagle's Algorithm to reduce latency on small packets
-    int flag = 1;
-    setsockopt(sock.get(), IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(flag));
-
+    if (transport_ == TransportProtocol::Tcp) {
+        int flag = 1;
+        setsockopt(sock.get(), IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+    }
 
     std::string bind_ip = get_ipv4_for_adapter(real_adapter_);
     CHECK(!bind_ip.empty(), "Could not find adapter IP");
@@ -104,30 +109,57 @@ void VpnClient::connectToServer() {
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_port = 0;
     inet_pton(AF_INET, bind_ip.c_str(), &bind_addr.sin_addr);
-    CHECK(bind(sock.get(), (sockaddr*)&bind_addr, sizeof(bind_addr)) != SOCKET_ERROR, "bind() failed");
+    CHECK(bind(sock.get(), reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) != SOCKET_ERROR,
+          "bind() failed");
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(port_));
     inet_pton(AF_INET, public_ip_.c_str(), &addr.sin_addr);
 
-    std::cout << "[*] Connecting to " << public_ip_ << ":" << port_ << "...\n";
+    std::cout << "[*] Connecting (" << to_string(transport_) << ") to "
+              << public_ip_ << ":" << port_ << "...\n";
 
-    while (connect(sock.get(), (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+    while (connect(sock.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
         std::cerr << "[!] Connection failed, retrying...\n";
         std::this_thread::sleep_for(std::chrono::seconds(3));
     }
 
-    // ✅ 2.5 Disable Nagle's Algorithm to reduce latency on small packets
-    setsockopt(sock.get(), IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(flag));
-
+    if (transport_ == TransportProtocol::Tcp) {
+        int flag = 1;
+        setsockopt(sock.get(), IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+    }
 
     sock_ = sock.release();
-    std::cout << "[✓] Connected to server\n";
+    std::cout << "[✓] Connected using " << to_string(transport_) << " transport\n";
 }
 
 void VpnClient::performHandshake() {
-    tls_ = std::make_unique<secure::SecureSocket>(sock_, password_, /*is_server=*/false, cipher_suite_);
+    if (transport_ == TransportProtocol::Tcp) {
+        tls_ = std::make_unique<secure::SecureSocket>(sock_, password_, /*is_server=*/false, cipher_suite_);
+    } else {
+        auto send_fn = [s = sock_](const uint8_t* data, std::size_t len) -> bool {
+            int sent = send(s, reinterpret_cast<const char*>(data), static_cast<int>(len), 0);
+            return sent == static_cast<int>(len);
+        };
+
+        auto recv_fn = [s = sock_](std::vector<uint8_t>& out) -> bool {
+            out.resize(65535);
+            int got = recv(s, reinterpret_cast<char*>(out.data()), static_cast<int>(out.size()), 0);
+            if (got <= 0) return false;
+            out.resize(static_cast<std::size_t>(got));
+            return true;
+        };
+
+        auto transport = std::make_unique<secure::DatagramTransport>(std::move(send_fn), std::move(recv_fn));
+        tls_ = std::make_unique<secure::SecureSocket>(sock_,
+                                                      std::move(transport),
+                                                      password_,
+                                                      /*is_server=*/false,
+                                                      cipher_suite_,
+                                                      secure::TransportType::Datagram,
+                                                      /*owns_socket=*/true);
+    }
     tls_->handshake();
     std::cout << "[🔒] SecureTransport established (ECDHE+PSK, "
               << secure::to_string(cipher_suite_) << ")\n";

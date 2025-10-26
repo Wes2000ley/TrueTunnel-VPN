@@ -8,15 +8,18 @@
 #include <memory>
 #include <optional>
 
+#include "TransportProtocol.h"
+
 class VpnClient {
 public:
 	VpnClient(const std::string& server_ip,
-			  int port,
-			  const std::string& password,
-			  const std::string& adaptername,
-			  const std::string& real_adapter,
-			  const std::string& public_ip,
-			  secure::CipherSuite cipher);
+		  int port,
+		  const std::string& password,
+		  const std::string& adaptername,
+		  const std::string& real_adapter,
+		  const std::string& public_ip,
+		  secure::CipherSuite cipher,
+		  TransportProtocol transport);
 
 	~VpnClient();
 
@@ -43,6 +46,7 @@ private:
 	std::string subnetmask_;
 	std::string gateway_;
 	secure::CipherSuite cipher_suite_;
+	TransportProtocol transport_{TransportProtocol::Tcp};
 
 	SOCKET sock_ = INVALID_SOCKET;
 	std::unique_ptr<secure::SecureSocket> tls_;

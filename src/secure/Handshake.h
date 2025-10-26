@@ -1,7 +1,7 @@
 #pragma once
 #include "CngUtils.h"
 #include "CipherSuite.h"
-#include <winsock2.h>
+#include "Transport.h"
 #include <vector>
 #include <string>
 
@@ -25,7 +25,7 @@ namespace secure {
 	public:
 		// psk = UTF-8 bytes of your shared password
 		static HandshakeResult run(bool is_server,
-		                           SOCKET s,
+		                           ITransport& transport,
 		                           const std::vector<uint8_t>& psk,
 		                           CipherSuite suite);
 	};

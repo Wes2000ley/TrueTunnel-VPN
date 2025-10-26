@@ -21,7 +21,8 @@ VpnController::~VpnController() {
 bool VpnController::start(std::string m, std::string s_ip, int p, std::string l_ip,
                           std::string g, std::string pw, std::string a_name,
                           std::string mask, std::string pub_ip, std::string real_ad,
-                          secure::CipherSuite cipher) {
+                          secure::CipherSuite cipher,
+                          TransportProtocol transport) {
 	if (running) return false;
 
 	mode = std::move(m);
@@ -35,6 +36,7 @@ bool VpnController::start(std::string m, std::string s_ip, int p, std::string l_
 	public_ip = std::move(pub_ip);
 	real_adapter = std::move(real_ad);
 	cipher_suite = cipher;
+	transport_ = transport;
 
 	running = true;
 	vpn_thread = std::thread(&VpnController::vpn_thread_func, this);
@@ -127,15 +129,17 @@ void VpnController::vpn_thread_func() {
 					  << " (ECDH P-256, HMAC-SHA256)\n";
 		}
 
+		util::logInfo(std::string("[*] Transport protocol: ") + to_string(transport_));
+
 		if (mode == "server") {
 			util::logInfo("[*] Launching in server mode");
-			server = std::make_unique<VpnServer>(port, real_adapter, password, adaptername, cipher_suite);
+			server = std::make_unique<VpnServer>(port, real_adapter, password, adaptername, cipher_suite, transport_);
 			server->start();
 			util::logInfo("[✓] VpnServer started");
 		} else {
 			util::logInfo("[*] Launching in client mode");
 			client = std::make_unique<VpnClient>(
-				server_ip, port, password, adaptername, real_adapter, public_ip, cipher_suite);
+				server_ip, port, password, adaptername, real_adapter, public_ip, cipher_suite, transport_);
 			client->start();
 		}
 

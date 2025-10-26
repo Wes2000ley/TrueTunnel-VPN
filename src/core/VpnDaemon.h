@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 
+#include "TransportProtocol.h"
 #include "core/IVpnController.h"
 #include "secure/CipherSuite.h"
 
@@ -24,6 +25,7 @@ public:
                 std::string public_ip;
                 std::string real_adapter;
                 secure::CipherSuite cipher_suite{secure::CipherSuite::Aes256Gcm};
+                TransportProtocol transport{TransportProtocol::Tcp};
         };
 
         enum class State {

@@ -22,6 +22,7 @@
 #include "utils.hpp"
 #include "ImGuiStyleManager.h"
 #include "Networking.h"
+#include "TransportProtocol.h"
 #define IDI_VPN_ICON 101
 
 
@@ -256,15 +257,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			static char public_ip[64] = "192.168.50.10";
 			static int real_adapter_index = 0;
 
-			static const char *mode_options[] = {"server", "client"};
-			static int selected_mode = 0;
-			static const char *cipher_labels[] = {"AES-256-GCM", "AES-128-GCM", "ChaCha20-Poly1305"};
-			static const secure::CipherSuite cipher_values[] = {
-				secure::CipherSuite::Aes256Gcm,
-				secure::CipherSuite::Aes128Gcm,
-				secure::CipherSuite::ChaCha20Poly1305
-			};
-			static int selected_cipher = 0;
+		static const char *mode_options[] = {"server", "client"};
+		static int selected_mode = 0;
+		static const char *cipher_labels[] = {"AES-256-GCM", "AES-128-GCM", "ChaCha20-Poly1305"};
+		static const secure::CipherSuite cipher_values[] = {
+			secure::CipherSuite::Aes256Gcm,
+			secure::CipherSuite::Aes128Gcm,
+			secure::CipherSuite::ChaCha20Poly1305
+		};
+		static int selected_cipher = 0;
+		static const char *transport_labels[] = {"TCP", "UDP"};
+		static int selected_transport = 0;
 
 
 			ImGui::Text("Mode:");
@@ -356,11 +359,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 				ImGui::SetTooltip("This pre-shared password will be used for authentication.");
 			ImGui::InputText("##password", password, IM_ARRAYSIZE(password), ImGuiInputTextFlags_Password);
 
-			ImGui::Text("Cipher Suite:");
-			ImGui::SameLine();
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Choose the AEAD used to protect transport records.");
-			ImGui::Combo("##cipher_suite", &selected_cipher, cipher_labels, IM_ARRAYSIZE(cipher_labels));
+		ImGui::Text("Cipher Suite:");
+		ImGui::SameLine();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Choose the AEAD used to protect transport records.");
+		ImGui::Combo("##cipher_suite", &selected_cipher, cipher_labels, IM_ARRAYSIZE(cipher_labels));
+
+		ImGui::Text("Transport:");
+		ImGui::SameLine();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Select the underlying transport protocol for the secure tunnel.");
+		ImGui::Combo("##transport", &selected_transport, transport_labels, IM_ARRAYSIZE(transport_labels));
 
 			ImGui::Text("Server Public IP:");
 			ImGui::SameLine();
@@ -475,6 +484,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                                 const secure::CipherSuite chosen_cipher = cipher_values[cipher_index];
                                 config.cipher_suite = chosen_cipher;
                                 append_line(std::string("[*] Cipher suite: ") + cipher_labels[cipher_index]);
+                                config.transport = (selected_transport == 0)
+                                                   ? TransportProtocol::Tcp
+                                                   : TransportProtocol::Udp;
+                                append_line(std::string("[*] Transport: ") + transport_labels[selected_transport]);
 
                                 if (port_num == 0) {
                                         append_line("[!] Aborting connection attempt due to invalid port");

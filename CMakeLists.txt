@@ -50,6 +50,7 @@ add_executable(vpn
         src/VpnClient.h
         src/secure/AeadContext.cpp
         src/secure/RecordLayer.cpp
+        src/secure/Transport.cpp
         src/secure/SecureSocket.cpp
         src/secure/Handshake.cpp
         src/secure/AeadChaCha20Poly1305.cpp

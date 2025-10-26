@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 
+#include "TransportProtocol.h"
 #include "core/IVpnController.h"
 #include "secure/CipherSuite.h"
 
@@ -21,7 +22,8 @@ public:
         bool start(std::string m, std::string s_ip, int p, std::string l_ip,
                    std::string g, std::string pw, std::string a_name,
                    std::string mask, std::string pub_ip, std::string real_ad,
-                   secure::CipherSuite cipher) override;
+                   secure::CipherSuite cipher,
+                   TransportProtocol transport) override;
 
 
         void stop() override;
@@ -48,6 +50,7 @@ private:
         std::string public_ip;
         std::string real_adapter;
         secure::CipherSuite cipher_suite{secure::CipherSuite::Aes256Gcm};
+        TransportProtocol transport_{TransportProtocol::Tcp};
 
         std::unique_ptr<VpnClient> client;
         std::unique_ptr<VpnServer> server;

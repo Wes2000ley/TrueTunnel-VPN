@@ -19,7 +19,8 @@ public:
                    std::string subnet_mask,
                    std::string public_ip,
                    std::string real_adapter,
-                   secure::CipherSuite cipher_suite) override {
+                   secure::CipherSuite cipher_suite,
+                   TransportProtocol transport) override {
                 (void)mode;
                 (void)server_ip;
                 (void)port;
@@ -31,6 +32,7 @@ public:
                 (void)public_ip;
                 (void)real_adapter;
                 (void)cipher_suite;
+                (void)transport;
 
                 running_ = true;
                 if (log_callback_) {

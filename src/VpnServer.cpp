@@ -24,6 +24,8 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <cstring>
+#include <utility>
 
 // ——— Project headers ——————————————————————————————————————————
 #include "VpnServer.h"
@@ -45,12 +47,14 @@ VpnServer::VpnServer(int                port,
                      const std::string& real_adapter,
                      const std::string& password,
                      const std::string& adaptername,
-                     secure::CipherSuite cipher)
+                     secure::CipherSuite cipher,
+                     TransportProtocol transport)
     : port_{port},
       real_adapter_{real_adapter},
       password_{password},
       adaptername_{adaptername},
       cipher_suite_{cipher},
+      transport_{transport},
       listen_sock_{INVALID_SOCKET},
       running_{false}
 {
@@ -80,13 +84,30 @@ void VpnServer::stop()
     }
 
     if (listen_sock_ != INVALID_SOCKET) {
-        shutdown(listen_sock_, SD_BOTH);
+        if (transport_ == TransportProtocol::Tcp) {
+            shutdown(listen_sock_, SD_BOTH);
+        }
         closesocket(listen_sock_);
         listen_sock_ = INVALID_SOCKET;
     }
 
     if (tun_reader_thread_.joinable()) tun_reader_thread_.join();
-    if (accept_thread_.joinable())     accept_thread_.join();
+
+    if (transport_ == TransportProtocol::Tcp) {
+        if (accept_thread_.joinable()) accept_thread_.join();
+    } else {
+        {
+            std::lock_guard<std::mutex> lock(udp_peers_mutex_);
+            for (auto& [_, state] : udp_peers_) {
+                if (!state) continue;
+                std::lock_guard<std::mutex> slk(state->mutex);
+                state->closed = true;
+                state->cv.notify_all();
+            }
+        }
+        if (udp_dispatch_thread_.joinable()) udp_dispatch_thread_.join();
+        udp_peers_.clear();
+    }
 
     cleanupNetwork();
     std::cout << "[✓] Server shutdown complete\n";
@@ -113,7 +134,11 @@ void VpnServer::setupServer()
 
     // ——— Threads ——————————————————————————————————————————————
     tun_reader_thread_ = std::thread(&VpnServer::tunReaderEntry, this);
-    accept_thread_     = std::thread(&VpnServer::acceptLoop,   this);
+    if (transport_ == TransportProtocol::Tcp) {
+        accept_thread_ = std::thread(&VpnServer::acceptLoop, this);
+    } else {
+        udp_dispatch_thread_ = std::thread(&VpnServer::udpDispatchLoop, this);
+    }
 
     run_command_admin(
         "Get-NetConnectionProfile | "
@@ -142,29 +167,58 @@ void VpnServer::createAdapter()
                        "\" mtu=1380 store=persistent");
 }
 
-void VpnServer::createListener()
+void VpnServer::createListener() {
+    if (transport_ == TransportProtocol::Tcp) {
+        createTcpListener();
+    } else {
+        createUdpListener();
+    }
+}
+
+void VpnServer::createTcpListener()
 {
-SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
-CHECK(s != INVALID_SOCKET, "socket");
+    SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(s != INVALID_SOCKET, "socket");
 
-int reuse = 1;
-setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *) &reuse, sizeof(reuse));
+    int reuse = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *) &reuse, sizeof(reuse));
 
-int flag = 1;
-setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(flag));
+    int flag = 1;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(flag));
 
-sockaddr_in a{};
-a.sin_family = AF_INET;
-a.sin_port = htons(static_cast<uint16_t>(port_));
-std::string ip = get_ipv4_for_adapter(real_adapter_);
-CHECK(!ip.empty(), "bind ip empty");
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(static_cast<uint16_t>(port_));
+    std::string ip = get_ipv4_for_adapter(real_adapter_);
+    CHECK(!ip.empty(), "bind ip empty");
 
-inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
+    inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
     CHECK(bind(s, (sockaddr*)&a, sizeof(a)) != SOCKET_ERROR, "bind");
     CHECK(listen(s, SOMAXCONN)              != SOCKET_ERROR, "listen");
 
     listen_sock_ = s;
-    std::cout << "[*] Listening on " << ip << ':' << port_ << '\n';
+    std::cout << "[*] Listening (TCP) on " << ip << ':' << port_ << '\n';
+}
+
+void VpnServer::createUdpListener()
+{
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    CHECK(s != INVALID_SOCKET, "socket");
+
+    int reuse = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse));
+
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(static_cast<uint16_t>(port_));
+    std::string ip = get_ipv4_for_adapter(real_adapter_);
+    CHECK(!ip.empty(), "bind ip empty");
+    inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
+
+    CHECK(bind(s, (sockaddr*)&a, sizeof(a)) != SOCKET_ERROR, "bind");
+
+    listen_sock_ = s;
+    std::cout << "[*] Listening (UDP) on " << ip << ':' << port_ << '\n';
 }
 
 void VpnServer::cleanupNetwork() {
@@ -208,6 +262,7 @@ void VpnServer::tunReaderEntry()
 
 
 void VpnServer::acceptLoop() {
+    if (transport_ != TransportProtocol::Tcp) return;
     while (running_) {
         SOCKET c = accept(listen_sock_, nullptr, nullptr);
         if (c == INVALID_SOCKET) {
@@ -216,6 +271,84 @@ void VpnServer::acceptLoop() {
             continue;
         }
         std::thread(&VpnServer::handleClient, this, c).detach();
+    }
+}
+
+namespace {
+std::string peer_key_from_addr(const sockaddr_storage& addr, int len) {
+    char host[NI_MAXHOST]{};
+    char serv[NI_MAXSERV]{};
+    if (getnameinfo(reinterpret_cast<const sockaddr*>(&addr), len,
+                    host, sizeof(host), serv, sizeof(serv),
+                    NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+        return {};
+    }
+    std::string key(host);
+    key.push_back(':');
+    key.append(serv);
+    return key;
+}
+} // namespace
+
+void VpnServer::udpDispatchLoop() {
+    constexpr std::size_t kMaxDatagram = 65535;
+    std::vector<uint8_t> buffer(kMaxDatagram);
+
+    while (running_) {
+        sockaddr_storage addr{};
+        int addr_len = sizeof(addr);
+        int got = recvfrom(listen_sock_, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
+                           reinterpret_cast<sockaddr*>(&addr), &addr_len);
+        if (got <= 0) {
+            if (!running_) break;
+            int err = WSAGetLastError();
+            if (err == WSAEINTR) continue;
+            if (err == WSAEMSGSIZE) {
+                std::cerr << "[!] recvfrom truncated datagram\n";
+                continue;
+            }
+            std::cerr << "[!] recvfrom error: " << err << '\n';
+            continue;
+        }
+
+        std::vector<uint8_t> packet(static_cast<std::size_t>(got));
+        std::memcpy(packet.data(), buffer.data(), static_cast<std::size_t>(got));
+
+        auto key = peer_key_from_addr(addr, addr_len);
+        if (key.empty()) {
+            std::cerr << "[!] Unable to format peer address\n";
+            continue;
+        }
+
+        std::shared_ptr<UdpPeerState> state;
+        bool new_peer = false;
+        {
+            std::lock_guard<std::mutex> lock(udp_peers_mutex_);
+            auto it = udp_peers_.find(key);
+            if (it == udp_peers_.end()) {
+                state = std::make_shared<UdpPeerState>();
+                udp_peers_.emplace(key, state);
+                new_peer = true;
+            } else {
+                state = it->second;
+            }
+            if (state) {
+                state->addr = addr;
+                state->addr_len = addr_len;
+            }
+        }
+
+        if (!state) continue;
+
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->queue.emplace_back(std::move(packet));
+            state->cv.notify_one();
+        }
+
+        if (new_peer) {
+            std::thread(&VpnServer::handleUdpClient, this, state, std::move(key)).detach();
+        }
     }
 }
 
@@ -259,9 +392,15 @@ void VpnServer::handleClient(SOCKET sock)
 
         auto alive = std::make_shared<std::atomic<bool>>(true);
 
-        std::thread(&VpnServer::tlsClientEntry,
-                    this, tls, ip, alive)
-              .detach();
+        // Launch client handler. Default arguments on member functions are not applied
+        // when invoking through a pointer-to-member, so wrap in a lambda and pass them.
+        std::thread([this, tls, ip, alive]() {
+            this->tlsClientEntry(tls,
+                                 ip,
+                                 alive,
+                                 std::shared_ptr<UdpPeerState>{},
+                                 std::string{});
+        }).detach();
     }
     catch (const std::exception& e) {
         std::cerr << "[!] client: " << e.what() << '\n';
@@ -269,9 +408,114 @@ void VpnServer::handleClient(SOCKET sock)
     }
 }
 
+void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
+                                std::string peer_key)
+{
+    if (!state) return;
+
+    std::string allocated_ip;
+
+    auto cleanup_peer = [this, state, peer = peer_key]() {
+        {
+            std::lock_guard<std::mutex> state_lock(state->mutex);
+            state->closed = true;
+            state->cv.notify_all();
+        }
+        std::lock_guard<std::mutex> map_lock(udp_peers_mutex_);
+        udp_peers_.erase(peer);
+    };
+
+    try {
+        sockaddr_storage addr_copy{};
+        int addr_len = 0;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            addr_copy = state->addr;
+            addr_len = state->addr_len;
+        }
+
+        SOCKET sock_handle = listen_sock_;
+        auto send_fn = [sock_handle, addr_copy, addr_len](const uint8_t* data, std::size_t len) -> bool {
+            int sent = sendto(sock_handle,
+                              reinterpret_cast<const char*>(data),
+                              static_cast<int>(len),
+                              0,
+                              reinterpret_cast<const sockaddr*>(&addr_copy),
+                              addr_len);
+            return sent == static_cast<int>(len);
+        };
+
+        auto recv_fn = [state, this](std::vector<uint8_t>& out) -> bool {
+            std::unique_lock<std::mutex> lock(state->mutex);
+            state->cv.wait(lock, [&]() {
+                return !state->queue.empty() || state->closed || !this->running_;
+            });
+            if (state->queue.empty()) {
+                return false;
+            }
+            out = std::move(state->queue.front());
+            state->queue.pop_front();
+            return true;
+        };
+
+        auto transport = std::make_unique<secure::DatagramTransport>(std::move(send_fn), std::move(recv_fn));
+        auto tls = std::make_shared<secure::SecureSocket>(listen_sock_,
+                                                          std::move(transport),
+                                                          password_,
+                                                          /*is_server=*/true,
+                                                          cipher_suite_,
+                                                          secure::TransportType::Datagram,
+                                                          /*owns_socket=*/false);
+        tls->handshake();
+        std::cout << "[🔐] UDP client handshake completed (" << secure::to_string(cipher_suite_) << ")\n";
+
+        uint8_t typ = 0; std::array<uint8_t,64> req{};
+        int rn = tls->recv_record(typ, req.data(), req.size());
+        CHECK(rn > 0, "cfg read");
+        req[rn] = 0;
+        CHECK(std::strcmp(reinterpret_cast<char*>(req.data()), "VPN_REQUEST_CONFIG") == 0, "bad cfg tag");
+
+        std::string cid = std::to_string(reinterpret_cast<uintptr_t>(tls.get()));
+        auto ip_opt = ip_pool.assignTentative(cid);
+        CHECK(ip_opt, "no free IPs");
+        std::string ip = *ip_opt;
+
+        allocated_ip = ip;
+
+        std::string cfg = "VPN_CFG:IP=" + ip + ";GW=10.10.100.1;MASK=255.255.255.255";
+        tls->send_record(PACKET_TYPE_MSG, reinterpret_cast<const uint8_t*>(cfg.data()), static_cast<uint16_t>(cfg.size()));
+
+        {
+            std::unique_lock<std::shared_mutex> ul(client_map_mutex_);
+            client_map_.emplace(std::piecewise_construct,
+                                std::forward_as_tuple(ip),
+                                std::forward_as_tuple(tls));
+        }
+
+        auto alive = std::make_shared<std::atomic<bool>>(true);
+
+        std::thread(&VpnServer::tlsClientEntry,
+                    this,
+                    tls,
+                    ip,
+                    alive,
+                    state,
+                    std::move(peer_key)).detach();
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[!] udp-client: " << e.what() << '\n';
+        cleanup_peer();
+        if (!allocated_ip.empty()) {
+            ip_pool.release(allocated_ip);
+        }
+    }
+}
+
 void VpnServer::tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
-                    const std::string&                 src_ip,
-                    std::shared_ptr<std::atomic<bool>> alive)
+                               const std::string&                 src_ip,
+                               std::shared_ptr<std::atomic<bool>> alive,
+                               std::shared_ptr<UdpPeerState>      udp_state,
+                               std::string                        peer_key)
 {
     tls_to_tun_server(this, session_->get(), tls.get(), *alive, session_mutex_);
 
@@ -281,6 +525,17 @@ void VpnServer::tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
     }
     ip_pool.release(src_ip);
 
+    if (udp_state) {
+        {
+            std::lock_guard<std::mutex> lock(udp_state->mutex);
+            udp_state->closed = true;
+            udp_state->cv.notify_all();
+        }
+        if (!peer_key.empty()) {
+            std::lock_guard<std::mutex> lock(udp_peers_mutex_);
+            udp_peers_.erase(peer_key);
+        }
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────────

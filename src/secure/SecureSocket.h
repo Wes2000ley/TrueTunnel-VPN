@@ -1,15 +1,27 @@
 #pragma once
 #include "RecordLayer.h"
 #include "Handshake.h"
+#include <memory>
 #include <string>
 #include <vector>
 #include <cstdint>
 
 namespace secure {
+	enum class TransportType {
+		Stream,
+		Datagram
+	};
 
 	class SecureSocket {
 	public:
 		SecureSocket(SOCKET s, const std::string& psk, bool is_server, CipherSuite suite);
+		SecureSocket(SOCKET s,
+		             std::unique_ptr<ITransport> transport,
+		             const std::string& psk,
+		             bool is_server,
+		             CipherSuite suite,
+		             TransportType type,
+		             bool owns_socket);
 		~SecureSocket();
 
 		// 1) Perform handshake, derive keys
@@ -29,9 +41,12 @@ namespace secure {
 
 	private:
 		SOCKET s_{INVALID_SOCKET};
+		bool owns_socket_{true};
 		bool is_server_{false};
+		TransportType transport_type_{TransportType::Stream};
 		CipherSuite suite_{CipherSuite::Aes256Gcm};
 		std::vector<uint8_t> psk_;
+		std::unique_ptr<ITransport> transport_;
 
 		AeadContext send_aead_;
 		AeadContext recv_aead_;

@@ -24,11 +24,14 @@
 #include <vector>
 #include <atomic>
 #include <optional>
+#include <deque>
+#include <condition_variable>
 
 //
 //  Project headers
 //
 #include "IpPoolManager.h"     // IpPoolManager (thread-safe /24 allocator)
+#include "TransportProtocol.h"
 #include "raii.hpp"
 
 //
@@ -48,7 +51,8 @@ public:
               const std::string& real_adapter,
               const std::string& password,
               const std::string& adaptername,
-              secure::CipherSuite cipher);
+              secure::CipherSuite cipher,
+              TransportProtocol transport);
     ~VpnServer();
 
     void start();   // idempotent
@@ -60,17 +64,25 @@ private:
     void cleanupNetwork();
     void createAdapter();
     void createListener();
+    void createTcpListener();
+    void createUdpListener();
 
     // ───────── thread entry-points ───────
     void acceptLoop();                    // accepts TCP and spawns handleClient
     void tunReaderEntry();                // single reader: tun → tls (calls tun_to_tls)
+    void udpDispatchLoop();
 
 
     // ───────── per-client handling ──────
     void handleClient(SOCKET client_sock);
-void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
-                    const std::string &src_ip,
-                    std::shared_ptr<std::atomic<bool>> alive);
+    struct UdpPeerState;
+    void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
+                        const std::string &src_ip,
+                        std::shared_ptr<std::atomic<bool>> alive,
+                        std::shared_ptr<UdpPeerState> udp_state = std::shared_ptr<UdpPeerState>{},
+                        std::string peer_key = std::string{});
+    void handleUdpClient(std::shared_ptr<UdpPeerState> state,
+                         std::string peer_key);
 
     // ───────── types / helpers ──────────
     using TLSPtr = std::unique_ptr<secure::SecureSocket>;
@@ -86,6 +98,15 @@ void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
         ClientEntry& operator=(ClientEntry&&) = default;
     };
 
+    struct UdpPeerState {
+        sockaddr_storage addr{};
+        int addr_len{0};
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::deque<std::vector<uint8_t>> queue;
+        bool closed{false};
+    };
+
 
     // ───────── configuration ─────────────
     int         port_;
@@ -93,6 +114,7 @@ void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
     std::string password_;
     std::string adaptername_;
     secure::CipherSuite cipher_suite_{secure::CipherSuite::Aes256Gcm};
+    TransportProtocol transport_{TransportProtocol::Tcp};
 
     std::string local_ip_   = "10.10.100.1";
     std::string subnetmask_ = "255.255.255.0";
@@ -115,6 +137,9 @@ void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
 
     std::thread tun_reader_thread_;   // tun → tls dispatcher
     std::thread accept_thread_;       // TCP accept loop
+    std::thread udp_dispatch_thread_;
+    std::unordered_map<std::string, std::shared_ptr<UdpPeerState>> udp_peers_;
+    std::mutex udp_peers_mutex_;
     static void tls_to_tun_server(VpnServer *self,
                                   WINTUN_SESSION_HANDLE session,
                                   secure::SecureSocket *ssl,
