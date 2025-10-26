@@ -99,14 +99,33 @@ void VpnController::vpn_thread_func() {
 	util::logInfo("TLS handshake (expected later)");
 
 	try {
-		if (!is_running_as_admin()) {
+		if (!is_running_as_admin())
 			throw std::runtime_error("Administrator privileges required.");
-		}
+
 		ComInit com;
 		WsaInit wsa;
 
-		std::cout << "[✓] Using Windows CNG (ECDH P-256, " << secure::to_string(cipher_suite)
-		          << ", HMAC-SHA256)\n";
+		// Detect actual backend for ChaCha
+		bool using_chacha = (cipher_suite == secure::CipherSuite::ChaCha20Poly1305);
+		bool using_cng = true;
+		if (using_chacha) {
+			auto impl = secure::AeadContext::ch_override();
+			using_cng = (impl != secure::AeadContext::ChaChaImplOverride::Soft);
+		}
+
+		{
+			// Do a small probe to determine actual backend.
+			secure::AeadContext probe;
+			std::array<uint8_t,32> zero_key{};
+			std::array<uint8_t,4> zero_iv{};
+			probe.init(cipher_suite, zero_key, zero_iv);
+
+			std::cout << "[✓] Using "
+					  << (probe.cipher() == secure::CipherSuite::ChaCha20Poly1305
+							 ? (probe.using_cng() ? "Windows CNG ChaCha20-Poly1305" : "software ChaCha20-Poly1305")
+							 : "Windows CNG AES-GCM")
+					  << " (ECDH P-256, HMAC-SHA256)\n";
+		}
 
 		if (mode == "server") {
 			util::logInfo("[*] Launching in server mode");
@@ -115,13 +134,8 @@ void VpnController::vpn_thread_func() {
 			util::logInfo("[✓] VpnServer started");
 		} else {
 			util::logInfo("[*] Launching in client mode");
-			client = std::make_unique<VpnClient>(server_ip,
-			                                     port,
-			                                     password,
-			                                     adaptername,
-			                                     real_adapter,
-			                                     public_ip,
-			                                     cipher_suite);
+			client = std::make_unique<VpnClient>(
+				server_ip, port, password, adaptername, real_adapter, public_ip, cipher_suite);
 			client->start();
 		}
 

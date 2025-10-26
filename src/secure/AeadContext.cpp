@@ -46,6 +46,23 @@ void build_aad(uint8_t* aad, uint8_t type, uint64_t seq, uint16_t len) {
 
 } // namespace
 
+    // Read once: TT_CHACHA_IMPL = auto|cng|soft  (default auto)
+AeadContext::ChaChaImplOverride AeadContext::ch_override() {
+    static ChaChaImplOverride v = []{
+        char buf[16] = {0};
+        DWORD n = GetEnvironmentVariableA("TT_CHACHA_IMPL", buf, sizeof(buf));
+        if (n == 0 || n >= sizeof(buf)) return ChaChaImplOverride::Auto;
+        for (DWORD i = 0; i < n; ++i)
+            buf[i] = static_cast<char>(tolower(static_cast<unsigned char>(buf[i])));
+        if (strcmp(buf, "cng") == 0)  return ChaChaImplOverride::Cng;
+        if (strcmp(buf, "soft") == 0) return ChaChaImplOverride::Soft;
+        return ChaChaImplOverride::Auto;
+    }();
+    return v;
+}
+
+
+
 void AeadContext::configure(CipherSuite suite) {
     if (suite_ == suite && alg_.h != nullptr) {
         return;
@@ -58,17 +75,34 @@ void AeadContext::configure(CipherSuite suite) {
     BCRYPT_ALG_HANDLE handle{};
     const LPCWSTR alg_name = alg_name_for(suite);
 
-    // If ChaCha and no provider symbol or open fails, use software fallback.
-    if (suite == CipherSuite::ChaCha20Poly1305 && !alg_name) {
+    // Override handling for ChaCha20-Poly1305
+    const auto ov = (suite == CipherSuite::ChaCha20Poly1305) ? ch_override()
+                                                             : ChaChaImplOverride::Auto;
+
+    // Force software?
+    if (suite == CipherSuite::ChaCha20Poly1305 && ov == ChaChaImplOverride::Soft) {
         use_cng_ = false;
+        suite_ = suite;
+        tag_len_ = 16;
+        return;
+    }
+
+    // If ChaCha and no provider symbol, software unless forced CNG
+    if (suite == CipherSuite::ChaCha20Poly1305 && !alg_name) {
+        if (ov == ChaChaImplOverride::Cng)
+            throw std::runtime_error("ChaCha20-Poly1305 CNG requested but not available on this SDK");
+         use_cng_ = false;
         suite_ = suite;
        tag_len_ = 16;
         return;
     }
     NTSTATUS st = (alg_name)
                   ? BCryptOpenAlgorithmProvider(&handle, alg_name, nullptr, 0)
-                  : ((NTSTATUS)-1); // force fallback path if no provider name
+                  : ((NTSTATUS)-1);
     if (suite == CipherSuite::ChaCha20Poly1305 && st < 0) {
+        if (ov == ChaChaImplOverride::Cng)
+            CHECK_NT("Open AEAD provider (ChaCha20-Poly1305 CNG forced)", st); // hard-fail
+        // Auto → fallback to software
         use_cng_ = false;
         suite_ = suite;
         tag_len_ = 16;

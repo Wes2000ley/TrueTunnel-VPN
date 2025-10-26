@@ -22,8 +22,16 @@ public:
 
 	[[nodiscard]] size_t tag_length() const noexcept { return static_cast<size_t>(tag_len_); }
 
+
+	enum class ChaChaImplOverride : uint8_t { Auto, Cng, Soft };
+	static ChaChaImplOverride ch_override();
+
+	[[nodiscard]] bool using_cng() const noexcept { return use_cng_; }
+	[[nodiscard]] CipherSuite cipher() const noexcept { return suite_; }
+
 private:
 	void configure(CipherSuite suite);
+
 
 	Alg alg_;
 	Key key_;
