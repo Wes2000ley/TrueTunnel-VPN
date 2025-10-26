@@ -587,14 +587,16 @@ void VpnServer::handleClient(SOCKET sock,
         std::string ip = *ip_opt;
 
         std::string cfg = "VPN_CFG:IP=" + ip + ";GW=10.10.100.1;MASK=255.255.255.255";
-        tls->send_record(PACKET_TYPE_MSG, (const uint8_t*)cfg.data(), (uint16_t)cfg.size());
+        if (tls->send_record(PACKET_TYPE_MSG, (const uint8_t*)cfg.data(), (uint16_t)cfg.size()) < 0) {
+            throw std::runtime_error("Failed to deliver config to client");
+        }
 
         {
-            std::unique_lock<std::shared_mutex> ul(client_map_mutex_);
+        std::unique_lock<std::shared_mutex> ul(client_map_mutex_);
 
-            client_map_.emplace(std::piecewise_construct,
-                                std::forward_as_tuple(ip),
-                                std::forward_as_tuple(tls, cid));
+        client_map_.emplace(std::piecewise_construct,
+                            std::forward_as_tuple(ip),
+                            std::forward_as_tuple(tls, cid));
         }
 
         ip_pool.confirm(cid);
@@ -750,6 +752,7 @@ bool VpnServer::broadcast_payload(const std::string& payload, const std::string*
     std::shared_lock<std::shared_mutex> rlk(client_map_mutex_);
     if (client_map_.empty()) return false;
     bool all_ok = true;
+    std::vector<std::pair<std::string, std::string>> dead;
     for (auto& [ip, entry] : client_map_) {
         if (skip_client_id && entry.client_id == *skip_client_id) {
             continue;
@@ -760,6 +763,19 @@ bool VpnServer::broadcast_payload(const std::string& payload, const std::string*
                                         static_cast<uint16_t>(payload.size()));
         if (rc < 0) {
             all_ok = false;
+            dead.emplace_back(ip, entry.client_id);
+        }
+    }
+    rlk.unlock();
+    if (!dead.empty()) {
+        std::unique_lock<std::shared_mutex> ul(client_map_mutex_);
+        for (const auto& [ip, cid] : dead) {
+            auto it = client_map_.find(ip);
+            if (it != client_map_.end()) {
+                client_map_.erase(it);
+                ip_pool.release(cid);
+                std::cout << "[-] Dropped unresponsive client " << ip << '\n';
+            }
         }
     }
     return all_ok;

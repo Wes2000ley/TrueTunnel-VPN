@@ -91,7 +91,13 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session, secure::SecureSocket* tls, std::a
 			UINT32 size = 0;
 			BYTE *pkt = static_cast<BYTE*>(WintunReceivePacket(session, &size));
 			if (!pkt) break;
-			tls->send_record(PACKET_TYPE_IP, pkt, static_cast<uint16_t>(size));
+			int rc = tls->send_record(PACKET_TYPE_IP, pkt, static_cast<uint16_t>(size));
+			if (rc < 0) {
+				std::cerr << "[tun_to_tls] send_record failed; stopping tunnel\n";
+				running = false;
+				WintunReleaseReceivePacket(session, pkt);
+				break;
+			}
 			WintunReleaseReceivePacket(session, pkt);
 		}
 		if (!running) break;

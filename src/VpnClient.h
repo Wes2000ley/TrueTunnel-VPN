@@ -63,6 +63,7 @@ private:
 	TransportProtocol transport_{TransportProtocol::Tcp};
 
 	SOCKET sock_ = INVALID_SOCKET;
+	std::atomic<SOCKET> pending_socket_{INVALID_SOCKET};
 	std::unique_ptr<secure::SecureSocket> tls_;
 	std::atomic<bool> running_ = false;
 	std::optional<WintunAdapterGuard> adapter_;

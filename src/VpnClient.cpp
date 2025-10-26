@@ -15,6 +15,10 @@
 
 #include "redirect_stream.hpp"
 
+namespace {
+constexpr const char* kClientCancelled = "vpn_client_cancelled";
+}
+
 VpnClient::VpnClient(const std::string& server_ip,
                      int port,
                      const std::string& password,
@@ -54,6 +58,14 @@ void VpnClient::start() {
         LoadWintun();
         configureAdapter();
         std::cout << "[INFO] VPN client ready; forwarding packets\n";
+    } catch (const std::exception& ex) {
+        running_ = false;
+        stop();
+        if (std::string_view(ex.what()) == kClientCancelled) {
+            std::cout << "[INFO] Client start cancelled\n";
+            return;
+        }
+        throw;
     } catch (...) {
         running_ = false;
         stop();
@@ -66,11 +78,17 @@ void VpnClient::stop() {
     running_ = false;
 
     if (tls_) {
-        tls_->close();
+        try {
+            tls_->close();
+        } catch (...) {
+        }
     }
 
     if (session_) {
-        session_->reset();
+        try {
+            session_->reset();
+        } catch (...) {
+        }
     }
 
     if (tun_thread_.joinable()) {
@@ -81,6 +99,14 @@ void VpnClient::stop() {
     }
 
     tls_.reset();
+
+    SOCKET pending = pending_socket_.exchange(INVALID_SOCKET);
+    if (pending != INVALID_SOCKET && pending != sock_) {
+        if (transport_ == TransportProtocol::Tcp) {
+            shutdown(pending, SD_BOTH);
+        }
+        closesocket(pending);
+    }
 
     if (sock_ != INVALID_SOCKET) {
         if (transport_ == TransportProtocol::Tcp) {
@@ -166,7 +192,12 @@ void VpnClient::connectToServer() {
     std::cout << "[*] Connecting (" << to_string(transport_) << ") to "
               << public_ip_ << ":" << port_ << "...\n";
 
+    pending_socket_ = sock.get();
     while (connect(sock.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+        if (!running_) {
+            pending_socket_ = INVALID_SOCKET;
+            throw std::runtime_error(kClientCancelled);
+        }
         std::cerr << "[!] Connection failed, retrying...\n";
         std::this_thread::sleep_for(std::chrono::seconds(3));
     }
@@ -176,8 +207,12 @@ void VpnClient::connectToServer() {
         setsockopt(sock.get(), IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
     }
 
+    pending_socket_ = INVALID_SOCKET;
     sock_ = sock.release();
     std::cout << "[✓] Connected using " << to_string(transport_) << " transport\n";
+    if (!running_) {
+        throw std::runtime_error(kClientCancelled);
+    }
 }
 
 void VpnClient::performHandshake() {
@@ -209,6 +244,9 @@ void VpnClient::performHandshake() {
     tls_->handshake();
     std::cout << "[🔒] SecureTransport established (ECDHE+PSK, "
               << secure::to_string(cipher_suite_) << ")\n";
+    if (!running_) {
+        throw std::runtime_error(kClientCancelled);
+    }
 }
 
 void VpnClient::requestConfig() {
@@ -216,14 +254,18 @@ void VpnClient::requestConfig() {
     tls_->send_record(PACKET_TYPE_MSG, (const uint8_t*)request, (uint16_t)std::strlen(request));
     uint8_t type=0; std::array<uint8_t,256> buf{};
     int n = tls_->recv_record(type, buf.data(), buf.size());
-    CHECK(n > 0, "Failed to receive config");
+    if (n <= 0) {
+        throw std::runtime_error("Failed to receive config from server");
+    }
 
     buf[n] = 0;
     std::string config((char*)buf.data());
 
     std::smatch match;
     std::regex re("IP=(.*?);GW=(.*?);MASK=(.*?)(;|$)");
-    CHECK(std::regex_search(config, match, re), "Invalid config format");
+    if (!std::regex_search(config, match, re)) {
+        throw std::runtime_error("Invalid config format: " + config);
+    }
 
     local_ip_ = match[1];
     gateway_ = match[2];
@@ -233,6 +275,9 @@ void VpnClient::requestConfig() {
               << "    IP   = " << local_ip_ << "\n"
               << "    GW   = " << gateway_ << "\n"
               << "    MASK = " << subnetmask_ << "\n";
+    if (!running_) {
+        throw std::runtime_error(kClientCancelled);
+    }
 }
 
 void VpnClient::configureAdapter() {
@@ -273,6 +318,9 @@ void VpnClient::configureAdapter() {
     network_configured_ = true;
 
     std::cout << "[✓] Adapter configured\n";
+    if (!running_) {
+        throw std::runtime_error(kClientCancelled);
+    }
 
 
     WINTUN_SESSION_HANDLE session_handle = WintunStartSession(adapter_->get(), 0x400000);
@@ -323,6 +371,9 @@ void VpnClient::configureAdapter() {
         std::cerr << "[!] Failed to enable NAT on tunnel interface '" << adaptername_ << "'\n"
                   << "      -> Install/enable the 'Routing and Remote Access' feature on Windows." << std::endl;
     }
+    if (!running_) {
+        throw std::runtime_error(kClientCancelled);
+    }
 
     secure::SecureSocket* raw_tls = tls_.get();
     WINTUN_SESSION_HANDLE raw_session = session_->get();
@@ -366,13 +417,28 @@ void VpnClient::configureAdapter() {
 }
 
 bool VpnClient::send_chat_message(const std::string& text) {
+    if (!running_) {
+        std::cerr << "[!] Cannot send message: client inactive\n";
+        return false;
+    }
     if (!tls_ || text.empty()) return false;
     if (text.size() > std::numeric_limits<uint16_t>::max()) return false;
     std::lock_guard<std::mutex> lock(tls_write_mutex_);
-    int rc = tls_->send_record(PACKET_TYPE_MSG,
-                               reinterpret_cast<const uint8_t*>(text.data()),
-                               static_cast<uint16_t>(text.size()));
-    return rc >= 0;
+    try {
+        int rc = tls_->send_record(PACKET_TYPE_MSG,
+                                   reinterpret_cast<const uint8_t*>(text.data()),
+                                   static_cast<uint16_t>(text.size()));
+        if (rc < 0) {
+            std::cerr << "[!] Failed to send chat message\n";
+            running_ = false;
+            return false;
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "[!] Exception sending chat message: " << ex.what() << "\n";
+        running_ = false;
+        return false;
+    }
+    return true;
 }
 
 void VpnClient::handle_incoming_message(std::string_view message) {
