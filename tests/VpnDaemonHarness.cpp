@@ -56,6 +56,10 @@ public:
                 log_callback_ = std::move(cb);
         }
 
+        bool send_message(const std::string&) override {
+                return true;
+        }
+
 private:
         bool running_ = false;
         std::function<void(const std::string &)> log_callback_;

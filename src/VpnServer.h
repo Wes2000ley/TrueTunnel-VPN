@@ -26,6 +26,8 @@
 #include <optional>
 #include <deque>
 #include <condition_variable>
+#include <string_view>
+#include <utility>
 
 //
 //  Project headers
@@ -57,6 +59,7 @@ public:
 
     void start();   // idempotent
     void stop();    // blocks until fully shut down
+    bool send_chat(const std::string& text);
 
 private:
     // ───────── setup / teardown ─────────
@@ -78,11 +81,18 @@ private:
     struct UdpPeerState;
     void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
                         const std::string &src_ip,
+                        const std::string &client_id,
                         std::shared_ptr<std::atomic<bool>> alive,
                         std::shared_ptr<UdpPeerState> udp_state = std::shared_ptr<UdpPeerState>{},
                         std::string peer_key = std::string{});
     void handleUdpClient(std::shared_ptr<UdpPeerState> state,
                          std::string peer_key);
+    void handle_client_message(secure::SecureSocket* tls, std::string_view message);
+    std::optional<std::pair<std::string, std::string>> find_client_info_for_tls(secure::SecureSocket* tls) const;
+    bool broadcast_payload(const std::string& payload, const std::string* skip_client_id = nullptr);
+    bool broadcast_message(const std::string& from,
+                           const std::string& text,
+                           const std::string* skip_client_id = nullptr);
 
     // ───────── types / helpers ──────────
     using TLSPtr = std::unique_ptr<secure::SecureSocket>;
@@ -92,8 +102,10 @@ private:
     struct ClientEntry {
         std::shared_ptr<secure::SecureSocket> tls;
         std::mutex write_mutex;
-        explicit ClientEntry(std::shared_ptr<secure::SecureSocket> t)
-            : tls(std::move(t)) {}
+        std::string client_id;
+        explicit ClientEntry(std::shared_ptr<secure::SecureSocket> t,
+                              std::string id)
+            : tls(std::move(t)), client_id(std::move(id)) {}
         ClientEntry(ClientEntry&&) = default;
         ClientEntry& operator=(ClientEntry&&) = default;
     };
@@ -149,7 +161,10 @@ private:
         auto fwd = [self](BYTE* pkt, UINT sz) {
             return self->forward_to_client_if_known(pkt, sz);
         };
-        tls_to_tun_common(session, ssl, running, session_mutex, fwd);
+        auto on_msg = [self, ssl](std::string_view text) {
+            self->handle_client_message(ssl, text);
+        };
+        tls_to_tun_common(session, ssl, running, session_mutex, fwd, on_msg);
     }
 
 };

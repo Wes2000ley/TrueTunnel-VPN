@@ -65,6 +65,7 @@ public:
         [[nodiscard]] State state() const;
 
         void set_event_callback(EventCallback cb);
+        bool send_message(const std::string& text);
 
 private:
         void publish_event(EventType type, const std::string& message);

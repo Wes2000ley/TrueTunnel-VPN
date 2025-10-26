@@ -1,3 +1,5 @@
+#define NOMINMAX
+
 #include "VpnClient.h"
 #include "utils.hpp"
 #include "vpn.hpp"
@@ -7,6 +9,8 @@
 #include <thread>
 #include <chrono>
 #include <array>
+#include <limits>
+#include <string_view>
 
 #include "redirect_stream.hpp"
 
@@ -214,8 +218,8 @@ void VpnClient::configureAdapter() {
 
     std::string cmd2 = "netsh interface ipv4 set subinterface \"" + adaptername_ + "\" mtu=1380 store=persistent";
 
-    run_command_hidden(cmd1);
-    run_command_hidden(cmd2);
+    CHECK(run_command_hidden(cmd1), "route add failed");
+    CHECK(run_command_hidden(cmd2), "set mtu failed");
 
     std::cout << "[✓] Adapter configured\n";
 
@@ -229,7 +233,18 @@ void VpnClient::configureAdapter() {
     secure::SecureSocket* raw_tls = tls_.get();
     WINTUN_SESSION_HANDLE raw_session = session_->get();
     std::thread(tun_to_tls, raw_session, raw_tls, std::ref(running_)).detach();
-    std::thread(tls_to_tun_client, raw_session, raw_tls, std::ref(running_), std::ref(session_mutex_)).detach();
+    std::thread([this, raw_session, raw_tls]() {
+        auto noop = [](BYTE*, UINT) { return false; };
+        auto on_message = [this](std::string_view msg) {
+            handle_incoming_message(msg);
+        };
+        tls_to_tun_common(raw_session,
+                          raw_tls,
+                          running_,
+                          session_mutex_,
+                          noop,
+                          on_message);
+    }).detach();
 
     run_command_admin(
     "Get-NetConnectionProfile | "
@@ -239,4 +254,39 @@ void VpnClient::configureAdapter() {
 
     AddICMPv4Rule();
 
+}
+
+bool VpnClient::send_chat_message(const std::string& text) {
+    if (!tls_ || text.empty()) return false;
+    if (text.size() > std::numeric_limits<uint16_t>::max()) return false;
+    std::lock_guard<std::mutex> lock(tls_write_mutex_);
+    int rc = tls_->send_record(PACKET_TYPE_MSG,
+                               reinterpret_cast<const uint8_t*>(text.data()),
+                               static_cast<uint16_t>(text.size()));
+    return rc >= 0;
+}
+
+void VpnClient::handle_incoming_message(std::string_view message) {
+    std::string sender = "peer";
+    std::string body;
+    if (auto pos = message.find('|'); pos != std::string_view::npos) {
+        sender = std::string(message.substr(0, pos));
+        body = std::string(message.substr(pos + 1));
+    } else {
+        body.assign(message.begin(), message.end());
+    }
+
+    std::cout << "[📨] " << sender << ": " << body << '\n';
+
+    {
+        std::lock_guard<std::mutex> lock(message_mutex_);
+        received_messages_.push_back(sender + "|" + body);
+    }
+}
+
+std::vector<std::string> VpnClient::drain_messages() {
+    std::lock_guard<std::mutex> lock(message_mutex_);
+    auto copy = received_messages_;
+    received_messages_.clear();
+    return copy;
 }

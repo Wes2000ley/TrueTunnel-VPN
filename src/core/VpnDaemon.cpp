@@ -168,3 +168,15 @@ std::unique_ptr<IVpnController> VpnDaemon::make_controller() {
         }
         return factory_();
 }
+
+bool VpnDaemon::send_message(const std::string& text) {
+        std::lock_guard<std::mutex> guard(controller_mutex_);
+        if (!controller_ || !controller_->is_running()) {
+                return false;
+        }
+        bool ok = controller_->send_message(text);
+        if (!ok) {
+                publish_event(EventType::Error, "Failed to send message");
+        }
+        return ok;
+}

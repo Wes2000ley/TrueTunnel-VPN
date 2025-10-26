@@ -26,6 +26,7 @@
 #include <string>
 #include <functional>		  //  ← ask() validator
 #include <mutex>
+#include <string_view>
 
 
 #include <windows.h>
@@ -99,13 +100,14 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, secure::SecureSocket* tls, std::a
 
 void send_message(secure::SecureSocket* tls, const std::string &msg);
 
-template<typename ForwardFn>
+template<typename ForwardFn, typename MessageFn>
 // ─── single header / translation-unit ─────────────────────────────────────────
 inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
                               secure::SecureSocket* tls,
                               std::atomic<bool>&    running,
                               std::mutex&           session_mutex,
-                              ForwardFn&&           maybe_forward)   // ← perfect-fwd
+                              ForwardFn&&           maybe_forward,
+                              MessageFn&&           on_message)   // ← perfect-fwd
 {
     // elevate this data-plane thread
     ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -140,15 +142,7 @@ inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
             int n = r;
             if (n > 0 && n < (int)buf.size())
             {
-                buf[n] = '\0';
-                std::cout << "[📨] Message from peer: "
-                          << (char*)buf.data() << '\n';
-                if (std::string_view((char*)buf.data()) == "/quit")
-                {
-                    std::cout << "[!] Peer requested disconnect. "
-                                 "Closing session.\n";
-                    break;
-                }
+                on_message(std::string_view(reinterpret_cast<char*>(buf.data()), n));
             }
         }
     }

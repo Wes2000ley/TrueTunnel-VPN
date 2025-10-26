@@ -82,6 +82,13 @@ void VpnController::stop() {
 	std::cout << "[*] VPN stopped\n";
 }
 
+bool VpnController::send_message(const std::string& text) {
+    if (!running || text.empty()) return false;
+    if (client) return client->send_chat_message(text);
+    if (server) return server->send_chat(text);
+    return false;
+}
+
 void VpnController::set_log_callback(std::function<void(const std::string &)> cb) {
 	log_callback = std::move(cb);
 }

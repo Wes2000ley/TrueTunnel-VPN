@@ -608,13 +608,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
 			// Send logic
 			if (send_requested && strlen(message_input) > 0) {
+                                bool sent = false;
                                 if (g_vpn_daemon && g_vpn_daemon->is_running()) {
-                                        //g_vpn_daemon->send_manual_message(message_input);
+                                        sent = g_vpn_daemon->send_message(message_input);
                                 }
 
 				// Append to log
-				char formatted[256];
-				snprintf(formatted, sizeof(formatted), "[You] %s\n", message_input);
+				char formatted[512];
+				snprintf(formatted, sizeof(formatted), sent ? "[You] %s" : "[!] Failed to send: %s", message_input);
 				log_lines.emplace_back(formatted);
 
 				// Clear input

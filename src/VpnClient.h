@@ -7,6 +7,10 @@
 #include <string>
 #include <memory>
 #include <optional>
+#include <string_view>
+#include <vector>
+#include <atomic>
+#include <mutex>
 
 #include "TransportProtocol.h"
 
@@ -35,7 +39,16 @@ private:
 	void configureAdapter();
 	void startPacketForwarding();
 	void startInputLoop();
+	void handle_incoming_message(std::string_view message);
 
+public:
+	[[nodiscard]] std::string local_ip() const { return local_ip_; }
+	[[nodiscard]] std::string adapter_name() const { return adaptername_; }
+	[[nodiscard]] bool is_active() const { return running_.load(); }
+	bool send_chat_message(const std::string& text);
+	std::vector<std::string> drain_messages();
+
+private:
 	std::string server_ip_;
 	int port_;
 	std::string password_;
@@ -54,13 +67,7 @@ private:
 	std::optional<WintunAdapterGuard> adapter_;
 	std::shared_ptr<WintunSessionGuard> session_;  // <-- use shared_ptr to manage ownership
 	std::mutex session_mutex_;
-
-	static void tls_to_tun_client(WINTUN_SESSION_HANDLE session,
-	                              secure::SecureSocket *ssl,
-	                              std::atomic<bool> &running,
-	                              std::mutex &session_mutex)
-	{
-		auto noop = [](BYTE*, UINT) { return false; };
-		tls_to_tun_common(session, ssl, running, session_mutex, noop);
-	}
+	std::mutex tls_write_mutex_;
+	mutable std::mutex message_mutex_;
+	std::vector<std::string> received_messages_;
 };

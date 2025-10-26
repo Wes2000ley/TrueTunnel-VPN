@@ -25,6 +25,8 @@ public:
                    secure::CipherSuite cipher,
                    TransportProtocol transport) override;
 
+        bool send_message(const std::string& text) override;
+
 
         void stop() override;
         bool is_running() const override;

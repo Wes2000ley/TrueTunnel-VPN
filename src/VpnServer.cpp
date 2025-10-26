@@ -113,6 +113,12 @@ void VpnServer::stop()
     std::cout << "[✓] Server shutdown complete\n";
 }
 
+bool VpnServer::send_chat(const std::string& text)
+{
+    if (text.empty()) return false;
+    return broadcast_message("server", text);
+}
+
 // ───────────────────────────────────────────────────────────────────────────────
 //  private – setup / teardown
 // ───────────────────────────────────────────────────────────────────────────────
@@ -413,16 +419,19 @@ void VpnServer::handleClient(SOCKET sock)
 
             client_map_.emplace(std::piecewise_construct,
                                 std::forward_as_tuple(ip),
-                                std::forward_as_tuple(tls));
+                                std::forward_as_tuple(tls, cid));
         }
+
+        ip_pool.confirm(cid);
 
         auto alive = std::make_shared<std::atomic<bool>>(true);
 
         // Launch client handler. Default arguments on member functions are not applied
         // when invoking through a pointer-to-member, so wrap in a lambda and pass them.
-        std::thread([this, tls, ip, alive]() {
+        std::thread([this, tls, ip, cid, alive]() {
             this->tlsClientEntry(tls,
                                  ip,
+                                 cid,
                                  alive,
                                  std::shared_ptr<UdpPeerState>{},
                                  std::string{});
@@ -442,7 +451,7 @@ void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
     ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
 
-    std::string allocated_ip;
+    std::string cid;
 
     auto cleanup_peer = [this, state, peer = peer_key]() {
         {
@@ -504,21 +513,22 @@ void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
         req[rn] = 0;
         CHECK(std::strcmp(reinterpret_cast<char*>(req.data()), "VPN_REQUEST_CONFIG") == 0, "bad cfg tag");
 
-        std::string cid = std::to_string(reinterpret_cast<uintptr_t>(tls.get()));
+        cid = std::to_string(reinterpret_cast<uintptr_t>(tls.get()));
         auto ip_opt = ip_pool.assignTentative(cid);
         CHECK(ip_opt, "no free IPs");
         std::string ip = *ip_opt;
 
-        allocated_ip = ip;
-
         std::string cfg = "VPN_CFG:IP=" + ip + ";GW=10.10.100.1;MASK=255.255.255.255";
         tls->send_record(PACKET_TYPE_MSG, reinterpret_cast<const uint8_t*>(cfg.data()), static_cast<uint16_t>(cfg.size()));
+
+        cid = std::to_string(reinterpret_cast<uintptr_t>(tls.get()));
+        ip_pool.confirm(cid);
 
         {
             std::unique_lock<std::shared_mutex> ul(client_map_mutex_);
             client_map_.emplace(std::piecewise_construct,
                                 std::forward_as_tuple(ip),
-                                std::forward_as_tuple(tls));
+                                std::forward_as_tuple(tls, cid));
         }
 
         auto alive = std::make_shared<std::atomic<bool>>(true);
@@ -527,6 +537,7 @@ void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
                     this,
                     tls,
                     ip,
+                    cid,
                     alive,
                     state,
                     std::move(peer_key)).detach();
@@ -534,25 +545,76 @@ void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
     catch (const std::exception& e) {
         std::cerr << "[!] udp-client: " << e.what() << '\n';
         cleanup_peer();
-        if (!allocated_ip.empty()) {
-            ip_pool.release(allocated_ip);
+        if (!cid.empty()) {
+            ip_pool.release(cid);
         }
     }
 }
 
+bool VpnServer::broadcast_payload(const std::string& payload, const std::string* skip_client_id) {
+    std::shared_lock<std::shared_mutex> rlk(client_map_mutex_);
+    if (client_map_.empty()) return false;
+    bool all_ok = true;
+    for (auto& [ip, entry] : client_map_) {
+        if (skip_client_id && entry.client_id == *skip_client_id) {
+            continue;
+        }
+        std::lock_guard<std::mutex> lg(entry.write_mutex);
+        int rc = entry.tls->send_record(PACKET_TYPE_MSG,
+                                        reinterpret_cast<const uint8_t*>(payload.data()),
+                                        static_cast<uint16_t>(payload.size()));
+        if (rc < 0) {
+            all_ok = false;
+        }
+    }
+    return all_ok;
+}
+
+bool VpnServer::broadcast_message(const std::string& from,
+                                  const std::string& text,
+                                  const std::string* skip_client_id) {
+    std::string payload = from + "|" + text;
+    std::cout << "[📨] " << from << ": " << text << '\n';
+    return broadcast_payload(payload, skip_client_id);
+}
+
+void VpnServer::handle_client_message(secure::SecureSocket* tls, std::string_view message) {
+    auto info_opt = find_client_info_for_tls(tls);
+    std::string sender = info_opt ? info_opt->first : std::string("peer");
+    const std::string* skip_id = info_opt ? &info_opt->second : nullptr;
+    std::string body(message.begin(), message.end());
+    broadcast_message(sender, body, skip_id);
+}
+
+std::optional<std::pair<std::string, std::string>> VpnServer::find_client_info_for_tls(secure::SecureSocket* tls) const {
+    std::shared_lock<std::shared_mutex> rlk(client_map_mutex_);
+    for (const auto& [ip, entry] : client_map_) {
+        if (entry.tls.get() == tls) {
+            return std::make_pair(ip, entry.client_id);
+        }
+    }
+    return std::nullopt;
+}
+
 void VpnServer::tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
                                const std::string&                 src_ip,
+                               const std::string&                 client_id,
                                std::shared_ptr<std::atomic<bool>> alive,
                                std::shared_ptr<UdpPeerState>      udp_state,
                                std::string                        peer_key)
 {
     tls_to_tun_server(this, session_->get(), tls.get(), *alive, session_mutex_);
 
-    {   // remove client from map
+    std::string release_id = client_id;
+    {
         std::lock_guard<std::shared_mutex> lg(client_map_mutex_);
-        client_map_.erase(src_ip);
+        auto it = client_map_.find(src_ip);
+        if (it != client_map_.end()) {
+            release_id = it->second.client_id;
+            client_map_.erase(it);
+        }
     }
-    ip_pool.release(src_ip);
+    ip_pool.release(release_id);
 
     if (udp_state) {
         {

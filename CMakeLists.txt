@@ -29,17 +29,11 @@ find_package(freetype)
 set(IMGUI_BACKENDS_DIR "${CMAKE_SOURCE_DIR}/deps/imgui/backends")
 set(IMGUI_MISC_DIR "${CMAKE_SOURCE_DIR}/deps/imgui/misc")
 
-
-
-add_executable(vpn
+set(VPN_CORE_SOURCES
         src/vpn.cpp
         src/utils.cpp
         src/VpnController.cpp
         src/core/VpnDaemon.cpp
-        src/raii.hpp
-        src/main.cpp
-        src/ImGuiStyleManager.cpp
-        src/ImGuiStyleManager.h
         src/Networking.cpp
         src/Networking.h
         src/IpPoolManager.cpp
@@ -56,6 +50,19 @@ add_executable(vpn
         src/secure/AeadChaCha20Poly1305.cpp
 )
 
+add_executable(vpn
+        ${VPN_CORE_SOURCES}
+        src/raii.hpp
+        src/main.cpp
+        src/ImGuiStyleManager.cpp
+        src/ImGuiStyleManager.h
+)
+
+add_executable(vpn_integration_test
+        ${VPN_CORE_SOURCES}
+        tests/VpnIntegrationTest.cpp
+)
+
 if (MSVC)
     target_compile_options(vpn PRIVATE
             /W4           # High warning level
@@ -70,6 +77,21 @@ else()
             -Wduplicated-cond -Wduplicated-branches -Wlogical-op
             -Wuseless-cast -Wdouble-promotion -Wno-unused-parameter
            # -Werror
+    )
+endif()
+
+if (MSVC)
+    target_compile_options(vpn_integration_test PRIVATE
+            /W4
+            /permissive-
+    )
+else()
+    target_compile_options(vpn_integration_test PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+            -Wshadow -Wnull-dereference -Wold-style-cast -Wnon-virtual-dtor
+            -Woverloaded-virtual -Wformat=2 -Wimplicit-fallthrough
+            -Wduplicated-cond -Wduplicated-branches -Wlogical-op
+            -Wuseless-cast -Wdouble-promotion -Wno-unused-parameter
     )
 endif()
 
@@ -131,6 +153,11 @@ target_include_directories(vpn PRIVATE
         ${IMGUI_MISC_DIR}/freetype       # ✅ contains imgui_freetype.h
 )
 
+target_include_directories(vpn_integration_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/include
+)
+
 
 
 # Link against the static .lib's, not DLL import libs
@@ -147,6 +174,17 @@ target_link_libraries(vpn PRIVATE
         dxguid
         Freetype::Freetype
 
+)
+
+target_link_libraries(vpn_integration_test PRIVATE
+        ws2_32
+        ole32
+        iphlpapi
+        bcrypt
+        crypt32
+        advapi32
+        shell32
+        winmm
 )
 
 # Enable static linking for Windows runtime
@@ -213,6 +251,13 @@ add_custom_command(TARGET vpn POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/deps/wintun.dll"
         "$<TARGET_FILE_DIR:vpn>"
+)
+
+add_custom_command(TARGET vpn_integration_test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:vpn_integration_test>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/deps/wintun.dll"
+        "$<TARGET_FILE_DIR:vpn_integration_test>"
 )
 
 if (WIN32)
