@@ -24,7 +24,6 @@ endif ()
 
 
 # Required for finding Conan packages
-find_package(OpenSSL REQUIRED)
 find_package(imgui REQUIRED)
 find_package(freetype)
 set(IMGUI_BACKENDS_DIR "${CMAKE_SOURCE_DIR}/deps/imgui/backends")
@@ -43,13 +42,16 @@ add_executable(vpn
         src/ImGuiStyleManager.h
         src/Networking.cpp
         src/Networking.h
-        src/HmacAuthenticator.h
         src/IpPoolManager.cpp
         src/IpPoolManager.h
         src/VpnServer.cpp
         src/VpnServer.h
         src/VpnClient.cpp
         src/VpnClient.h
+        src/secure/AeadContext.cpp
+        src/secure/RecordLayer.cpp
+        src/secure/SecureSocket.cpp
+        src/secure/Handshake.cpp
 )
 
 if (MSVC)
@@ -118,15 +120,8 @@ set_target_properties(vpn PROPERTIES
 )
 
 
-# Tell OpenSSL headers we're linking them statically 
-target_compile_definitions(vpn PRIVATE
-        OPENSSL_STATIC
-        STATIC_BUILD
-)
-
 # Includes
 target_include_directories(vpn PRIVATE
-        ${OPENSSL_INCLUDE_DIR}
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/include
         ${IMGUI_BACKENDS_DIR}
@@ -138,14 +133,12 @@ target_include_directories(vpn PRIVATE
 
 # Link against the static .lib's, not DLL import libs
 target_link_libraries(vpn PRIVATE
-        openssl::openssl
-        OpenSSL::SSL
-        OpenSSL::Crypto
         ws2_32
         ole32
         iphlpapi
-        crypt32      # <-- CryptoAPI
-        advapi32     # <-- sometimes needed by CAPI
+        bcrypt
+        crypt32
+        advapi32
         imgui::imgui
         d3d11
         dxgi
@@ -217,10 +210,6 @@ add_custom_command(TARGET vpn POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:vpn>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/deps/wintun.dll"
-        "${CMAKE_SOURCE_DIR}/deps/fips.dll"
-        "${CMAKE_SOURCE_DIR}/deps/openssl.exe"
-        "${CMAKE_SOURCE_DIR}/deps/run_fipsinstall.bat"
-        "${CMAKE_SOURCE_DIR}/deps/openssl.cnf"
         "$<TARGET_FILE_DIR:vpn>"
 )
 
@@ -250,9 +239,5 @@ add_custom_command(TARGET vpn POST_BUILD
         "${zip_filename}" --format=zip
         -- "$<TARGET_FILE:vpn>"
         "${zip_output_dir}/wintun.dll"
-        "${zip_output_dir}/fips.dll"
-        "${zip_output_dir}/openssl.exe"
-        "${zip_output_dir}/run_fipsinstall.bat"
-        "${zip_output_dir}/openssl.cnf"
         COMMENT "Packing release zip: TrueTunnel-$<CONFIG>.zip"
 )

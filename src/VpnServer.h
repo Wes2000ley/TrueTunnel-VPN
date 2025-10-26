@@ -13,7 +13,7 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 
-#include <openssl/ssl.h>
+#include "secure/SecureSocket.h"
 
 #include <string>
 #include <memory>
@@ -23,6 +23,7 @@
 #include <unordered_map>
 #include <vector>
 #include <atomic>
+#include <optional>
 
 //
 //  Project headers
@@ -66,24 +67,24 @@ private:
 
     // ───────── per-client handling ──────
     void handleClient(SOCKET client_sock);
-    void tlsClientEntry(std::shared_ptr<SSL> ssl,
-                        const std::string &src_ip,
-                        std::shared_ptr<std::atomic<bool>> alive);
+void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
+                    const std::string &src_ip,
+                    std::shared_ptr<std::atomic<bool>> alive);
 
     // ───────── types / helpers ──────────
-    using SSLPtr = std::unique_ptr<SSL, decltype(&::SSL_free)>;
+    using TLSPtr = std::unique_ptr<secure::SecureSocket>;
     bool forward_to_client_if_known(const BYTE *packet, UINT size);
 
 
     struct ClientEntry {
-        std::shared_ptr<SSL> ssl;
-        std::mutex           write_mutex;
-        explicit ClientEntry(std::shared_ptr<SSL> s) : ssl(std::move(s)) {}
-        ClientEntry(const ClientEntry&)            = delete;
-        ClientEntry& operator=(const ClientEntry&) = delete;
-        ClientEntry(ClientEntry&&)                 = default;
-        ClientEntry& operator=(ClientEntry&&)      = default;
+        std::shared_ptr<secure::SecureSocket> tls;
+        std::mutex write_mutex;
+        explicit ClientEntry(std::shared_ptr<secure::SecureSocket> t)
+            : tls(std::move(t)) {}
+        ClientEntry(ClientEntry&&) = default;
+        ClientEntry& operator=(ClientEntry&&) = default;
     };
+
 
     // ───────── configuration ─────────────
     int         port_;
@@ -112,11 +113,11 @@ private:
 
     std::thread tun_reader_thread_;   // tun → tls dispatcher
     std::thread accept_thread_;       // TCP accept loop
-    static void tls_to_tun_server(VpnServer*           self,
+    static void tls_to_tun_server(VpnServer *self,
                                   WINTUN_SESSION_HANDLE session,
-                                  SSL*                  ssl,
-                                  std::atomic<bool>&    running,
-                                  std::mutex&           session_mutex)
+                                  secure::SecureSocket *ssl,
+                                  std::atomic<bool> &running,
+                                  std::mutex &session_mutex)
     {
         auto fwd = [self](BYTE* pkt, UINT sz) {
             return self->forward_to_client_if_known(pkt, sz);

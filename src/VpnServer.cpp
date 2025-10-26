@@ -5,10 +5,6 @@
 
 #include <array>
 
-namespace std {
-    class mutex;
-}
-
 
 // ——— System / library ——————————————————————————————————————————
 #include <winsock2.h>
@@ -16,8 +12,7 @@ namespace std {
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 
-#include <openssl/ssl.h>
-#include <openssl/err.h>
+#include "secure/SecureSocket.h"
 
 #include <string>
 #include <memory>
@@ -35,7 +30,6 @@ namespace std {
 #include "IpPoolManager.h"
 #include "utils.hpp"
 #include "vpn.hpp"
-#include "HmacAuthenticator.h"
 #include "Networking.h"
 
 
@@ -43,18 +37,6 @@ namespace std {
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "iphlpapi.lib")
-
-// ——— Packet framing constants ———————————————————————————————
-
-// ───────────────────────────────────────────────────────────────────────────────
-//  Helpers
-// ───────────────────────────────────────────────────────────────────────────────
-namespace {
-struct ClientEntry {
-    std::shared_ptr<SSL> ssl;
-    std::mutex           write_mutex;
-};
-} // namespace
 
 // ───────────────────────────────────────────────────────────────────────────────
 //  ctor / dtor
@@ -90,10 +72,9 @@ void VpnServer::stop()
 {
     running_ = false;
 
-    {   // tell every client thread to leave SSL_read()
-        std::unique_lock lk(client_map_mutex_);
-        for (auto& [_, e] : client_map_)
-            SSL_shutdown(e.ssl.get());
+    {   // tell clients to leave recv()
+        std::unique_lock<std::shared_mutex> lk(client_map_mutex_);
+        for (auto& [_, e] : client_map_) e.tls->close();
     }
 
     if (listen_sock_ != INVALID_SOCKET) {
@@ -190,8 +171,8 @@ void VpnServer::cleanupNetwork() {
     run_command_hidden("netsh interface ipv4 set address name=\"" + adaptername_ + "\" dhcp");
     run_command_hidden("netsh interface ipv4 set subinterface \"" + adaptername_ +
                        "\" mtu=1500 store=persistent");
-    run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_ + '"');
-    run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_ + '"');
+    run_command_hidden("netsh routing ip nat delete interface \"" + real_adapter_ + "\"");
+    run_command_hidden("netsh routing ip nat delete interface \"" + adaptername_ + "\"");
 
 
 }
@@ -209,18 +190,13 @@ void VpnServer::tunReaderEntry()
 
         std::string dst_ip = extract_ipv4_string(pkt + 16);
 
-        std::shared_lock rlk(client_map_mutex_);
+        std::shared_lock<std::shared_mutex> rlk(client_map_mutex_);
         auto it = client_map_.find(dst_ip);
         if (it != client_map_.end()) {
-            std::lock_guard lg(it->second.write_mutex);
-
-/* --- reuse thread-local buffer for zero allocations --- */
-            thread_local std::array<uint8_t, 1600 + 1> out;
-            out[0] = PACKET_TYPE_IP;
-            std::memcpy(out.data() + 1, pkt, size);
+            std::lock_guard<std::mutex> lg(it->second.write_mutex);
 
             /* --- single TLS record --- */
-            SSL_write(it->second.ssl.get(), out.data(), size + 1);
+            it->second.tls->send_record(PACKET_TYPE_IP, (const uint8_t*)pkt, (uint16_t)size);
         }
         rlk.unlock();
 
@@ -247,45 +223,38 @@ void VpnServer::acceptLoop() {
 void VpnServer::handleClient(SOCKET sock)
 {
     try {
-        auto ctx = make_ssl_ctx(true);
-        SSL* raw = SSL_new(ctx.get());
-        CHECK(raw, "SSL_new");
-        CHECK(SSL_set_fd(raw, (int)sock) == 1, "SSL_set_fd");
-        CHECK(SSL_accept(raw) > 0, "SSL_accept");
+        auto tls = std::make_shared<secure::SecureSocket>(sock, password_, /*is_server=*/true);
+        tls->handshake();
 
         int flag = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));  // ✅ actual client socket
 
-        HmacAuthenticator auth(raw, password_, true);
-        CHECK(auth.succeeded(), "HMAC failed");
+        uint8_t typ=0; std::array<uint8_t,64> req{};
+        int rn = tls->recv_record(typ, req.data(), req.size());
+        CHECK(rn > 0, "cfg read");
+        req[rn]=0;
+        CHECK(std::strcmp((char*)req.data(), "VPN_REQUEST_CONFIG") == 0, "bad cfg tag");
 
-        char req[32]{};
-        CHECK(SSL_read(raw, req, sizeof(req)-1) > 0, "cfg read");
-        CHECK(std::strcmp(req, "VPN_REQUEST_CONFIG") == 0, "bad cfg tag");
-
-        std::string cid = std::to_string(reinterpret_cast<uintptr_t>(raw));
+        std::string cid = std::to_string(reinterpret_cast<uintptr_t>(tls.get()));
         auto ip_opt     = ip_pool.assignTentative(cid);
         CHECK(ip_opt, "no free IPs");
         std::string ip = *ip_opt;
 
         std::string cfg = "VPN_CFG:IP=" + ip + ";GW=10.10.100.1;MASK=255.255.255.255";
-        SSL_write(raw, cfg.c_str(), (int)cfg.size());
+        tls->send_record(PACKET_TYPE_MSG, (const uint8_t*)cfg.data(), (uint16_t)cfg.size());
 
-        auto ssl = std::shared_ptr<SSL>(raw, SSL_free);
         {
-            std::unique_lock ul(client_map_mutex_);
+            std::unique_lock<std::shared_mutex> ul(client_map_mutex_);
 
-            client_map_.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(ip),   // ← key
-                std::forward_as_tuple(ssl)   // ← value
-            );
+            client_map_.emplace(std::piecewise_construct,
+                                std::forward_as_tuple(ip),
+                                std::forward_as_tuple(tls));
         }
 
         auto alive = std::make_shared<std::atomic<bool>>(true);
 
         std::thread(&VpnServer::tlsClientEntry,
-                    this, ssl, ip, alive)      // pass by value
+                    this, tls, ip, alive)
               .detach();
     }
     catch (const std::exception& e) {
@@ -294,14 +263,14 @@ void VpnServer::handleClient(SOCKET sock)
     }
 }
 
-void VpnServer::tlsClientEntry(std::shared_ptr<SSL>               ssl,
+void VpnServer::tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
                     const std::string&                 src_ip,
                     std::shared_ptr<std::atomic<bool>> alive)
 {
-    tls_to_tun_server(this, session_->get(), ssl.get(), *alive, session_mutex_);
+    tls_to_tun_server(this, session_->get(), tls.get(), *alive, session_mutex_);
 
     {   // remove client from map
-        std::lock_guard lg(client_map_mutex_);
+        std::lock_guard<std::shared_mutex> lg(client_map_mutex_);
         client_map_.erase(src_ip);
     }
     ip_pool.release(src_ip);
@@ -313,15 +282,12 @@ bool VpnServer::forward_to_client_if_known(const BYTE* packet, UINT size)
 {
     std::string dst = extract_ipv4_string(packet + 16);
 
-    std::shared_lock rlk(client_map_mutex_);
+    std::shared_lock<std::shared_mutex> rlk(client_map_mutex_);
     auto it = client_map_.find(dst);
     if (it == client_map_.end())
         return false;                       // not a VPN peer
 
-    std::lock_guard lg(it->second.write_mutex);
-    thread_local std::array<uint8_t, 1600 + 1> frame;
-    frame[0] = PACKET_TYPE_IP;
-    std::memcpy(frame.data() + 1, packet, size);
-    SSL_write(it->second.ssl.get(), frame.data(), size + 1);
+    std::lock_guard<std::mutex> lg(it->second.write_mutex);
+    it->second.tls->send_record(PACKET_TYPE_IP, (const uint8_t*)packet, (uint16_t)size);
     return true;
 }

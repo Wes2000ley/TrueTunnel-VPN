@@ -1,11 +1,12 @@
 #include "VpnClient.h"
 #include "utils.hpp"
 #include "vpn.hpp"
-#include "HmacAuthenticator.h"
+#include "secure/SecureSocket.h"
 #include <iostream>
 #include <regex>
 #include <thread>
 #include <chrono>
+#include <array>
 
 #include "redirect_stream.hpp"
 
@@ -40,10 +41,7 @@ void VpnClient::start() {
 void VpnClient::stop() {
     running_ = false;
 
-    if (ssl_) {
-        SSL_shutdown(ssl_.get());
-        ssl_.reset();
-    }
+    if (tls_) { tls_->close(); tls_.reset(); }
 
     if (sock_ != INVALID_SOCKET) {
         shutdown(sock_, SD_BOTH);
@@ -54,8 +52,7 @@ void VpnClient::stop() {
     // Delete route
     std::string cmd_delete_route = "route delete 10.10.100.0 mask 255.255.255.0 10.10.100.1";
     std::string cmd_delete_route2 = "route delete 10.10.100.0 mask 255.255.255.0 10.10.100.2";
-     std::string cmd_delete_route3 =
-+    "route delete 10.10.100.0 mask 255.255.255.0";
+    std::string cmd_delete_route3 = "route delete 10.10.100.0 mask 255.255.255.0";
 
 
     // Reset IP address (optional)
@@ -128,29 +125,20 @@ void VpnClient::connectToServer() {
 }
 
 void VpnClient::performHandshake() {
-    auto ctx = make_ssl_ctx(false);
-    ssl_.reset(SSL_new(ctx.get()));
-    CHECK(ssl_ != nullptr, "SSL_new failed");
-    CHECK(SSL_set_fd(ssl_.get(), static_cast<int>(sock_)) == 1, "SSL_set_fd failed");
-    CHECK(SSL_connect(ssl_.get()) > 0, "SSL_connect failed");
-
-    HmacAuthenticator auth(ssl_.get(), password_, false);
-    CHECK(auth.succeeded(), "HMAC authentication failed");
-
-    std::cout << "[🔒] TLS: " << SSL_get_version(ssl_.get())
-              << ", cipher: " << SSL_get_cipher(ssl_.get()) << "\n";
+    tls_ = std::make_unique<secure::SecureSocket>(sock_, password_, /*is_server=*/false);
+    tls_->handshake();
+    std::cout << "[🔒] SecureTransport established (ECDHE+PSK, AES-256-GCM)\n";
 }
 
 void VpnClient::requestConfig() {
     const char* request = "VPN_REQUEST_CONFIG";
-    SSL_write(ssl_.get(), request, static_cast<int>(strlen(request)));
-
-    char buf[256] = {};
-    int n = SSL_read(ssl_.get(), buf, sizeof(buf) - 1);
+    tls_->send_record(PACKET_TYPE_MSG, (const uint8_t*)request, (uint16_t)std::strlen(request));
+    uint8_t type=0; std::array<uint8_t,256> buf{};
+    int n = tls_->recv_record(type, buf.data(), buf.size());
     CHECK(n > 0, "Failed to receive config");
 
     buf[n] = 0;
-    std::string config(buf);
+    std::string config((char*)buf.data());
 
     std::smatch match;
     std::regex re("IP=(.*?);GW=(.*?);MASK=(.*?)(;|$)");
@@ -203,11 +191,10 @@ void VpnClient::configureAdapter() {
     CHECK(session_->get(), "WintunStartSession failed");
     std::cout << "Joining Threads\n";
 
-    SSL *raw_ssl = ssl_.get();
+    secure::SecureSocket* raw_tls = tls_.get();
     WINTUN_SESSION_HANDLE raw_session = session_->get();
-
-    std::thread(tun_to_tls, raw_session, raw_ssl, std::ref(running_)).detach();
-    std::thread(tls_to_tun_client, raw_session, raw_ssl, std::ref(running_), std::ref(session_mutex_)).detach();
+    std::thread(tun_to_tls, raw_session, raw_tls, std::ref(running_)).detach();
+    std::thread(tls_to_tun_client, raw_session, raw_tls, std::ref(running_), std::ref(session_mutex_)).detach();
 
     run_command_admin(
     "Get-NetConnectionProfile | "

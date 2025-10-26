@@ -8,7 +8,6 @@
 #include <windows.h>
 #include <stdexcept>
 #include <memory>
-#include <openssl/ssl.h>
 
 #include "vpn.hpp"
 
@@ -181,119 +180,6 @@ private:
 };
 
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OpenSSL SSL_CTX Smart Pointer
-struct SSL_CTX_Deleter {
-	void operator()(SSL_CTX *ctx) const {
-		if (ctx) SSL_CTX_free(ctx);
-	}
-};
-
-using SSL_CTX_ptr = std::unique_ptr<SSL_CTX, SSL_CTX_Deleter>;
-
-// OpenSSL SSL Smart Pointer
-struct SSL_Deleter {
-	void operator()(SSL *ssl) const {
-		if (ssl) SSL_free(ssl);
-	}
-};
-
-using SSL_ptr = std::unique_ptr<SSL, SSL_Deleter>;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// OpenSSL Secure Memory Smart Pointer
-template<typename T>
-class OpenSSLSecurePtr {
-public:
-	explicit OpenSSLSecurePtr(std::size_t count)
-		: ptr_(static_cast<T *>(OPENSSL_secure_malloc(sizeof(T) * count))), size_(sizeof(T) * count) {
-		if (!ptr_) {
-			throw std::runtime_error("OPENSSL_secure_malloc failed");
-		}
-	}
-
-	~OpenSSLSecurePtr() {
-		if (ptr_) {
-			OPENSSL_secure_clear_free(ptr_, size_);
-		}
-	}
-	OpenSSLSecurePtr(OpenSSLSecurePtr&& other) noexcept
-  : ptr_(std::exchange(other.ptr_, nullptr)),
-	size_(std::exchange(other.size_, 0)) {}
-
-	OpenSSLSecurePtr& operator=(OpenSSLSecurePtr&& other) noexcept {
-		if (this != &other) {
-			if (ptr_) OPENSSL_secure_clear_free(ptr_, size_);
-			ptr_ = std::exchange(other.ptr_, nullptr);
-			size_ = std::exchange(other.size_, 0);
-		}
-		return *this;
-	}
-
-	// Delete copy semantics
-	OpenSSLSecurePtr(const OpenSSLSecurePtr&) = delete;
-	OpenSSLSecurePtr& operator=(const OpenSSLSecurePtr&) = delete;
-
-	T *get() const { return ptr_; }
-	T *operator->() const { return ptr_; }
-	T &operator*() const { return *ptr_; }
-	operator T *() const { return ptr_; }
-
-private:
-	T *ptr_;
-	std::size_t size_;
-};
-
-
-class HmacCtx {
-public:
-	HmacCtx(const EVP_MD* md, const unsigned char* key, size_t key_len) {
-		EVP_MAC* mac = EVP_MAC_fetch(nullptr, "HMAC", nullptr);
-		if (!mac) throw std::runtime_error("Failed to fetch HMAC");
-
-		ctx = EVP_MAC_CTX_new(mac);
-		EVP_MAC_free(mac); // safe after context creation
-
-		if (!ctx) throw std::runtime_error("Failed to create HMAC context");
-
-		const char* digest_name = EVP_MD_get0_name(md);
-		if (!digest_name) throw std::runtime_error("Invalid digest");
-
-		OSSL_PARAM params[] = {
-			OSSL_PARAM_construct_utf8_string("digest", const_cast<char*>(digest_name), 0),
-			OSSL_PARAM_END
-		};
-
-		if (EVP_MAC_init(ctx, key, key_len, params) != 1)
-			throw std::runtime_error("Failed to initialize HMAC");
-	}
-
-	std::vector<unsigned char> compute(const unsigned char* data, size_t len) {
-		if (!ctx) throw std::runtime_error("HMAC context not initialized");
-
-		std::vector<unsigned char> result(EVP_MAX_MD_SIZE);
-		size_t out_len = 0;
-
-		if (EVP_MAC_update(ctx, data, len) != 1)
-			throw std::runtime_error("HMAC update failed");
-
-		if (EVP_MAC_final(ctx, result.data(), &out_len, result.size()) != 1)
-			throw std::runtime_error("HMAC final failed");
-
-		result.resize(out_len);
-		return result;
-	}
-
-	~HmacCtx() {
-		if (ctx) EVP_MAC_CTX_free(ctx);
-	}
-
-	HmacCtx(const HmacCtx&) = delete;
-	HmacCtx& operator=(const HmacCtx&) = delete;
-
-private:
-	EVP_MAC_CTX* ctx = nullptr;
-};
 
 
 

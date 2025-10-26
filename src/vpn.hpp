@@ -29,13 +29,7 @@
 
 
 
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/pem.h>
-#include <openssl/conf.h>
-#include <openssl/provider.h>
-#include <openssl/hmac.h>
-#include <openssl/rand.h>
+#include "secure/SecureSocket.h"
 
 
 
@@ -85,20 +79,6 @@ inline WINTUN_RELEASE_RECEIVE_PACKET_FUNC WintunReleaseReceivePacket = nullptr;
 void LoadWintun();
 
 
-// ─── FIPS–compliant key + certificate helpers ──────────────────────────
-using EVPKeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
-using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
-using SSL_CTX_Ptr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
-EVPKeyPtr generate_fips_rsa_key();
-
-X509 *generate_self_signed_cert(EVP_PKEY *pkey,
-                                const char *common_name);
-
-/* Build a TLS context that only offers FIPS-approved suites */
-using SslCtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
-using EvpKeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
-SslCtxPtr make_ssl_ctx(bool is_server);
-
 enum vpn_packet_type : uint8_t;
 
 
@@ -108,16 +88,16 @@ constexpr uint8_t PACKET_TYPE_MSG = 0x02;
 
 
 //— Packet pumps
-void tun_to_tls(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running);
+void tun_to_tls(WINTUN_SESSION_HANDLE session, secure::SecureSocket* tls, std::atomic<bool> &running);
 
-void tls_to_tun(WINTUN_SESSION_HANDLE session, SSL *ssl, std::atomic<bool> &running, std::mutex &session_mutex) ;
+void tls_to_tun(WINTUN_SESSION_HANDLE session, secure::SecureSocket* tls, std::atomic<bool> &running, std::mutex &session_mutex) ;
 
-void send_message(SSL *ssl, const std::string &msg);
+void send_message(secure::SecureSocket* tls, const std::string &msg);
 
 template<typename ForwardFn>
 // ─── single header / translation-unit ─────────────────────────────────────────
 inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
-                              SSL*                  ssl,
+                              secure::SecureSocket* tls,
                               std::atomic<bool>&    running,
                               std::mutex&           session_mutex,
                               ForwardFn&&           maybe_forward)   // ← perfect-fwd
@@ -127,22 +107,12 @@ inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
     while (running)
     {
         uint8_t tag{};
-        if (SSL_read(ssl, &tag, 1) <= 0)
-            break;                                       // connection closed / error
+        int r = tls->recv_record(tag, buf.data(), (uint16_t)buf.size());
+        if (r <= 0) break;                                      // connection closed / error
 
         if (tag == PACKET_TYPE_IP)
         {
-            int n = SSL_read(ssl,
-                             buf.data(),
-                             static_cast<int>(buf.size()));
-            if (n <= 0)
-            {
-                int err = SSL_get_error(ssl, n);
-                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
-                    continue;
-                break;
-            }
-
+            int n = r;
             /* (1) server can short-circuit to the destination client */
             if (maybe_forward(reinterpret_cast<BYTE*>(buf.data()),
                               static_cast<UINT>(n)))
@@ -159,16 +129,13 @@ inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
         }
         else if (tag == PACKET_TYPE_MSG)
         {
-            char msg_buf[1024]{};
-            int  n = SSL_read(ssl, msg_buf,
-                              static_cast<int>(sizeof(msg_buf) - 1));
-            if (n > 0)
+            int n = r;
+            if (n > 0 && n < (int)buf.size())
             {
-                msg_buf[n] = '\0';
+                buf[n] = '\0';
                 std::cout << "[📨] Message from peer: "
-                          << msg_buf << '\n';
-
-                if (std::string_view(msg_buf) == "/quit")
+                          << (char*)buf.data() << '\n';
+                if (std::string_view((char*)buf.data()) == "/quit")
                 {
                     std::cout << "[!] Peer requested disconnect. "
                                  "Closing session.\n";

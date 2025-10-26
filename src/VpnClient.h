@@ -3,9 +3,10 @@
 #include "raii.hpp"
 #include "Networking.h"
 #include <winsock2.h>
-#include <openssl/ssl.h>
+#include "secure/SecureSocket.h"
 #include <string>
 #include <memory>
+#include <optional>
 
 class VpnClient {
 public:
@@ -42,17 +43,16 @@ private:
 	std::string gateway_;
 
 	SOCKET sock_ = INVALID_SOCKET;
-	using SSLPtr = std::unique_ptr<SSL, decltype(&SSL_free)>;
-	SSLPtr ssl_{nullptr, SSL_free};
+	std::unique_ptr<secure::SecureSocket> tls_;
 	std::atomic<bool> running_ = false;
 	std::optional<WintunAdapterGuard> adapter_;
 	std::shared_ptr<WintunSessionGuard> session_;  // <-- use shared_ptr to manage ownership
 	std::mutex session_mutex_;
 
 	static void tls_to_tun_client(WINTUN_SESSION_HANDLE session,
-	                              SSL*                  ssl,
-	                              std::atomic<bool>&    running,
-	                              std::mutex&           session_mutex)
+	                              secure::SecureSocket *ssl,
+	                              std::atomic<bool> &running,
+	                              std::mutex &session_mutex)
 	{
 		auto noop = [](BYTE*, UINT) { return false; };
 		tls_to_tun_common(session, ssl, running, session_mutex, noop);

@@ -21,7 +21,6 @@
 #include "utils.hpp"
 #include "ImGuiStyleManager.h"
 #include "Networking.h"
-#include <openssl/crypto.h>
 #define IDI_VPN_ICON 101
 
 

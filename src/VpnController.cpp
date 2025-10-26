@@ -103,20 +103,7 @@ void VpnController::vpn_thread_func() {
 		ComInit com;
 		WsaInit wsa;
 
-		std::string exe_dir = std::filesystem::current_path().string();
-		_putenv(("OPENSSL_CONF=" + exe_dir + "\\openssl.cnf").c_str());
-		_putenv(("OPENSSL_MODULES=" + exe_dir).c_str());
-
-		OPENSSL_init_ssl(OPENSSL_INIT_LOAD_CONFIG, nullptr);
-		CHECK(OSSL_PROVIDER_load(nullptr, "fips"), "Failed to load FIPS provider");
-		CHECK(OSSL_PROVIDER_load(nullptr, "base"), "Failed to load base provider");
-		CHECK(EVP_default_properties_enable_fips(nullptr, 1), "Failed to enable FIPS");
-
-		if (!EVP_default_properties_is_fips_enabled(nullptr)) {
-			throw std::runtime_error("FIPS mode is not enabled.");
-		}
-
-		std::cout << "[✓] OpenSSL FIPS mode enabled\n";
+		std::cout << "[✓] Using Windows CNG (ECDH P-256, AES-256-GCM, HMAC-SHA256)\n";
 
 		if (mode == "server") {
 			util::logInfo("[*] Launching in server mode");

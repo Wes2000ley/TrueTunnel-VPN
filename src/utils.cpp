@@ -21,13 +21,7 @@
 #include <functional>		  //  ← ask() validator
 #include <regex>
 
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/pem.h>
-#include <openssl/conf.h>
-#include <openssl/provider.h>
-#include <openssl/hmac.h>
-#include <openssl/rand.h>
+#include <stdint.h>
 #include <netfw.h>
 #include <comdef.h>
 #include <stdexcept>
