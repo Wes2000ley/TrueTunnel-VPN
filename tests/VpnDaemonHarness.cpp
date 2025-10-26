@@ -18,7 +18,8 @@ public:
                    std::string adapter_name,
                    std::string subnet_mask,
                    std::string public_ip,
-                   std::string real_adapter) override {
+                   std::string real_adapter,
+                   secure::CipherSuite cipher_suite) override {
                 (void)mode;
                 (void)server_ip;
                 (void)port;
@@ -29,6 +30,7 @@ public:
                 (void)subnet_mask;
                 (void)public_ip;
                 (void)real_adapter;
+                (void)cipher_suite;
 
                 running_ = true;
                 if (log_callback_) {

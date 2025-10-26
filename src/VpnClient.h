@@ -15,7 +15,8 @@ public:
 			  const std::string& password,
 			  const std::string& adaptername,
 			  const std::string& real_adapter,
-			  const std::string& public_ip);
+			  const std::string& public_ip,
+			  secure::CipherSuite cipher);
 
 	~VpnClient();
 
@@ -41,6 +42,7 @@ private:
 	std::string local_ip_;
 	std::string subnetmask_;
 	std::string gateway_;
+	secure::CipherSuite cipher_suite_;
 
 	SOCKET sock_ = INVALID_SOCKET;
 	std::unique_ptr<secure::SecureSocket> tls_;

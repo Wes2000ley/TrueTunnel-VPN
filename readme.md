@@ -19,7 +19,7 @@ servers or SaaS accounts** – only you and the peers you trust.
 
 | Category          | Details                                                        |
 |-------------------|----------------------------------------------------------------|
-| **Crypto**        | TLS 1.2/1.3 with AES-GCM only • OpenSSL FIPS provider          |
+| **Crypto**        | TLS 1.2/1.3 with AES-GCM / ChaCha20-Poly1305 (Windows CNG)     |
 | **Auth**          | Mutual HMAC-SHA-256 over nonces + shared passphrase            |
 | **Tunnel**        | Raw IPv4 via **Wintun** (handles TCP/UDP/ICMP etc.)            |
 | **Topology**      | /24 static pool – now supports **multiple clients per server** |
@@ -73,7 +73,7 @@ MTU fixed at 1380 (safe default through TLS/TCP)
 🔐 Security Design
 Layer	Tech	Notes
 Transport	TCP	NODELAY + backlog tuning
-Encryption	TLS 1.2/1.3	AES-256-GCM / AES-128-GCM only
+Encryption	TLS 1.2/1.3	AES-128/256-GCM or ChaCha20-Poly1305
 Authentication	HMAC-SHA-256	Nonce + password, no PKI required
 Key exchange	Ephemeral RSA-3072	Generated at each start-up
 Tunnel IF	Wintun	In-kernel virtual NIC

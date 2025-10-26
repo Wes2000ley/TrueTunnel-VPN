@@ -44,11 +44,13 @@
 VpnServer::VpnServer(int                port,
                      const std::string& real_adapter,
                      const std::string& password,
-                     const std::string& adaptername)
+                     const std::string& adaptername,
+                     secure::CipherSuite cipher)
     : port_{port},
       real_adapter_{real_adapter},
       password_{password},
       adaptername_{adaptername},
+      cipher_suite_{cipher},
       listen_sock_{INVALID_SOCKET},
       running_{false}
 {
@@ -223,8 +225,12 @@ void VpnServer::acceptLoop() {
 void VpnServer::handleClient(SOCKET sock)
 {
     try {
-        auto tls = std::make_shared<secure::SecureSocket>(sock, password_, /*is_server=*/true);
+        auto tls = std::make_shared<secure::SecureSocket>(sock,
+                                                          password_,
+                                                          /*is_server=*/true,
+                                                          cipher_suite_);
         tls->handshake();
+        std::cout << "[🔐] Client handshake completed (" << secure::to_string(cipher_suite_) << ")\n";
 
         int flag = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));  // ✅ actual client socket

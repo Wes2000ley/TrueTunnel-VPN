@@ -39,6 +39,17 @@ static std::vector<uint8_t> recv_vec(SOCKET s) {
     return v;
 }
 
+static void send_suite(SOCKET s, CipherSuite suite) {
+    uint8_t id = static_cast<uint8_t>(suite);
+    send_vec(s, std::vector<uint8_t>{id});
+}
+
+static CipherSuite recv_suite(SOCKET s) {
+    auto data = recv_vec(s);
+    if (data.size() != 1) throw std::runtime_error("cipher id size");
+    return static_cast<CipherSuite>(data[0]);
+}
+
 static std::vector<uint8_t> export_ecc_pub(BCRYPT_KEY_HANDLE k) {
     ULONG cb=0;
     NTSTATUS st = BCryptExportKey(k, nullptr, BCRYPT_ECCPUBLIC_BLOB, nullptr, 0, &cb, 0);
@@ -73,7 +84,10 @@ static std::array<uint8_t,32> derive_from_secret(const Secret& sec) {
     return out;
 }
 
-HandshakeResult Handshake::run(bool is_server, SOCKET s, const std::vector<uint8_t>& psk) {
+HandshakeResult Handshake::run(bool is_server,
+                               SOCKET s,
+                               const std::vector<uint8_t>& psk,
+                               CipherSuite suite) {
     // Algorithms
     Alg ecc; CHECK_NT("Open ECDH", BCryptOpenAlgorithmProvider(&ecc.h, BCRYPT_ECDH_P256_ALGORITHM, nullptr, 0));
 
@@ -91,6 +105,10 @@ HandshakeResult Handshake::run(bool is_server, SOCKET s, const std::vector<uint8
 
     // Hello exchange
     if (!is_server) {
+        send_suite(s, suite);
+        CipherSuite server_suite = recv_suite(s);
+        if (server_suite != suite) throw std::runtime_error("Cipher suite mismatch (server)");
+
         // client: send my_rand, my_pub
         send_vec(s, std::vector<uint8_t>(my_rand.begin(), my_rand.end()));
         send_vec(s, my_pub);
@@ -137,6 +155,7 @@ HandshakeResult Handshake::run(bool is_server, SOCKET s, const std::vector<uint8
         auto prk = HKDF::extract(salt.data(), salt.size(), shared.data(), shared.size());
 
         HandshakeResult res{};
+        res.suite = suite;
         const uint8_t kc2s[] = "key c2s";
         const uint8_t ks2c[] = "key s2c";
         const uint8_t ivc2s[]= "iv c2s";
@@ -154,6 +173,10 @@ HandshakeResult Handshake::run(bool is_server, SOCKET s, const std::vector<uint8
         SecureZeroMemory((void*)prk.data(), prk.size());
         return res;
     } else {
+        CipherSuite client_suite = recv_suite(s);
+        if (client_suite != suite) throw std::runtime_error("Cipher suite mismatch (client)");
+        send_suite(s, suite);
+
         // server: recv client
         auto v_rand = recv_vec(s);
         auto v_pub  = recv_vec(s);
@@ -201,6 +224,7 @@ HandshakeResult Handshake::run(bool is_server, SOCKET s, const std::vector<uint8
         auto prk = HKDF::extract(salt.data(), salt.size(), shared.data(), shared.size());
 
         HandshakeResult res{};
+        res.suite = suite;
         const uint8_t kc2s[] = "key c2s";
         const uint8_t ks2c[] = "key s2c";
         const uint8_t ivc2s[]= "iv c2s";

@@ -52,6 +52,7 @@ add_executable(vpn
         src/secure/RecordLayer.cpp
         src/secure/SecureSocket.cpp
         src/secure/Handshake.cpp
+        src/secure/AeadChaCha20Poly1305.cpp
 )
 
 if (MSVC)

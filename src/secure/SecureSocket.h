@@ -9,7 +9,7 @@ namespace secure {
 
 	class SecureSocket {
 	public:
-		SecureSocket(SOCKET s, const std::string& psk, bool is_server);
+		SecureSocket(SOCKET s, const std::string& psk, bool is_server, CipherSuite suite);
 		~SecureSocket();
 
 		// 1) Perform handshake, derive keys
@@ -30,6 +30,7 @@ namespace secure {
 	private:
 		SOCKET s_{INVALID_SOCKET};
 		bool is_server_{false};
+		CipherSuite suite_{CipherSuite::Aes256Gcm};
 		std::vector<uint8_t> psk_;
 
 		AeadContext send_aead_;

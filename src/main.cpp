@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <tchar.h>
 #include "core/VpnDaemon.h"
+#include "secure/CipherSuite.h"
 #include "utils.hpp"
 #include "ImGuiStyleManager.h"
 #include "Networking.h"
@@ -252,11 +253,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			static char subnet_mask[64] = "will decide of type choice";
 			static char gateway[64] = "will decide of type choice";
 			static char password[64] = "SuperStrongPassword123";
-			static char public_ip[64] = "192.168.1.10";
+			static char public_ip[64] = "192.168.50.10";
 			static int real_adapter_index = 0;
 
 			static const char *mode_options[] = {"server", "client"};
 			static int selected_mode = 0;
+			static const char *cipher_labels[] = {"AES-256-GCM", "AES-128-GCM", "ChaCha20-Poly1305"};
+			static const secure::CipherSuite cipher_values[] = {
+				secure::CipherSuite::Aes256Gcm,
+				secure::CipherSuite::Aes128Gcm,
+				secure::CipherSuite::ChaCha20Poly1305
+			};
+			static int selected_cipher = 0;
 
 
 			ImGui::Text("Mode:");
@@ -347,6 +355,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("This pre-shared password will be used for authentication.");
 			ImGui::InputText("##password", password, IM_ARRAYSIZE(password), ImGuiInputTextFlags_Password);
+
+			ImGui::Text("Cipher Suite:");
+			ImGui::SameLine();
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Choose the AEAD used to protect transport records.");
+			ImGui::Combo("##cipher_suite", &selected_cipher, cipher_labels, IM_ARRAYSIZE(cipher_labels));
 
 			ImGui::Text("Server Public IP:");
 			ImGui::SameLine();
@@ -454,6 +468,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                                                       current_adapter_idx_ < static_cast<int>(real_adapters_.size()))
                                                      ? real_adapters_[current_adapter_idx_].name
                                                      : "Unknown";
+                                const int cipher_count = static_cast<int>(IM_ARRAYSIZE(cipher_labels));
+                                int cipher_index = (selected_cipher >= 0 && selected_cipher < cipher_count)
+                                                   ? selected_cipher
+                                                   : 0;
+                                const secure::CipherSuite chosen_cipher = cipher_values[cipher_index];
+                                config.cipher_suite = chosen_cipher;
+                                append_line(std::string("[*] Cipher suite: ") + cipher_labels[cipher_index]);
 
                                 if (port_num == 0) {
                                         append_line("[!] Aborting connection attempt due to invalid port");

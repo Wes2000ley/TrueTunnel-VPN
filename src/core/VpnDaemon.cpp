@@ -66,7 +66,8 @@ bool VpnDaemon::start(const SessionConfig &config) {
                                          config.adapter_name,
                                          config.subnet_mask,
                                          config.public_ip,
-                                         config.real_adapter);
+                                         config.real_adapter,
+                                         config.cipher_suite);
 
         if (!started) {
                 state_.store(State::Idle);

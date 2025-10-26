@@ -39,11 +39,12 @@ int RecordLayer::send_record(uint8_t type, const uint8_t* data, uint16_t len) {
     std::vector<uint8_t> ct;
     std::array<uint8_t,16> tag{};
     send_->seal(type, send_seq_, data, len, ct, tag);
+    const size_t tag_len = std::min<size_t>(tag.size(), send_->tag_length());
 
     // write: hdr | ct | tag
     if (!write_all(s_, hdr, sizeof(hdr))) return -1;
     if (!write_all(s_, ct.data(), ct.size())) return -1;
-    if (!write_all(s_, tag.data(), tag.size())) return -1;
+    if (!write_all(s_, tag.data(), tag_len)) return -1;
 
     send_seq_++;
     return (int)len;
@@ -70,7 +71,8 @@ int RecordLayer::recv_record(uint8_t& type, uint8_t* out, size_t cap) {
     if (!read_all(s_, ct.data(), len)) return -1;
 
     std::array<uint8_t,16> tag{};
-    if (!read_all(s_, tag.data(), tag.size())) return -1;
+    const size_t tag_len = std::min<size_t>(tag.size(), recv_->tag_length());
+    if (!read_all(s_, tag.data(), tag_len)) return -1;
 
     std::vector<uint8_t> pt;
     if (!recv_->open(type, seq, ct.data(), len, tag, pt)) return -1;

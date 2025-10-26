@@ -15,13 +15,15 @@ VpnClient::VpnClient(const std::string& server_ip,
                      const std::string& password,
                      const std::string& adaptername,
                      const std::string& real_adapter,
-                     const std::string& public_ip)
+                     const std::string& public_ip,
+                     secure::CipherSuite cipher)
     : server_ip_(server_ip),
       port_(port),
       password_(password),
       adaptername_(adaptername),
       real_adapter_(real_adapter),
-      public_ip_(public_ip) {}
+      public_ip_(public_ip),
+      cipher_suite_(cipher) {}
 
 VpnClient::~VpnClient() {
     stop();
@@ -125,9 +127,10 @@ void VpnClient::connectToServer() {
 }
 
 void VpnClient::performHandshake() {
-    tls_ = std::make_unique<secure::SecureSocket>(sock_, password_, /*is_server=*/false);
+    tls_ = std::make_unique<secure::SecureSocket>(sock_, password_, /*is_server=*/false, cipher_suite_);
     tls_->handshake();
-    std::cout << "[🔒] SecureTransport established (ECDHE+PSK, AES-256-GCM)\n";
+    std::cout << "[🔒] SecureTransport established (ECDHE+PSK, "
+              << secure::to_string(cipher_suite_) << ")\n";
 }
 
 void VpnClient::requestConfig() {

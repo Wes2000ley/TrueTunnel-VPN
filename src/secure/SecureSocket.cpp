@@ -3,8 +3,12 @@
 
 namespace secure {
 
-	SecureSocket::SecureSocket(SOCKET s, const std::string& psk, bool is_server)
-		: s_(s), is_server_(is_server), psk_(psk.begin(), psk.end()), layer_(s) {
+	SecureSocket::SecureSocket(SOCKET s, const std::string& psk, bool is_server, CipherSuite suite)
+		: s_(s),
+		  is_server_(is_server),
+		  suite_(suite),
+		  psk_(psk.begin(), psk.end()),
+		  layer_(s) {
 		if (s_ == INVALID_SOCKET) throw std::runtime_error("Invalid socket");
 	}
 
@@ -14,9 +18,9 @@ namespace secure {
 
 	void SecureSocket::handshake() {
 		if (handshook_) return;
-		auto res = Handshake::run(is_server_, s_, psk_);
-		send_aead_.init(res.keys.k_send, res.keys.iv_send);
-		recv_aead_.init(res.keys.k_recv, res.keys.iv_recv);
+		auto res = Handshake::run(is_server_, s_, psk_, suite_);
+		send_aead_.init(res.suite, res.keys.k_send, res.keys.iv_send);
+		recv_aead_.init(res.suite, res.keys.k_recv, res.keys.iv_recv);
 		layer_.set_send(&send_aead_);
 		layer_.set_recv(&recv_aead_);
 		handshook_ = true;

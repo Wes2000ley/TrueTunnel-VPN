@@ -20,7 +20,8 @@ VpnController::~VpnController() {
 
 bool VpnController::start(std::string m, std::string s_ip, int p, std::string l_ip,
                           std::string g, std::string pw, std::string a_name,
-                          std::string mask, std::string pub_ip, std::string real_ad) {
+                          std::string mask, std::string pub_ip, std::string real_ad,
+                          secure::CipherSuite cipher) {
 	if (running) return false;
 
 	mode = std::move(m);
@@ -33,6 +34,7 @@ bool VpnController::start(std::string m, std::string s_ip, int p, std::string l_
 	subnetmask = std::move(mask);
 	public_ip = std::move(pub_ip);
 	real_adapter = std::move(real_ad);
+	cipher_suite = cipher;
 
 	running = true;
 	vpn_thread = std::thread(&VpnController::vpn_thread_func, this);
@@ -103,16 +105,23 @@ void VpnController::vpn_thread_func() {
 		ComInit com;
 		WsaInit wsa;
 
-		std::cout << "[✓] Using Windows CNG (ECDH P-256, AES-256-GCM, HMAC-SHA256)\n";
+		std::cout << "[✓] Using Windows CNG (ECDH P-256, " << secure::to_string(cipher_suite)
+		          << ", HMAC-SHA256)\n";
 
 		if (mode == "server") {
 			util::logInfo("[*] Launching in server mode");
-			server = std::make_unique<VpnServer>(port, real_adapter, password, adaptername);
+			server = std::make_unique<VpnServer>(port, real_adapter, password, adaptername, cipher_suite);
 			server->start();
-			util::logInfo("[✓] VpnServer started");  // Add this line
+			util::logInfo("[✓] VpnServer started");
 		} else {
 			util::logInfo("[*] Launching in client mode");
-			client = std::make_unique<VpnClient>(server_ip, port, password, adaptername, real_adapter, public_ip);
+			client = std::make_unique<VpnClient>(server_ip,
+			                                     port,
+			                                     password,
+			                                     adaptername,
+			                                     real_adapter,
+			                                     public_ip,
+			                                     cipher_suite);
 			client->start();
 		}
 

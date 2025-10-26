@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "core/IVpnController.h"
+#include "secure/CipherSuite.h"
 
 class VpnServer;
 class VpnClient;
@@ -19,7 +20,8 @@ public:
 
         bool start(std::string m, std::string s_ip, int p, std::string l_ip,
                    std::string g, std::string pw, std::string a_name,
-                   std::string mask, std::string pub_ip, std::string real_ad) override;
+                   std::string mask, std::string pub_ip, std::string real_ad,
+                   secure::CipherSuite cipher) override;
 
 
         void stop() override;
@@ -41,10 +43,11 @@ private:
 	std::string local_ip;
 	std::string gateway;
 	std::string password;
-	std::string adaptername;
+        std::string adaptername;
         std::string subnetmask;
         std::string public_ip;
         std::string real_adapter;
+        secure::CipherSuite cipher_suite{secure::CipherSuite::Aes256Gcm};
 
         std::unique_ptr<VpnClient> client;
         std::unique_ptr<VpnServer> server;

@@ -8,6 +8,7 @@
 #include <string>
 
 #include "core/IVpnController.h"
+#include "secure/CipherSuite.h"
 
 class VpnDaemon {
 public:
@@ -22,6 +23,7 @@ public:
                 std::string subnet_mask;
                 std::string public_ip;
                 std::string real_adapter;
+                secure::CipherSuite cipher_suite{secure::CipherSuite::Aes256Gcm};
         };
 
         enum class State {

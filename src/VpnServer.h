@@ -47,7 +47,8 @@ public:
     VpnServer(int                port,
               const std::string& real_adapter,
               const std::string& password,
-              const std::string& adaptername);
+              const std::string& adaptername,
+              secure::CipherSuite cipher);
     ~VpnServer();
 
     void start();   // idempotent
@@ -91,6 +92,7 @@ void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
     std::string real_adapter_;
     std::string password_;
     std::string adaptername_;
+    secure::CipherSuite cipher_suite_{secure::CipherSuite::Aes256Gcm};
 
     std::string local_ip_   = "10.10.100.1";
     std::string subnetmask_ = "255.255.255.0";

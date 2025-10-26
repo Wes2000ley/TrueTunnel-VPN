@@ -3,6 +3,8 @@
 #include <functional>
 #include <string>
 
+#include "secure/CipherSuite.h"
+
 class IVpnController {
 public:
         virtual ~IVpnController() = default;
@@ -16,7 +18,8 @@ public:
                            std::string adapter_name,
                            std::string subnet_mask,
                            std::string public_ip,
-                           std::string real_adapter) = 0;
+                           std::string real_adapter,
+                           secure::CipherSuite cipher_suite) = 0;
 
         virtual void stop() = 0;
         [[nodiscard]] virtual bool is_running() const = 0;
