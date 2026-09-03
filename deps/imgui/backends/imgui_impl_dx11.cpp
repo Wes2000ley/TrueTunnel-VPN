@@ -679,15 +679,27 @@ static void ImGui_ImplDX11_CreateWindow(ImGuiViewport* viewport)
     sd.Flags = 0;
 
     IM_ASSERT(vd->SwapChain == nullptr && vd->RTView == nullptr);
-    bd->pFactory->CreateSwapChain(bd->pd3dDevice, &sd, &vd->SwapChain);
+    if (FAILED(bd->pFactory->CreateSwapChain(bd->pd3dDevice, &sd, &vd->SwapChain)))
+        return;
 
     // Create the render target
     if (vd->SwapChain)
     {
-        ID3D11Texture2D* pBackBuffer;
-        vd->SwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
-        bd->pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &vd->RTView);
+        ID3D11Texture2D* pBackBuffer = nullptr;
+        const HRESULT get_buffer_result = vd->SwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+        if (FAILED(get_buffer_result) || pBackBuffer == nullptr)
+        {
+            vd->SwapChain->Release();
+            vd->SwapChain = nullptr;
+            return;
+        }
+        const HRESULT create_view_result = bd->pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &vd->RTView);
         pBackBuffer->Release();
+        if (FAILED(create_view_result))
+        {
+            vd->SwapChain->Release();
+            vd->SwapChain = nullptr;
+        }
     }
 }
 
@@ -719,11 +731,18 @@ static void ImGui_ImplDX11_SetWindowSize(ImGuiViewport* viewport, ImVec2 size)
     if (vd->SwapChain)
     {
         ID3D11Texture2D* pBackBuffer = nullptr;
-        vd->SwapChain->ResizeBuffers(0, (UINT)size.x, (UINT)size.y, DXGI_FORMAT_UNKNOWN, 0);
-        vd->SwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
-        if (pBackBuffer == nullptr) { fprintf(stderr, "ImGui_ImplDX11_SetWindowSize() failed creating buffers.\n"); return; }
-        bd->pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &vd->RTView);
+        if (FAILED(vd->SwapChain->ResizeBuffers(0, (UINT)size.x, (UINT)size.y, DXGI_FORMAT_UNKNOWN, 0)))
+            return;
+        const HRESULT get_buffer_result = vd->SwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
+        if (FAILED(get_buffer_result) || pBackBuffer == nullptr)
+        {
+            fprintf(stderr, "ImGui_ImplDX11_SetWindowSize() failed creating buffers.\n");
+            return;
+        }
+        const HRESULT create_view_result = bd->pd3dDevice->CreateRenderTargetView(pBackBuffer, nullptr, &vd->RTView);
         pBackBuffer->Release();
+        if (FAILED(create_view_result))
+            vd->RTView = nullptr;
     }
 }
 
@@ -731,6 +750,8 @@ static void ImGui_ImplDX11_RenderWindow(ImGuiViewport* viewport, void*)
 {
     ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
     ImGui_ImplDX11_ViewportData* vd = (ImGui_ImplDX11_ViewportData*)viewport->RendererUserData;
+    if (vd == nullptr || vd->RTView == nullptr)
+        return;
     ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
     bd->pd3dDeviceContext->OMSetRenderTargets(1, &vd->RTView, nullptr);
     if (!(viewport->Flags & ImGuiViewportFlags_NoRendererClear))
@@ -741,7 +762,8 @@ static void ImGui_ImplDX11_RenderWindow(ImGuiViewport* viewport, void*)
 static void ImGui_ImplDX11_SwapBuffers(ImGuiViewport* viewport, void*)
 {
     ImGui_ImplDX11_ViewportData* vd = (ImGui_ImplDX11_ViewportData*)viewport->RendererUserData;
-    vd->SwapChain->Present(0, 0); // Present without vsync
+    if (vd && vd->SwapChain)
+        vd->SwapChain->Present(0, 0); // Present without vsync
 }
 
 static void ImGui_ImplDX11_InitMultiViewportSupport()

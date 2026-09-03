@@ -1,95 +1,124 @@
 #include "VpnController.h"
 #include "VpnClient.h"
 #include "VpnServer.h"
+#include "secure/SharedSecret.h"
 
 #include <iostream>
 #include <filesystem>
 #include <chrono>
+#include <system_error>
+#include <string_view>
 
 #include "redirect_stream.hpp"
 #include "utils.hpp"
 
-VpnController::VpnController() : port(0), running(false) {
+namespace {
+void wipe_string(std::string& value) noexcept {
+	if (!value.empty()) {
+		::SecureZeroMemory(value.data(), value.size());
+		value.clear();
+	}
+}
+} // namespace
+
+VpnController::StartupConfig::~StartupConfig() {
+	wipe_string(password);
+}
+
+VpnController::VpnController() : running(false) {
 }
 
 VpnController::~VpnController() {
-	if (running) {
-		stop();
-	}
+	stop();
 }
 
 bool VpnController::start(std::string m, std::string s_ip, int p, std::string l_ip,
                           std::string g, std::string pw, std::string a_name,
                           std::string mask, std::string pub_ip, std::string real_ad,
-                          secure::CipherSuite cipher,
+                          const std::uint64_t real_adapter_luid,
+                          secure::CipherSuite,
                           TransportProtocol transport) {
-	if (running) return false;
+	std::lock_guard<std::mutex> lifecycle_guard(lifecycle_mutex_);
+	if (running || vpn_thread.joinable()) return false;
+	if (!secure::is_valid_shared_secret(pw) || p <= 0 || p > 65'535 ||
+	    (m != "server" && m != "client")) return false;
 
-	mode = std::move(m);
-	server_ip = std::move(s_ip);
-	port = p;
-	local_ip = std::move(l_ip);
-	gateway = std::move(g);
-	password = std::move(pw);
-	adaptername = std::move(a_name);
-	subnetmask = std::move(mask);
-	public_ip = std::move(pub_ip);
-	real_adapter = std::move(real_ad);
-	cipher_suite = cipher;
-	transport_ = transport;
+	// These legacy interface parameters are not consumed by either concrete
+	// endpoint; each endpoint obtains its assigned tunnel configuration from the
+	// authenticated protocol exchange.
+	(void)l_ip;
+	(void)g;
+	(void)mask;
+
+	auto config = std::make_unique<StartupConfig>();
+	config->mode = std::move(m);
+	config->server_ip = std::move(s_ip);
+	config->port = p;
+	config->password = std::move(pw);
+	config->adaptername = std::move(a_name);
+	config->public_ip = std::move(pub_ip);
+	config->real_adapter = std::move(real_ad);
+	config->real_adapter_luid = real_adapter_luid;
+	config->cipher_suite = secure::CipherSuite::Aes256Gcm;
+	config->transport = transport;
 
 	running = true;
-	vpn_thread = std::thread(&VpnController::vpn_thread_func, this);
+	try {
+		vpn_thread = std::thread(
+			&VpnController::vpn_thread_func, this, std::move(config));
+	} catch (const std::exception& error) {
+		running = false;
+		std::cerr << "[!] Failed to start VPN worker: " << error.what() << '\n';
+		return false;
+	} catch (...) {
+		running = false;
+		std::cerr << "[!] Failed to start VPN worker\n";
+		return false;
+	}
 	return true;
 }
 
 void VpnController::stop() {
-	if (!running) return;
+	std::lock_guard<std::mutex> lifecycle_guard(lifecycle_mutex_);
 
 	running = false;
 
-	// Wait up to 5 seconds for graceful shutdown
-	auto start = std::chrono::steady_clock::now();
-	while (client || server) {
-		if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
-			std::cerr << "[!] Force stopping VPN after timeout\n";
-			break;
-		}
-
-		if (client) {
-			client->stop();
-			client.reset();
-		}
-
-		if (server) {
-			server->stop();
-			server.reset();
-		}
-
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	std::shared_ptr<VpnClient> client_to_stop;
+	std::shared_ptr<VpnServer> server_to_stop;
+	{
+		std::lock_guard<std::mutex> resource_guard(resource_mutex_);
+		client_to_stop = std::move(client);
+		server_to_stop = std::move(server);
 	}
+	if (client_to_stop) client_to_stop->stop();
+	if (server_to_stop) server_to_stop->stop();
 
-	if (vpn_thread.joinable()) {
-		try {
-			if (vpn_thread.joinable()) {
-				vpn_thread.join();
-			}
-		} catch (...) {
-			// Ignore any thread join errors during shutdown
-		}
+	if (vpn_thread.joinable() && vpn_thread.get_id() != std::this_thread::get_id()) {
+		vpn_thread.join();
 	}
-
 	std::cout << "[*] VPN stopped\n";
 }
 
 bool VpnController::send_message(const std::string& text) {
-    if (!running || text.empty()) return false;
-    if (client) return client->send_chat_message(text);
-    if (server) return server->send_chat(text);
+    if (!running.load() || text.empty()) return false;
+
+    std::shared_ptr<VpnClient> client_snapshot;
+    std::shared_ptr<VpnServer> server_snapshot;
+    {
+        std::lock_guard<std::mutex> resource_guard(resource_mutex_);
+        client_snapshot = client;
+        server_snapshot = server;
+    }
+
+    // Network writes may wait for a slow peer. Shared endpoint ownership keeps
+    // the object alive without blocking stop() on a controller lifecycle lock.
+    if (client_snapshot) return client_snapshot->send_chat_message(text);
+    if (server_snapshot) return server_snapshot->send_chat(text);
     return false;
 }
 
 void VpnController::set_log_callback(std::function<void(const std::string &)> cb) {
+	std::lock_guard<std::mutex> callback_guard(callback_mutex_);
 	log_callback = std::move(cb);
 }
 
@@ -97,15 +126,18 @@ bool VpnController::is_running() const {
 	return running;
 }
 
-void VpnController::vpn_thread_func() {
+void VpnController::vpn_thread_func(std::unique_ptr<StartupConfig> config) {
 	dual_redirect_stream cout_redirect([this](const std::string &msg) {
-		if (log_callback) {
-			log_callback(msg);
+		std::function<void(const std::string&)> callback;
+		{
+			std::lock_guard<std::mutex> callback_guard(callback_mutex_);
+			callback = log_callback;
 		}
+		if (callback) callback(msg);
 	});
 
 	std::cout << "VPN thread started\n";
-	util::logInfo("TLS handshake (expected later)");
+	util::logInfo("Secure transport handshake will begin after the socket connects");
 
 	try {
 		if (!is_running_as_admin())
@@ -114,54 +146,90 @@ void VpnController::vpn_thread_func() {
 		ComInit com;
 		WsaInit wsa;
 
-		// Detect actual backend for ChaCha
-		bool using_chacha = (cipher_suite == secure::CipherSuite::ChaCha20Poly1305);
-		bool using_cng = true;
-		if (using_chacha) {
-			auto impl = secure::AeadContext::ch_override();
-			using_cng = (impl != secure::AeadContext::ChaChaImplOverride::Soft);
+		if (config->transport == TransportProtocol::Tcp) {
+			std::cout << "[✓] Using Windows Schannel TLS 1.3 "
+					  "(TLS_AES_256_GCM_SHA384, ephemeral ECDSA P-384 certificate)\n";
+		} else {
+			std::cout << "[✓] Using wolfSSL DTLS 1.3 "
+					     "(TLS_AES_256_GCM_SHA384, P-256 ECDHE-PSK)\n";
 		}
 
-		{
-			// Do a small probe to determine actual backend.
-			secure::AeadContext probe;
-			std::array<uint8_t,32> zero_key{};
-			std::array<uint8_t,4> zero_iv{};
-			probe.init(cipher_suite, zero_key, zero_iv);
+		util::logInfo(std::string("[*] Transport protocol: ") +
+		              to_string(config->transport));
 
-			std::cout << "[✓] Using "
-					  << (probe.cipher() == secure::CipherSuite::ChaCha20Poly1305
-							 ? (probe.using_cng() ? "Windows CNG ChaCha20-Poly1305" : "software ChaCha20-Poly1305")
-							 : "Windows CNG AES-GCM")
-					  << " (ECDH P-256, HMAC-SHA256)\n";
-		}
-
-		util::logInfo(std::string("[*] Transport protocol: ") + to_string(transport_));
-
-		if (mode == "server") {
+		if (config->mode == "server") {
 			util::logInfo("[*] Launching in server mode");
-			server = std::make_unique<VpnServer>(port, real_adapter, password, adaptername, cipher_suite, transport_);
-			server->start();
+			auto new_server = std::make_shared<VpnServer>(
+				config->port, config->real_adapter, config->password,
+				config->adaptername, config->cipher_suite, config->transport,
+				secure::TrafficKeyRotationPolicy{}, config->real_adapter_luid);
+			wipe_string(config->password);
+			bool keep_server = false;
+			{
+				std::lock_guard<std::mutex> resource_guard(resource_mutex_);
+				if (running.load()) {
+					// Publish before adapter and listener setup so stop() can cancel
+					// time-bounded Windows networking helpers during startup.
+					server = new_server;
+					keep_server = true;
+				}
+			}
+			if (!keep_server) {
+				new_server->stop();
+				return;
+			}
+			new_server->start();
+			if (!running.load()) {
+				new_server->stop();
+				return;
+			}
 			util::logInfo("[✓] VpnServer started");
 		} else {
 			util::logInfo("[*] Launching in client mode");
-			client = std::make_unique<VpnClient>(
-				server_ip, port, password, adaptername, real_adapter, public_ip, cipher_suite, transport_);
-			client->start();
+			auto new_client = std::make_shared<VpnClient>(
+				config->server_ip, config->port, config->password,
+				config->adaptername, config->real_adapter, config->public_ip,
+				config->cipher_suite, config->transport,
+				secure::TrafficKeyRotationPolicy{}, config->real_adapter_luid);
+			wipe_string(config->password);
+			bool keep_client = false;
+			{
+				std::lock_guard<std::mutex> resource_guard(resource_mutex_);
+				if (running.load()) {
+					// Publish before the potentially unbounded connection retry loop
+					// so stop() can cancel its pending socket and wait deterministically.
+					client = new_client;
+					keep_client = true;
+				}
+			}
+			if (!keep_client) {
+				new_client->stop();
+				return;
+			}
+			new_client->start();
+			if (!running.load()) {
+				new_client->stop();
+				return;
+			}
 		}
 
 		while (running) {
-			if (client && !client->is_active()) {
+			std::shared_ptr<VpnClient> inactive_client;
+			std::shared_ptr<VpnServer> inactive_server;
+			{
+				std::lock_guard<std::mutex> resource_guard(resource_mutex_);
+				if (client && !client->is_active()) inactive_client = std::move(client);
+				if (server && !server->is_active()) inactive_server = std::move(server);
+			}
+			if (inactive_client) {
 				util::logWarn("[!] Client session ended unexpectedly; shutting down");
-				client->stop();
-				client.reset();
+				inactive_client->stop();
 				running = false;
 				break;
 			}
-			if (server && !server->is_active()) {
+			if (inactive_server) {
 				util::logWarn("[!] Server stopped unexpectedly; shutting down");
-				server->stop();
-				server.reset();
+				inactive_server->stop();
 				running = false;
 				break;
 			}
@@ -170,6 +238,16 @@ void VpnController::vpn_thread_func() {
 	} catch (const std::exception &ex) {
 		std::cerr << "[!] VPN error: " << ex.what() << "\n";
 	}
+	config.reset();
 
 	running = false;
+	std::shared_ptr<VpnClient> client_to_stop;
+	std::shared_ptr<VpnServer> server_to_stop;
+	{
+		std::lock_guard<std::mutex> resource_guard(resource_mutex_);
+		client_to_stop = std::move(client);
+		server_to_stop = std::move(server);
+	}
+	if (client_to_stop) client_to_stop->stop();
+	if (server_to_stop) server_to_stop->stop();
 }

@@ -8,16 +8,21 @@ This project, TrueTunnel VPN, is dual-licensed under:
 
 You may choose either license according to your needs.
 
-> ⚠️ Licensing Note:
-> This project includes dependencies licensed under the Apache License 2.0,
-> including the OpenSSL FIPS provider.
->
-> Because the Apache License 2.0 is **not GPLv2-compatible**, using the
-> **GPLv2 license** to redistribute this project **with Apache-licensed components**
-> (like OpenSSL FIPS) may **cause a license conflict**.
->
-> ✔️ **To avoid legal conflicts, choose the MIT license option** when redistributing
-> this project with Apache 2.0 components.
+The default Windows build statically links wolfSSL. wolfSSL 5.9.2 is available
+under the GNU General Public License version 3 (GPLv3), or under a separate
+commercial license from wolfSSL Inc. TrueTunnel is not one of wolfSSL's listed
+GPLv2 exception projects.
+
+Consequently, when the default build uses open-source wolfSSL, distributors
+should select TrueTunnel's MIT option for the TrueTunnel-authored portions and
+comply with GPLv3 for the combined executable, including the applicable
+Corresponding Source requirements. TrueTunnel's GPLv2-only alternative is not
+compatible with GPLv3-only wolfSSL. A valid commercial wolfSSL license may
+provide different terms.
+
+Third-party components remain subject to their own licenses. See `NOTICE` and
+`THIRD_PARTY.md` before redistributing a binary package. This notice is a
+technical licensing summary, not legal advice.
 
 -------------------------------------------------------------------------------
 This file includes full text of both licenses for your reference.

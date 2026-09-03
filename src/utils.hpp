@@ -17,6 +17,8 @@
 #include <stdexcept>
 #include <string>
 #include <functional>		  //  ← ask() validator
+#include <atomic>
+#include <chrono>
 
 
 #pragma comment(lib, "oleaut32.lib")
@@ -48,10 +50,11 @@ bool is_running_as_admin();
 
 bool is_valid_input(const std::string &s);
 
-bool run_command_hidden(const std::string &command);
+bool run_command_hidden(
+	const std::string& command,
+	const std::atomic<bool>* keep_running = nullptr,
+	std::chrono::milliseconds timeout = std::chrono::milliseconds{10'000});
 
-
-bool run_command_admin(const std::string &command);
 
 std::string sanitize_shell_string(const std::string &input);
 

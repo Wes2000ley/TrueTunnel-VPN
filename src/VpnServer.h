@@ -14,6 +14,8 @@
 #include <iphlpapi.h>
 
 #include "secure/SecureSocket.h"
+#include "secure/WolfSslDatagramSocket.h"
+#include "security/FixedWindowRateLimiter.h"
 
 #include <string>
 #include <memory>
@@ -21,18 +23,22 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <atomic>
+#include <chrono>
 #include <optional>
 #include <deque>
 #include <condition_variable>
 #include <string_view>
 #include <utility>
+#include <limits>
 
 //
 //  Project headers
 //
 #include "IpPoolManager.h"     // IpPoolManager (thread-safe /24 allocator)
+#include "Networking.h"
 #include "TransportProtocol.h"
 #include "raii.hpp"
 
@@ -54,7 +60,9 @@ public:
               const std::string& password,
               const std::string& adaptername,
               secure::CipherSuite cipher,
-              TransportProtocol transport);
+              TransportProtocol transport,
+              secure::TrafficKeyRotationPolicy rotation_policy = {},
+              std::uint64_t expected_real_adapter_luid = 0U);
     ~VpnServer();
 
     void start();   // idempotent
@@ -81,6 +89,7 @@ private:
     void handleClient(SOCKET client_sock,
                       std::shared_ptr<std::atomic<bool>> alive);
     struct UdpPeerState;
+    struct UdpHandshakeReservation;
     void tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
                         const std::string &src_ip,
                         const std::string &client_id,
@@ -89,13 +98,26 @@ private:
                         std::string peer_key = std::string{});
     void handleUdpClient(std::shared_ptr<UdpPeerState> state,
                          std::string peer_key,
-                         std::shared_ptr<std::atomic<bool>> alive);
+                         std::shared_ptr<std::atomic<bool>> alive,
+                         secure::PreparedWolfSslServerSession prepared,
+                         std::shared_ptr<UdpHandshakeReservation> reservation);
     void handle_client_message(secure::SecureSocket* tls, std::string_view message);
     std::optional<std::pair<std::string, std::string>> find_client_info_for_tls(secure::SecureSocket* tls) const;
-    bool broadcast_payload(const std::string& payload, const std::string* skip_client_id = nullptr);
-    bool broadcast_message(const std::string& from,
-                           const std::string& text,
-                           const std::string* skip_client_id = nullptr);
+    enum class BroadcastStatus {
+        Delivered,
+        NoRecipients,
+        RateLimited,
+        DeliveryFailed,
+    };
+    BroadcastStatus broadcast_payload(
+        const std::string& payload,
+        std::string_view budget_key,
+        const std::string* skip_client_id = nullptr);
+    BroadcastStatus broadcast_message(
+        const std::string& from,
+        const std::string& text,
+        std::string_view budget_key,
+        const std::string* skip_client_id = nullptr);
 
     // ───────── types / helpers ──────────
     using TLSPtr = std::unique_ptr<secure::SecureSocket>;
@@ -104,11 +126,16 @@ private:
 
     struct ClientEntry {
         std::shared_ptr<secure::SecureSocket> tls;
-        std::mutex write_mutex;
+        // The write lock has to outlive the map entry when a sender snapshots
+        // the connection. This lets stop() acquire client_map_mutex_, close the
+        // socket, and wake blocked I/O without allowing concurrent TLS writes.
+        std::shared_ptr<std::timed_mutex> write_mutex;
         std::string client_id;
         explicit ClientEntry(std::shared_ptr<secure::SecureSocket> t,
                               std::string id)
-            : tls(std::move(t)), client_id(std::move(id)) {}
+            : tls(std::move(t)),
+              write_mutex(std::make_shared<std::timed_mutex>()),
+              client_id(std::move(id)) {}
         ClientEntry(ClientEntry&&) = default;
         ClientEntry& operator=(ClientEntry&&) = default;
     };
@@ -120,6 +147,22 @@ private:
         std::condition_variable cv;
         std::deque<std::vector<uint8_t>> queue;
         bool closed{false};
+    };
+
+    struct UdpHandshakeReservation final {
+        VpnServer* owner{nullptr};
+        std::string source;
+        bool held{false};
+
+        UdpHandshakeReservation(VpnServer* owner_value,
+                                std::string source_value) noexcept
+            : owner{owner_value}, source{std::move(source_value)}, held{true} {}
+        ~UdpHandshakeReservation();
+
+        UdpHandshakeReservation(const UdpHandshakeReservation&) = delete;
+        UdpHandshakeReservation& operator=(
+            const UdpHandshakeReservation&) = delete;
+        void release() noexcept;
     };
 
     struct ThreadBundle {
@@ -142,15 +185,27 @@ private:
     std::string adaptername_;
     secure::CipherSuite cipher_suite_{secure::CipherSuite::Aes256Gcm};
     TransportProtocol transport_{TransportProtocol::Tcp};
+    secure::TrafficKeyRotationPolicy rotation_policy_{};
+    std::uint64_t expected_real_adapter_luid_{0U};
+    NET_LUID real_adapter_luid_{};
+    bool real_adapter_luid_pinned_{false};
+
+    mutable std::mutex lifecycle_mutex_;
+    bool start_called_ = false;
+    std::atomic<bool> stop_requested_{false};
 
     std::string local_ip_   = "10.10.100.1";
     std::string subnetmask_ = "255.255.255.0";
     std::string gateway_    = "10.10.100.1";
 
     // ───────── sockets / wintun / ssl ───
-    SOCKET                                  listen_sock_ = INVALID_SOCKET;
-    std::optional<WintunAdapterGuard>       adapter_;
+    std::atomic<SOCKET>                    listen_sock_{INVALID_SOCKET};
+    std::unique_ptr<secure::WolfSslStatelessServer> udp_cookie_gate_;
+    std::optional<FirewallRuleGuard>        firewall_rule_;
+    std::optional<FirewallRuleGuard>        icmp_firewall_rule_;
+    std::optional<WintunAdapterLease>       adapter_;
     std::unique_ptr<WintunSessionGuard>     session_;
+    HANDLE                                  cancellation_event_ = nullptr;
 
     // ───────── global state ──────────────
     std::atomic<bool>                       running_{false};
@@ -159,6 +214,8 @@ private:
 
     std::unordered_map<std::string, ClientEntry> client_map_;
     mutable std::shared_mutex               client_map_mutex_;
+    std::unordered_set<std::shared_ptr<secure::SecureSocket>> pending_tcp_clients_;
+    std::mutex                              pending_tcp_clients_mutex_;
 
     mutable std::mutex                      session_mutex_;   // protects WintunSendPacket
 
@@ -167,25 +224,71 @@ private:
     std::thread udp_dispatch_thread_;
     std::unordered_map<std::string, std::shared_ptr<UdpPeerState>> udp_peers_;
     std::mutex udp_peers_mutex_;
+    std::mutex udp_admission_mutex_;
+    std::chrono::steady_clock::time_point udp_rate_window_{};
+    std::size_t udp_global_attempts_{0};
+    std::unordered_map<std::string, std::size_t> udp_source_attempts_;
+    std::size_t udp_pending_handshakes_{0};
+    std::unordered_map<std::string, std::size_t> udp_pending_by_source_;
     std::mutex tcp_workers_mutex_;
     std::vector<ThreadBundle> tcp_workers_;
+    static constexpr std::size_t kMaximumTcpWorkers = 256U;
+    std::size_t tcp_admissions_ = 0;
+    security::FixedWindowRateLimiter tcp_attempt_limiter_{
+        {128U, (std::numeric_limits<std::size_t>::max)()},
+        {16U, (std::numeric_limits<std::size_t>::max)()},
+        1'024U,
+        std::chrono::seconds{1}};
+    security::FixedWindowRateLimiter chat_limiter_{
+        {128U, 128U * 1'024U},
+        {16U, 16U * 1'024U},
+        kMaximumTcpWorkers,
+        std::chrono::seconds{1}};
+    security::FixedWindowRateLimiter chat_fanout_limiter_{
+        {128U, 8U * 1'024U * 1'024U},
+        {16U, 2U * 1'024U * 1'024U},
+        kMaximumTcpWorkers + 1U,
+        std::chrono::seconds{1}};
     std::mutex udp_workers_mutex_;
     std::vector<ThreadBundle> udp_workers_;
     bool nat_public_installed_ = false;
     bool nat_private_installed_ = false;
+    std::string nat_public_alias_;
+    std::string nat_private_alias_;
 
     void addWorker(std::vector<ThreadBundle>& workers,
                    std::mutex& mutex,
                    std::shared_ptr<std::atomic<bool>> alive,
                    std::thread&& worker);
     void pruneWorkers(std::vector<ThreadBundle>& workers, std::mutex& mutex);
+    bool tryAcquireTcpAdmission();
+    void releaseTcpAdmission();
+    bool allowClientChat(const std::string& client_id, std::size_t bytes);
+    void closeAndEraseUdpPeerIfOwned(
+        const std::string& peer_key,
+        const std::shared_ptr<UdpPeerState>& state) noexcept;
+    bool allowUdpStatelessAttempt(const std::string& source);
+    std::shared_ptr<UdpHandshakeReservation> tryReserveUdpHandshake(
+        const std::string& source);
+    void releaseUdpHandshake(const std::string& source) noexcept;
     static void tls_to_tun_server(VpnServer *self,
                                   WINTUN_SESSION_HANDLE session,
                                   secure::SecureSocket *ssl,
+                                  const std::string& expected_src_ip,
                                   std::atomic<bool> &running,
                                   std::mutex &session_mutex)
     {
-        auto fwd = [self](BYTE* pkt, UINT sz) {
+        IN_ADDR expected_source{};
+        const bool expected_source_valid =
+            ::InetPtonA(AF_INET, expected_src_ip.c_str(), &expected_source) == 1;
+        auto fwd = [self, expected_source, expected_source_valid](BYTE* pkt, UINT sz) {
+            // The authenticated transport identifies the peer, but the inner
+            // IPv4 header is caller-controlled.  Consume spoofed packets here
+            // so they can neither reach another client nor the local tunnel.
+            if (!expected_source_valid ||
+                !ipv4_source_matches(pkt, sz, expected_source)) {
+                return true;
+            }
             return self->forward_to_client_if_known(pkt, sz);
         };
         auto on_msg = [self, ssl](std::string_view text) {

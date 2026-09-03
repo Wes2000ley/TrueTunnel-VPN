@@ -19,6 +19,10 @@ __pycache__/
 .idea/
 *.iml
 
+# Local tooling and Dear ImGui runtime state
+.serena/
+imgui.ini
+
 # VS Code
 .vscode/
 

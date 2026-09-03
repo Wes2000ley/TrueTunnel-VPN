@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -22,6 +23,7 @@ public:
         bool start(std::string m, std::string s_ip, int p, std::string l_ip,
                    std::string g, std::string pw, std::string a_name,
                    std::string mask, std::string pub_ip, std::string real_ad,
+                   std::uint64_t real_adapter_luid,
                    secure::CipherSuite cipher,
                    TransportProtocol transport) override;
 
@@ -35,27 +37,35 @@ public:
 
 
 private:
-        void vpn_thread_func();
+        struct StartupConfig {
+                std::string mode;
+                std::string server_ip;
+                int port{0};
+                std::string password;
+                std::string adaptername;
+                std::string public_ip;
+                std::string real_adapter;
+                std::uint64_t real_adapter_luid{0U};
+                secure::CipherSuite cipher_suite{secure::CipherSuite::Aes256Gcm};
+                TransportProtocol transport{TransportProtocol::Tcp};
 
-	std::string mode;
+                ~StartupConfig();
+                StartupConfig() = default;
+                StartupConfig(const StartupConfig&) = delete;
+                StartupConfig& operator=(const StartupConfig&) = delete;
+        };
+
+        void vpn_thread_func(std::unique_ptr<StartupConfig> config);
+
+        std::mutex lifecycle_mutex_;
+        mutable std::mutex resource_mutex_;
+        mutable std::mutex callback_mutex_;
+
 	std::thread vpn_thread;
 	std::atomic<bool> running;
 
-	// user-provided fields
-	std::string server_ip;
-	int port;
-	std::string local_ip;
-	std::string gateway;
-	std::string password;
-        std::string adaptername;
-        std::string subnetmask;
-        std::string public_ip;
-        std::string real_adapter;
-        secure::CipherSuite cipher_suite{secure::CipherSuite::Aes256Gcm};
-        TransportProtocol transport_{TransportProtocol::Tcp};
-
-        std::unique_ptr<VpnClient> client;
-        std::unique_ptr<VpnServer> server;
+	std::shared_ptr<VpnClient> client;
+	std::shared_ptr<VpnServer> server;
 
         std::function<void(const std::string&)> log_callback;
 };

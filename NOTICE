@@ -1,78 +1,30 @@
-# 📢 NOTICE
+# TrueTunnel VPN notice
 
-This product includes software developed by **Wesley Atwell**.
+Copyright (c) 2025 Wesley Atwell.
 
-It is licensed under your choice of:
+TrueTunnel-authored source is offered under your choice of the MIT License or
+the GNU General Public License version 2. See `LICENSE` for the full terms.
 
-* The **MIT License**, or
-* The **GNU General Public License v2.0 (GPLv2)**.
+## Default binary licensing
 
-See the `LICENSE` file for full details.
+The default Windows build statically links wolfSSL 5.9.2. wolfSSL is offered
+under GPLv3 or a separate commercial license. Unless the distributor holds an
+applicable commercial wolfSSL license, redistribution of the combined
+executable must comply with GPLv3, including Corresponding Source obligations.
+The release ZIP includes wolfSSL's `LICENSING` notice and GPLv3 text.
 
----
+The distributed `wintun.dll` is governed by WireGuard LLC's Wintun Prebuilt
+Binaries License. The release ZIP includes that exact license text.
 
-## 🔐 Cryptographic Software Disclosure
+Complete component attribution and license details are in `THIRD_PARTY.md`.
 
-This product includes the **OpenSSL FIPS 140-3 Validated Module (fips.dll)**, version **3.1.2**,
-as distributed by **The OpenSSL Project**.
+## Cryptographic software disclosure
 
-The module is redistributed **in its original, unmodified form**, along with its official Security Policy.
+TCP uses Windows Schannel, SSPI, CNG, and CryptoAPI. UDP uses an open-source,
+non-FIPS wolfSSL build configured for DTLS 1.3. TrueTunnel does not bundle or
+link OpenSSL or an OpenSSL FIPS provider. Neither TrueTunnel nor this wolfSSL
+configuration has been validated by NIST/CMVP, and no FIPS-compliance claim is
+made.
 
-> ⚠️ **Disclaimer**:
-> Although this product incorporates a FIPS 140-3 validated module, **this product and Wesley Atwell**
-> **have not been independently certified or validated** by **NIST** or the **CMVP**.
-> Use of the module does **not** imply FIPS-validated compliance for this product.
-
----
-
-### 🔍 Module Details
-
-* **Name**: OpenSSL FIPS Provider Module
-* **Version**: 3.1.2
-* **Website**: [https://www.openssl.org](https://www.openssl.org)
-* **License**: Apache License 2.0
-* **FIPS Certificate**: A3548
-* **Security Policy**: *"OpenSSL FIPS 140-3 Security Policy, Version 1.0, December 29, 2023"*
-
----
-
-### ⚠️ Important Redistribution Terms
-
-* **Redistribution of fips.dll is permitted** only if it is:
-
-  * Whole and unmodified,
-  * Distributed with the complete, original FIPS Security Policy document.
-* **Modification** of the binary or configuration files will invalidate the FIPS 140-3 validation.
-* **No endorsement**: Wesley Atwell is not a FIPS validation authority or certified distributor.
-
-> ⚠️ **Warning**:
-> Redistribution is allowed under the original OpenSSL terms, but **no warranties, guarantees, or FIPS endorsements** are implied.
-
----
-
-### ✅ Redistributor Responsibilities
-
-* **Do NOT** alter `fips.dll`, `fipsmodule.cnf`, or validation documents.
-* **Always include** the official FIPS Security Policy PDF.
-* **Avoid misleading claims** of FIPS-validation unless complying exactly with CMVP specs.
-* **Follow all relevant U.S. export control laws** on cryptographic software.
-
----
-
-### 📦 Included FIPS Files
-
-* `fips.dll`
-* OpenSSL FIPS 140-3 Security Policy (PDF)
-
----
-
-### 🔗 References
-
-* [NIST CMVP Website](https://csrc.nist.gov/projects/cryptographic-module-validation-program)
-* [OpenSSL FIPS Overview](https://www.openssl.org/docs/fips.html)
-
----
-
-## 📄 Third-Party Components
-
-This product utilizes additional third-party libraries. Their licenses and attributions are detailed in [`THIRD_PARTY.md`](./THIRD_PARTY.md).
+wolfGuard is not included: wolfGuard is a Linux kernel module, whereas
+TrueTunnel is a native Windows application.

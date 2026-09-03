@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -20,6 +21,7 @@ public:
                            std::string subnet_mask,
                            std::string public_ip,
                            std::string real_adapter,
+                           std::uint64_t real_adapter_luid,
                            secure::CipherSuite cipher_suite,
                            TransportProtocol transport) = 0;
 

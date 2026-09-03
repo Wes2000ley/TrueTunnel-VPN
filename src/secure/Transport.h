@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -7,28 +9,57 @@
 
 namespace secure {
 
-class ITransport {
-public:
-    virtual ~ITransport() = default;
-    virtual bool write_all(const uint8_t* data, std::size_t len) = 0;
-    virtual bool read_all(uint8_t* data, std::size_t len) = 0;
+// Matches the MTU configured on the Wintun interface. A DTLS application frame
+// must not exceed this value.
+inline constexpr std::size_t kMaximumDatagramPayloadSize = 1380U;
+
+enum class DatagramReceiveResult {
+    Received,
+    Timeout,
+    Closed,
+    Error,
 };
 
-class DatagramTransport : public ITransport {
+enum class DatagramSendResult {
+    Sent,
+    WouldBlock,
+    Closed,
+    Error,
+};
+
+// Preserves UDP packet boundaries for DTLS. The receive callback must return
+// one complete datagram and honor the supplied timeout.
+class DatagramTransport final {
 public:
-    using SendFn    = std::function<bool(const uint8_t*, std::size_t)>;
-    using ReceiveFn = std::function<bool(std::vector<uint8_t>&)>;
+    using SendFn = std::function<DatagramSendResult(
+        const std::uint8_t*, std::size_t)>;
+    using ReceiveFn = std::function<DatagramReceiveResult(
+        std::vector<std::uint8_t>&, std::chrono::milliseconds)>;
+    using CloseFn = std::function<void()>;
 
-    DatagramTransport(SendFn send_fn, ReceiveFn recv_fn);
+    DatagramTransport(SendFn send_fn,
+                      ReceiveFn receive_fn,
+                      CloseFn close_fn = {});
+    ~DatagramTransport();
 
-    bool write_all(const uint8_t* data, std::size_t len) override;
-    bool read_all(uint8_t* data, std::size_t len) override;
+    DatagramTransport(const DatagramTransport&) = delete;
+    DatagramTransport& operator=(const DatagramTransport&) = delete;
+
+    [[nodiscard]] DatagramSendResult send_datagram(
+        const std::uint8_t* data,
+        std::size_t length);
+    [[nodiscard]] DatagramReceiveResult receive_datagram(
+        std::vector<std::uint8_t>& output,
+        std::chrono::milliseconds timeout);
+
+    void close() noexcept;
+    [[nodiscard]] bool is_closed() const noexcept;
 
 private:
-    SendFn    send_fn_;
-    ReceiveFn recv_fn_;
-    std::vector<uint8_t> current_;
-    std::size_t offset_{0};
+    SendFn send_fn_;
+    ReceiveFn receive_fn_;
+    CloseFn close_fn_;
+    std::atomic<bool> closed_{false};
 };
 
 } // namespace secure

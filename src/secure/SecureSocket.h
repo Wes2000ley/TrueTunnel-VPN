@@ -1,12 +1,30 @@
 #pragma once
-#include "RecordLayer.h"
-#include "Handshake.h"
-#include <memory>
-#include <string>
-#include <vector>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <winsock2.h>
+
+#include "CipherSuite.h"
+#include "Transport.h"
+#include "TrafficKeyRotation.h"
+
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
 
 namespace secure {
+	class SchannelSocket;
+	class WolfSslDatagramSocket;
+	class PreparedWolfSslServerSession;
+
 	enum class TransportType {
 		Stream,
 		Datagram
@@ -14,45 +32,63 @@ namespace secure {
 
 	class SecureSocket {
 	public:
-		SecureSocket(SOCKET s, const std::string& psk, bool is_server, CipherSuite suite);
 		SecureSocket(SOCKET s,
-		             std::unique_ptr<ITransport> transport,
-		             const std::string& psk,
+		             const std::string& password,
 		             bool is_server,
 		             CipherSuite suite,
-		             TransportType type,
-		             bool owns_socket);
+		             TrafficKeyRotationPolicy rotation_policy = {});
+		SecureSocket(SOCKET s,
+		             std::unique_ptr<DatagramTransport> transport,
+		             const std::string& password,
+		             bool is_server,
+		             CipherSuite suite,
+		             bool owns_socket,
+		             TrafficKeyRotationPolicy rotation_policy = {});
+		SecureSocket(SOCKET s,
+		             std::unique_ptr<DatagramTransport> transport,
+		             PreparedWolfSslServerSession prepared,
+		             bool owns_socket,
+		             TrafficKeyRotationPolicy rotation_policy = {});
 		~SecureSocket();
 
-		// 1) Perform handshake, derive keys
+		// TCP negotiates native Schannel TLS 1.3 and exporter-bound password auth.
+		// UDP negotiates wolfSSL DTLS 1.3 with forward-secret ECDHE-PSK.
 		void handshake();
 
-		// 2) Send a framed, AEAD-protected record with an app-level type
-		// Returns plaintext bytes sent, or -1 on error
+		// Send a framed, protected record with an app-level type.
+		// Returns plaintext bytes sent; transport and protocol failures throw.
 		int send_record(uint8_t type, const uint8_t* data, uint16_t len);
 
-		// 3) Receive a framed record, returns plaintext length or -1, sets 'type'
+		// Returns the plaintext length, or -1 for closure/rejection, and sets type.
 		int recv_record(uint8_t& type, uint8_t* out, size_t cap);
 
-		// Graceful shutdown (half-close OK)
-		void close();
+		[[nodiscard]] TrafficKeyRotationStats rotation_stats() const noexcept;
 
-		SOCKET native() const { return s_; }
+		// Best-effort graceful protocol shutdown followed by socket closure.
+		// Safe to call concurrently with handshake/send/receive and idempotent
+		// across concurrent callers.
+		void close() noexcept;
+
+		SOCKET native() const noexcept { return s_.load(std::memory_order_acquire); }
 
 	private:
-		SOCKET s_{INVALID_SOCKET};
+		std::atomic<SOCKET> s_{INVALID_SOCKET};
 		bool owns_socket_{true};
 		bool is_server_{false};
 		TransportType transport_type_{TransportType::Stream};
 		CipherSuite suite_{CipherSuite::Aes256Gcm};
-		std::vector<uint8_t> psk_;
-		std::unique_ptr<ITransport> transport_;
+		std::unique_ptr<SchannelSocket> schannel_;
+		std::unique_ptr<WolfSslDatagramSocket> wolfssl_;
 
-		AeadContext send_aead_;
-		AeadContext recv_aead_;
-		RecordLayer layer_;
-
-		bool handshook_{false};
+		std::mutex handshake_mutex_;
+		std::mutex send_mutex_;
+		std::mutex recv_mutex_;
+		std::mutex close_mutex_;
+		TrafficKeyRotationPolicy rotation_policy_{};
+		bool handshake_attempted_{false};
+		bool closed_{false};
+		std::atomic<bool> closing_{false};
+		std::atomic<bool> handshook_{false};
 	};
 
 } // namespace secure

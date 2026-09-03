@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <algorithm>
 #include <cstdio>
 
@@ -70,13 +71,26 @@ struct Hash {
     BCRYPT_HASH_HANDLE h{};
     PBYTE obj{}; ULONG obj_len{};
     Hash() = default;
-    ~Hash(){ if(h) BCryptDestroyHash(h); if(obj) HeapFree(GetProcessHeap(), 0, obj); }
+    ~Hash(){ reset(); }
     Hash(const Hash&) = delete; Hash& operator=(const Hash&) = delete;
     Hash(Hash&& o) noexcept : h(o.h), obj(o.obj), obj_len(o.obj_len){ o.h=nullptr; o.obj=nullptr; o.obj_len=0; }
     Hash& operator=(Hash&& o) noexcept {
-        if(this!=&o){ if(h) BCryptDestroyHash(h); if(obj) HeapFree(GetProcessHeap(),0,obj);
+        if(this!=&o){ reset();
             h=o.h; obj=o.obj; obj_len=o.obj_len; o.h=nullptr; o.obj=nullptr; o.obj_len=0; }
         return *this;
+    }
+private:
+    void reset() noexcept {
+        if (h) {
+            BCryptDestroyHash(h);
+            h = nullptr;
+        }
+        if (obj) {
+            SecureZeroMemory(obj, obj_len);
+            HeapFree(GetProcessHeap(), 0, obj);
+            obj = nullptr;
+            obj_len = 0;
+        }
     }
 };
 
@@ -103,6 +117,7 @@ public:
         ULONG obj_len=0, cb=0;
         CHECK_NT("Hash prop", BCryptGetProperty(alg_.h, BCRYPT_OBJECT_LENGTH, (PUCHAR)&obj_len, sizeof(obj_len), &cb, 0));
         st_.obj = (PBYTE)HeapAlloc(GetProcessHeap(), 0, obj_len);
+        if (!st_.obj) throw std::bad_alloc{};
         st_.obj_len = obj_len;
         CHECK_NT("CreateHash", BCryptCreateHash(alg_.h, &st_.h, st_.obj, st_.obj_len, nullptr, 0, 0));
     }
@@ -127,6 +142,7 @@ public:
         ULONG obj_len=0, cb=0;
         CHECK_NT("HMAC obj len", BCryptGetProperty(alg_.h, BCRYPT_OBJECT_LENGTH, (PUCHAR)&obj_len, sizeof(obj_len), &cb, 0));
         st_.obj = (PBYTE)HeapAlloc(GetProcessHeap(), 0, obj_len);
+        if (!st_.obj) throw std::bad_alloc{};
         st_.obj_len = obj_len;
         CHECK_NT("Create HMAC", BCryptCreateHash(alg_.h, &st_.h, st_.obj, st_.obj_len, (PUCHAR)key, (ULONG)key_len, 0));
     }
@@ -172,6 +188,7 @@ struct HKDF {
             wrote += chunk;
             std::memcpy(T, t.data(), 32);
             T_len = 32;
+            SecureZeroMemory(t.data(), t.size());
             ctr++;
         }
         SecureZeroMemory(T, sizeof(T));

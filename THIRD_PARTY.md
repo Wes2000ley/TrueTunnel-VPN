@@ -1,47 +1,69 @@
-📦 Third-Party Licenses
-This project, TrueTunnel VPN, incorporates several third-party libraries and components.
-Each component is governed by its respective license. You are responsible for complying with these terms when using, modifying, or redistributing this software.
+# Third-party components
 
-🔐 OpenSSL
-Website: https://www.openssl.org/
+TrueTunnel uses the components below. Redistributors are responsible for the
+terms that apply to their exact build and distribution.
 
-License: Apache License 2.0
+## wolfSSL
 
-Purpose: Provides TLS 1.2/1.3 encryption and cryptographic primitives.
+- Version: 5.9.2 (`v5.9.2-stable`)
+- Repository: https://github.com/wolfSSL/wolfssl
+- Source archive: https://github.com/wolfSSL/wolfssl/archive/refs/tags/v5.9.2-stable.tar.gz
+- Archive SHA-256: `2f4ef3d4fd387a9b3191d36a6316d69116c46ff69bb9583b6c82b36d7b8ca114`
+- License: GPLv3, or a separate commercial license from wolfSSL Inc.
+- Purpose: statically linked DTLS 1.3 and WolfCrypt implementation for UDP.
 
-🛡️ FIPS Compliance Notice
-This project redistributes the OpenSSL FIPS 140-3 validated module (version 3.1.2) in its original, unmodified binary form.
-See the FIPS Notice for full redistribution terms.
+The default open-source build creates a combined executable subject to wolfSSL's
+GPLv3 terms. A distributor that cannot comply with GPLv3 must obtain an
+appropriate commercial wolfSSL license before distributing that build. The
+release ZIP contains the exact upstream `LICENSING` file and GPLv3 `COPYING`
+text from the pinned archive. Providing notices alone does not replace GPLv3
+Corresponding Source obligations.
 
-⚠️ Important:
-TrueTunnel VPN itself is not FIPS-certified.
-Inclusion of the OpenSSL FIPS module does not imply compliance with FIPS 140-3.
-You must not claim FIPS validation unless your build environment, configuration, and use strictly conform to the official CMVP certificate requirements.
+wolfGuard is not incorporated. Its `wolfguard.ko` component is Linux-kernel
+software and is not a Windows transport library.
 
-🌐 Wintun
-Website: https://www.wintun.net/
+## Wintun prebuilt binary
 
-License: GNU General Public License v2.0 (GPLv2)
+- Website: https://www.wintun.net/
+- License: Wintun Prebuilt Binaries License
+- Purpose: Windows layer-3 tunnel adapter
+- Distributed DLL SHA-256:
+  `e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce`
+- Distribution: the repository's unmodified `deps/wintun.dll` is copied next to
+  the application executable.
 
-Purpose: Provides a virtual TUN/TAP adapter for Windows networking.
+WireGuard LLC publishes separate terms for the prebuilt `wintun.dll`. Those
+terms, rather than the Wintun source repository's GPLv2 license, govern this
+prebuilt binary distribution. The exact text is in
+`licenses/Wintun-PREBUILT-LICENSE.txt` and the release ZIP.
 
-The wintun.dll binary is redistributed unmodified.
+## Dear ImGui
 
-⚠️ GPLv2 Applicability:
-If you redistribute TrueTunnel VPN (even under MIT), the GPLv2 terms still apply to Wintun.
-Redistribution must fully comply with GPLv2 obligations, including offering source code or an equivalent written offer.
+- Version: 1.91.8-docking
+- Repository: https://github.com/ocornut/imgui
+- License: MIT
+- Purpose: native graphical user interface
 
-🎨 Dear ImGui
-Repository: https://github.com/ocornut/imgui
+The release ZIP copies the exact MIT license from the Conan package used by the
+selected build configuration.
 
-License: MIT License
+## FreeType and transitive font/image libraries
 
-Purpose: Renders the in-app graphical user interface, including dropdowns, buttons, and configuration panels.
+- FreeType 2.13.3: FreeType License or GPLv2
+- Brotli: MIT-style license
+- bzip2: bzip2 license
+- libpng: libpng license
+- zlib: zlib license
 
-Dear ImGui is statically linked and unmodified in this project.
+FreeType provides font rendering for Dear ImGui. Its Conan package may link the
+listed libraries transitively. The release ZIP copies their exact package
+license texts so the binary distribution retains the notices for the resolved
+build.
 
-📄 License Summary
-This third-party license summary is current as of May 2025.
-If you redistribute TrueTunnel VPN or incorporate it into another product, you are responsible for ensuring your own compliance with all applicable third-party license terms — particularly in commercial, redistributed, or closed-source settings.
+## Windows platform services
 
-📘 For full license texts, see the LICENSE file included in this project.
+The application calls Schannel, SSPI, CNG, CryptoAPI, Winsock, Direct3D, and
+other Windows APIs through the Windows SDK. These operating-system components
+are not bundled cryptographic libraries.
+
+TrueTunnel does not depend on or redistribute OpenSSL.

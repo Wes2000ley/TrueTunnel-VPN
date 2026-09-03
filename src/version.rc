@@ -22,7 +22,7 @@ BEGIN
       VALUE "FileVersion",      "2.2.0.0"
       VALUE "InternalName",     "truetunnel"
       VALUE "LegalCopyright",   "Copyright (c) 2025 Wesley Atwell"
-      VALUE "LegalTrademarks",  "Licensed under MIT or GPLv2 — See LICENSE"
+      VALUE "LegalTrademarks",  "TrueTunnel: MIT/GPLv2; bundled wolfSSL: GPLv3 or commercial"
       VALUE "OriginalFilename", "vpn.exe"
       VALUE "ProductName",      "TrueTunnel VPN"
       VALUE "ProductVersion",   "2.2.0.0"

@@ -1,13 +1,40 @@
 #include "core/VpnDaemon.h"
+#include "secure/SharedSecret.h"
 
 #include <stdexcept>
 #include <utility>
+#include <string_view>
 
 #ifndef VPN_DAEMON_DISABLE_DEFAULT_FACTORY
 #include "VpnController.h"
 #endif
 
 namespace {
+// Controller log callbacks execute on controller-owned worker threads.  A
+// callback is allowed to request stop(), but destroying the controller from
+// that same thread would destroy a still-joinable std::thread and terminate the
+// process.  Leave the controller owned until the next external health poll (or
+// explicit stop), which can then join it safely.
+thread_local const VpnDaemon* controller_callback_daemon = nullptr;
+
+class ControllerCallbackScope final {
+public:
+        explicit ControllerCallbackScope(const VpnDaemon* daemon) noexcept
+                : previous_{controller_callback_daemon} {
+                controller_callback_daemon = daemon;
+        }
+
+        ~ControllerCallbackScope() {
+                controller_callback_daemon = previous_;
+        }
+
+        ControllerCallbackScope(const ControllerCallbackScope&) = delete;
+        ControllerCallbackScope& operator=(const ControllerCallbackScope&) = delete;
+
+private:
+        const VpnDaemon* previous_;
+};
+
 #ifndef VPN_DAEMON_DISABLE_DEFAULT_FACTORY
 std::unique_ptr<IVpnController> default_controller_factory() {
         return std::make_unique<VpnController>();
@@ -42,6 +69,22 @@ VpnDaemon::~VpnDaemon() {
 }
 
 bool VpnDaemon::start(const SessionConfig &config) {
+        if (!secure::is_valid_shared_secret(config.password)) {
+                publish_event(
+                    EventType::Error,
+                    "Shared key must be a canonical 43-character generated 256-bit value");
+                return false;
+        }
+        if (config.port <= 0 || config.port > 65'535) {
+                publish_event(EventType::Error,
+                              "VPN port must be between 1 and 65535");
+                return false;
+        }
+        if (config.mode != "server" && config.mode != "client") {
+                publish_event(EventType::Error,
+                              "VPN mode must be 'server' or 'client'");
+                return false;
+        }
         State expected = State::Idle;
         if (!state_.compare_exchange_strong(expected, State::Starting)) {
                 publish_event(EventType::Error, "VPN daemon is already running or starting");
@@ -67,6 +110,7 @@ bool VpnDaemon::start(const SessionConfig &config) {
                                          config.subnet_mask,
                                          config.public_ip,
                                          config.real_adapter,
+                                         config.real_adapter_luid,
                                          config.cipher_suite,
                                          config.transport);
 
@@ -108,6 +152,12 @@ void VpnDaemon::stop() {
                 return;
         }
 
+        if (controller_callback_daemon == this) {
+                // The worker will unwind after its callback returns.  An
+                // external is_running()/state()/stop() call completes teardown.
+                return;
+        }
+
         std::unique_ptr<IVpnController> controller;
         {
                 std::lock_guard<std::mutex> guard(controller_mutex_);
@@ -115,8 +165,11 @@ void VpnDaemon::stop() {
         }
 
         if (controller) {
-                controller->stop();
-                controller.reset();
+                try {
+                        controller->stop();
+                } catch (...) {
+                        // Destructors and shutdown paths must remain non-throwing.
+                }
         }
 
         state_.store(State::Idle);
@@ -148,6 +201,7 @@ void VpnDaemon::publish_event(const TelemetryEvent &event) {
 }
 
 void VpnDaemon::handle_log(const std::string &message) {
+        ControllerCallbackScope callback_scope{this};
         publish_event(EventType::Log, message);
 }
 
@@ -159,11 +213,17 @@ std::unique_ptr<IVpnController> VpnDaemon::make_controller() {
 }
 
 bool VpnDaemon::send_message(const std::string& text) {
-        std::lock_guard<std::mutex> guard(controller_mutex_);
-        if (!controller_ || !controller_->is_running()) {
-                return false;
+        bool ok = false;
+        {
+                // Keep the controller alive through the call, but do not hold
+                // this mutex while publishing the failure event: event
+                // dispatch performs health re-entry and may be user-reentrant.
+                std::lock_guard<std::mutex> guard(controller_mutex_);
+                if (!controller_ || !controller_->is_running()) {
+                        return false;
+                }
+                ok = controller_->send_message(text);
         }
-        bool ok = controller_->send_message(text);
         if (!ok) {
                 publish_event(EventType::Error, "Failed to send message");
         }
@@ -189,9 +249,15 @@ void VpnDaemon::dispatch_event(const TelemetryEvent& event) {
 }
 
 void VpnDaemon::check_controller_health() {
-        if (state_.load() != State::Running) {
+        if (controller_callback_daemon == this) {
                 return;
         }
+
+        if (state_.load() == State::Stopping) {
+                stop();
+                return;
+        }
+        if (state_.load() != State::Running) return;
 
         std::unique_ptr<IVpnController> controller;
         {
@@ -203,7 +269,10 @@ void VpnDaemon::check_controller_health() {
         }
 
         if (controller) {
-                controller->stop();
+                try {
+                        controller->stop();
+                } catch (...) {
+                }
         }
 
         state_.store(State::Idle);

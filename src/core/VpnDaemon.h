@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -24,6 +25,7 @@ public:
                 std::string subnet_mask;
                 std::string public_ip;
                 std::string real_adapter;
+                std::uint64_t real_adapter_luid{0U};
                 secure::CipherSuite cipher_suite{secure::CipherSuite::Aes256Gcm};
                 TransportProtocol transport{TransportProtocol::Tcp};
         };

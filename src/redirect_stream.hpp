@@ -5,6 +5,7 @@
 #include <functional>
 #include <mutex>
 #include <iostream>
+#include <vector>
 
 class redirect_stream final : public std::streambuf {
 public:
@@ -33,36 +34,61 @@ private:
 	// streambuf overrides
 	//------------------------------------------------------------------
 	int overflow(int ch) override {
-		if (ch != EOF) {
+		std::string completed_line;
+		if (!traits_type::eq_int_type(ch, traits_type::eof())) {
 			char c = static_cast<char>(ch);
-			buffer_.push_back(c);
-			original_buf_->sputc(c); // still write to console
-
-			if (c == '\n') flush_buffer();
+			{
+				std::lock_guard<std::mutex> lock(buffer_mutex_);
+				buffer_.push_back(c);
+				original_buf_->sputc(c); // still write to console
+				if (c == '\n') {
+					completed_line.assign(buffer_.data(), buffer_.size() - 1U);
+					buffer_.clear();
+				}
+			}
+			if (!completed_line.empty() || c == '\n') {
+				cb_thread_safe(completed_line);
+			}
+			return ch;
 		}
-		return ch;
+		return traits_type::not_eof(ch);
 	}
 
 	std::streamsize xsputn(const char *s, std::streamsize n) override {
-		buffer_.append(s, static_cast<size_t>(n));
-		original_buf_->sputn(s, n); // forward to console
+		std::vector<std::string> completed_lines;
+		{
+			std::lock_guard<std::mutex> lock(buffer_mutex_);
+			buffer_.append(s, static_cast<size_t>(n));
+			original_buf_->sputn(s, n); // forward to console
 
-		std::size_t pos;
-		while ((pos = buffer_.find('\n')) != std::string::npos) {
-			std::string line = buffer_.substr(0, pos); // exclude '\n'
+			std::size_t pos;
+			while ((pos = buffer_.find('\n')) != std::string::npos) {
+				completed_lines.emplace_back(buffer_.substr(0, pos));
+				buffer_.erase(0, pos + 1);
+			}
+		}
+		for (const auto& line : completed_lines) {
 			cb_thread_safe(line);
-			buffer_.erase(0, pos + 1);
 		}
 		return n;
+	}
+
+	int sync() override {
+		flush_buffer();
+		return original_buf_->pubsync();
 	}
 
 	//------------------------------------------------------------------
 	// helpers
 	//------------------------------------------------------------------
 	void flush_buffer() {
-		if (!buffer_.empty()) {
-			cb_thread_safe(buffer_);
-			buffer_.clear();
+		std::string pending;
+		{
+			std::lock_guard<std::mutex> lock(buffer_mutex_);
+			pending.swap(buffer_);
+		}
+		if (!pending.empty()) {
+			cb_thread_safe(pending);
 		}
 	}
 
@@ -76,6 +102,7 @@ private:
 	std::streambuf *original_buf_;
 	std::ostream &stream_;
 	log_cb_t cb_;
+	std::mutex buffer_mutex_;
 	std::mutex cb_mutex_;
 };
 

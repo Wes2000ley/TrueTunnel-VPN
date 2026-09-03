@@ -14,12 +14,16 @@
 
 
 #include <iostream>
+#include <array>
 #include <filesystem>
 #include <thread>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <functional>		  //  ← ask() validator
 #include <regex>
+#include <atomic>
+#include <chrono>
 
 #include <stdint.h>
 #include <netfw.h>
@@ -129,23 +133,71 @@ private:
 
 
 
-bool run_command_hidden(const std::string& command) {
+bool run_command_hidden(const std::string& command,
+	                    const std::atomic<bool>* keep_running,
+	                    const std::chrono::milliseconds timeout) {
+	if (timeout <= std::chrono::milliseconds::zero()) return false;
+	constexpr std::string_view kDiscardOutputSuffix = " >nul 2>&1";
+	std::string direct_command = command;
+	if (direct_command.size() >= kDiscardOutputSuffix.size() &&
+	    direct_command.compare(direct_command.size() - kDiscardOutputSuffix.size(),
+	                           kDiscardOutputSuffix.size(),
+	                           kDiscardOutputSuffix) == 0) {
+		direct_command.erase(direct_command.size() - kDiscardOutputSuffix.size());
+	}
+
+	std::wstring executable_name;
+	std::string arguments;
+	if (direct_command.starts_with("netsh ")) {
+		executable_name = L"netsh.exe";
+		arguments = direct_command.substr(6U);
+	} else if (direct_command.starts_with("route ")) {
+		executable_name = L"route.exe";
+		arguments = direct_command.substr(6U);
+	} else {
+		return false;
+	}
+
+	std::array<wchar_t, MAX_PATH + 1U> system_directory{};
+	const UINT system_length = ::GetSystemDirectoryW(
+		system_directory.data(), static_cast<UINT>(system_directory.size()));
+	if (system_length == 0U || system_length >= system_directory.size()) {
+		return false;
+	}
+	const std::filesystem::path executable_path =
+		std::filesystem::path(system_directory.data()) / executable_name;
+	const std::wstring wide_arguments(arguments.begin(), arguments.end());
+	const std::wstring wide_command =
+		L"\"" + executable_path.native() + L"\" " + wide_arguments;
+
 	STARTUPINFOW startup_info = { sizeof(startup_info) };
-	startup_info.dwFlags = STARTF_USESHOWWINDOW;
+	startup_info.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
 	startup_info.wShowWindow = SW_HIDE;
+	SECURITY_ATTRIBUTES handle_attributes{sizeof(handle_attributes), nullptr, TRUE};
+	HandleGuard null_device(::CreateFileW(
+		L"NUL",
+		GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
+		&handle_attributes,
+		OPEN_EXISTING,
+		FILE_ATTRIBUTE_NORMAL,
+		nullptr));
+	if (!null_device) return false;
+	startup_info.hStdInput = null_device.get();
+	startup_info.hStdOutput = null_device.get();
+	startup_info.hStdError = null_device.get();
 
 	PROCESS_INFORMATION process_info{};
 
-	std::wstring wide_command(command.begin(), command.end());
 	std::vector<wchar_t> command_buffer(wide_command.begin(), wide_command.end());
 	command_buffer.push_back(L'\0');
 
 	BOOL success = CreateProcessW(
-		nullptr,
+		executable_path.c_str(),
 		command_buffer.data(),
 		nullptr,
 		nullptr,
-		FALSE,
+		TRUE,
 		CREATE_NO_WINDOW,
 		nullptr,
 		nullptr,
@@ -160,39 +212,28 @@ bool run_command_hidden(const std::string& command) {
 	HandleGuard process_handle(process_info.hProcess);
 	HandleGuard thread_handle(process_info.hThread);
 
-	WaitForSingleObject(process_handle.get(), INFINITE);
-
-	DWORD exit_code = 0;
-	GetExitCodeProcess(process_handle.get(), &exit_code);
-
-	return (exit_code == 0);
-}
-
-
-bool run_command_admin(const std::string& command) {
-	std::wstring wcmd = L"-Command \"" + std::wstring(command.begin(), command.end()) + L"\"";
-
-	SHELLEXECUTEINFOW sei = { sizeof(sei) };
-	sei.lpVerb = L"runas";
-	sei.lpFile = L"powershell.exe";
-	sei.lpParameters = wcmd.c_str();
-	sei.nShow = SW_HIDE;
-	sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-
-	if (!ShellExecuteExW(&sei)) {
-		DWORD err = GetLastError();
-		std::cerr << "[!] ShellExecuteEx failed: " << err << "\n";
-		return false;
+	const auto deadline = std::chrono::steady_clock::now() + timeout;
+	for (;;) {
+		const DWORD wait_result = ::WaitForSingleObject(process_handle.get(), 100U);
+		if (wait_result == WAIT_OBJECT_0) break;
+		if (wait_result != WAIT_TIMEOUT ||
+		    (keep_running != nullptr &&
+		     !keep_running->load(std::memory_order_acquire)) ||
+		    std::chrono::steady_clock::now() >= deadline) {
+			// This is always the exact netsh.exe/route.exe child created above.
+			// Bound setup and teardown if a Windows networking utility stalls.
+			(void)::TerminateProcess(process_handle.get(), ERROR_CANCELLED);
+			(void)::WaitForSingleObject(process_handle.get(), 5'000U);
+			return false;
+		}
 	}
 
-	HandleGuard process_handle(sei.hProcess);
-	WaitForSingleObject(process_handle.get(), INFINITE);
-
 	DWORD exit_code = 0;
-	GetExitCodeProcess(process_handle.get(), &exit_code);
+	if (!::GetExitCodeProcess(process_handle.get(), &exit_code)) return false;
 
 	return (exit_code == 0);
 }
+
 
 
 
@@ -206,11 +247,18 @@ std::string sanitize_shell_string(const std::string &input) {
 }
 
 std::string sanitize_ip(const std::string &ip) {
-	static const std::regex ip_regex(R"(^\d{1,3}(\.\d{1,3}){3}$)");
-	if (!std::regex_match(ip, ip_regex)) {
+	IN_ADDR parsed{};
+	if (::InetPtonA(AF_INET, ip.c_str(), &parsed) != 1) {
 		throw std::runtime_error("Invalid IP address");
 	}
-	return ip;
+	std::array<char, INET_ADDRSTRLEN> canonical{};
+	if (::InetNtopA(AF_INET,
+	                &parsed,
+	                canonical.data(),
+	                static_cast<DWORD>(canonical.size())) == nullptr) {
+		throw std::runtime_error("Unable to canonicalize IPv4 address");
+	}
+	return canonical.data();
 }
 
 std::string wide_to_utf8(const std::wstring& wide) {
