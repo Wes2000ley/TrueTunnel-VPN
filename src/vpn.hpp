@@ -11,6 +11,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <array>
+#include <cstdint>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -26,6 +27,7 @@
 #include <string>
 #include <functional>		  //  ← ask() validator
 #include <mutex>
+#include <span>
 #include <string_view>
 #include <utility>
 
@@ -138,6 +140,49 @@ enum vpn_packet_type : uint8_t;
 
 constexpr uint8_t PACKET_TYPE_IP  = 0x01;
 constexpr uint8_t PACKET_TYPE_MSG = 0x02;
+constexpr uint8_t PACKET_TYPE_HEARTBEAT = 0x03;
+constexpr uint8_t PACKET_TYPE_HEARTBEAT_ACK = 0x04;
+constexpr std::size_t kHeartbeatControlPayloadSize = 16U;
+
+struct HeartbeatControlFrame {
+    std::uint64_t sequence{0U};
+    std::uint32_t interval_ms{0U};
+    std::uint32_t timeout_ms{0U};
+};
+
+[[nodiscard]] inline std::array<std::uint8_t, kHeartbeatControlPayloadSize>
+encode_heartbeat_control_frame(const HeartbeatControlFrame frame) noexcept {
+    std::array<std::uint8_t, kHeartbeatControlPayloadSize> bytes{};
+    for (std::size_t index = 0U; index < 8U; ++index) {
+        bytes[index] = static_cast<std::uint8_t>(
+            frame.sequence >> ((7U - index) * 8U));
+    }
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        bytes[8U + index] = static_cast<std::uint8_t>(
+            frame.interval_ms >> ((3U - index) * 8U));
+        bytes[12U + index] = static_cast<std::uint8_t>(
+            frame.timeout_ms >> ((3U - index) * 8U));
+    }
+    return bytes;
+}
+
+[[nodiscard]] inline bool decode_heartbeat_control_frame(
+    const std::span<const std::uint8_t> bytes,
+    HeartbeatControlFrame& frame) noexcept {
+    if (bytes.size() != kHeartbeatControlPayloadSize) return false;
+    frame = {};
+    for (std::size_t index = 0U; index < 8U; ++index) {
+        frame.sequence = (frame.sequence << 8U) | bytes[index];
+    }
+    for (std::size_t index = 8U; index < 12U; ++index) {
+        frame.interval_ms = (frame.interval_ms << 8U) | bytes[index];
+    }
+    for (std::size_t index = 12U; index < bytes.size(); ++index) {
+        frame.timeout_ms = (frame.timeout_ms << 8U) | bytes[index];
+    }
+    return frame.sequence != 0U && frame.interval_ms != 0U &&
+           frame.timeout_ms != 0U;
+}
 
 // Leave room for the longest textual IPv4 sender plus the protocol delimiter
 // so a relayed chat record fits every supported transport and the receive
@@ -199,14 +244,15 @@ void tls_to_tun(WINTUN_SESSION_HANDLE session, secure::SecureSocket* tls, std::a
 
 void send_message(secure::SecureSocket* tls, const std::string &msg);
 
-template<typename ForwardFn, typename MessageFn>
+template<typename ForwardFn, typename MessageFn, typename ControlFn>
 // ─── single header / translation-unit ─────────────────────────────────────────
 inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
                               secure::SecureSocket* tls,
                               std::atomic<bool>&    running,
                               std::mutex&           session_mutex,
                               ForwardFn&&           maybe_forward,
-                              MessageFn&&           on_message)   // ← perfect-fwd
+                              MessageFn&&           on_message,
+                              ControlFn&&           on_control)
 {
     // elevate this data-plane thread
     ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -248,6 +294,14 @@ inline void tls_to_tun_common(WINTUN_SESSION_HANDLE session,
             {
                 on_message(std::string_view(reinterpret_cast<char*>(buf.data()), n));
             }
+        }
+        else if (!on_control(
+                     tag,
+                     std::span<const std::uint8_t>{
+                         buf.data(), static_cast<std::size_t>(r)}))
+        {
+            std::cerr << "[secure_to_tun] rejected unknown or malformed control record\n";
+            break;
         }
     }
 

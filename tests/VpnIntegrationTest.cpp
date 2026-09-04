@@ -5,6 +5,7 @@
 #include "vpn.hpp"
 #include "Networking.h"
 #include "raii.hpp"
+#include "secure/WolfSslDatagramSocket.h"
 
 #include <algorithm>
 #include <array>
@@ -30,6 +31,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -53,13 +55,41 @@ public:
                         std::mutex& mutex) noexcept
         : console_{console}, file_{file}, mutex_{mutex} {}
 
+    [[nodiscard]] bool flush_pending() noexcept {
+        std::lock_guard<std::mutex> lock{mutex_};
+        bool written = true;
+        for (const auto& [_, pending] : pending_) {
+            if (pending.empty()) continue;
+            const auto output_size =
+                static_cast<std::streamsize>(pending.size());
+            written = console_->sputn(pending.data(), output_size) == output_size &&
+                      file_->sputn(pending.data(), output_size) == output_size &&
+                      written;
+        }
+        pending_.clear();
+        return written;
+    }
+
 protected:
     std::streamsize xsputn(const char* data, std::streamsize count) override {
+        if (data == nullptr || count <= 0) return 0;
         std::lock_guard<std::mutex> lock{mutex_};
-        const std::streamsize console_written = console_->sputn(data, count);
-        const std::streamsize file_written = file_->sputn(data, count);
-        file_->pubsync();
-        return (console_written == count && file_written == count) ? count : 0;
+        auto& pending = pending_[std::this_thread::get_id()];
+        pending.append(data, static_cast<std::size_t>(count));
+        bool written = true;
+        for (std::size_t newline = pending.find('\n');
+             newline != std::string::npos;
+             newline = pending.find('\n')) {
+            const std::size_t line_size = newline + 1U;
+            const auto output_size = static_cast<std::streamsize>(line_size);
+            written = console_->sputn(pending.data(), output_size) == output_size &&
+                      file_->sputn(pending.data(), output_size) == output_size &&
+                      written;
+            pending.erase(0U, line_size);
+        }
+        if (pending.empty()) pending_.erase(std::this_thread::get_id());
+        if (written) file_->pubsync();
+        return written ? count : 0;
     }
 
     int_type overflow(const int_type value) override {
@@ -74,15 +104,19 @@ protected:
 
     int sync() override {
         std::lock_guard<std::mutex> lock{mutex_};
+        // Keep partial lines buffered. std::cerr is unit-buffered and calls
+        // pubsync() after each << insertion; emitting here would reintroduce
+        // cross-thread line splicing in both the console and the native log.
         const int console_result = console_->pubsync();
         const int file_result = file_->pubsync();
-        return (console_result == 0 && file_result == 0) ? 0 : -1;
+        return console_result == 0 && file_result == 0 ? 0 : -1;
     }
 
 private:
     std::streambuf* console_;
     std::streambuf* file_;
     std::mutex& mutex_;
+    std::unordered_map<std::thread::id, std::string> pending_;
 };
 
 class ScopedProcessLog final {
@@ -104,6 +138,8 @@ public:
     ~ScopedProcessLog() {
         std::cout.flush();
         std::cerr.flush();
+        (void)out_buffer_.flush_pending();
+        (void)err_buffer_.flush_pending();
         std::cout.rdbuf(original_out_);
         std::cerr.rdbuf(original_err_);
     }
@@ -269,7 +305,377 @@ void start_client_with_timeout(VpnClient& client,
     }
 }
 
+[[nodiscard]] bool same_ipv4_endpoint(
+    const sockaddr_storage& left,
+    const int left_length,
+    const sockaddr_storage& right,
+    const int right_length) noexcept {
+    if (left_length < static_cast<int>(sizeof(sockaddr_in)) ||
+        right_length < static_cast<int>(sizeof(sockaddr_in)) ||
+        left.ss_family != AF_INET || right.ss_family != AF_INET) {
+        return false;
+    }
+    const auto& left_ipv4 = reinterpret_cast<const sockaddr_in&>(left);
+    const auto& right_ipv4 = reinterpret_cast<const sockaddr_in&>(right);
+    return left_ipv4.sin_port == right_ipv4.sin_port &&
+           left_ipv4.sin_addr.s_addr == right_ipv4.sin_addr.s_addr;
+}
+
+[[nodiscard]] std::unique_ptr<secure::DatagramTransport>
+make_integration_dtls_peer_transport(
+    const SOCKET socket,
+    const sockaddr_storage peer,
+    const int peer_length) {
+    auto send_to_peer = [socket, peer, peer_length](
+                            const std::uint8_t* data,
+                            const std::size_t size) {
+        const int sent = ::sendto(
+            socket, reinterpret_cast<const char*>(data),
+            static_cast<int>(size), 0,
+            reinterpret_cast<const sockaddr*>(&peer), peer_length);
+        return sent == static_cast<int>(size)
+                   ? secure::DatagramSendResult::Sent
+                   : secure::DatagramSendResult::Error;
+    };
+    auto receive_from_peer = [socket, peer, peer_length](
+                                 std::vector<std::uint8_t>& output,
+                                 const std::chrono::milliseconds timeout) {
+        fd_set readable{};
+        FD_ZERO(&readable);
+        FD_SET(socket, &readable);
+        const auto timeout_count = (std::max)(0LL, timeout.count());
+        timeval wait{};
+        wait.tv_sec = static_cast<long>(timeout_count / 1'000LL);
+        wait.tv_usec =
+            static_cast<long>((timeout_count % 1'000LL) * 1'000LL);
+        const int ready = ::select(0, &readable, nullptr, nullptr, &wait);
+        if (ready == 0) return secure::DatagramReceiveResult::Timeout;
+        if (ready == SOCKET_ERROR) {
+            return secure::DatagramReceiveResult::Error;
+        }
+
+        sockaddr_storage sender{};
+        int sender_length = sizeof(sender);
+        output.resize(2'048U);
+        const int received = ::recvfrom(
+            socket, reinterpret_cast<char*>(output.data()),
+            static_cast<int>(output.size()), 0,
+            reinterpret_cast<sockaddr*>(&sender), &sender_length);
+        if (received <= 0 ||
+            !same_ipv4_endpoint(
+                sender, sender_length, peer, peer_length)) {
+            output.clear();
+            return secure::DatagramReceiveResult::Error;
+        }
+        output.resize(static_cast<std::size_t>(received));
+        return secure::DatagramReceiveResult::Received;
+    };
+    auto close_transport = []() noexcept {};
+    return std::make_unique<secure::DatagramTransport>(
+        std::move(send_to_peer), std::move(receive_from_peer),
+        std::move(close_transport));
+}
+
+bool run_udp_resolved_endpoint_failover_test() {
+    SocketGuard listener{::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)};
+    if (listener.get() == INVALID_SOCKET) {
+        std::cerr << "[FAIL] Could not create UDP failover listener\n";
+        return false;
+    }
+
+    sockaddr_in listener_address{};
+    listener_address.sin_family = AF_INET;
+    listener_address.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+    listener_address.sin_port = 0U;
+    if (::bind(
+            listener.get(),
+            reinterpret_cast<const sockaddr*>(&listener_address),
+            sizeof(listener_address)) == SOCKET_ERROR) {
+        std::cerr << "[FAIL] Could not bind UDP failover listener\n";
+        return false;
+    }
+    int listener_address_size = sizeof(listener_address);
+    if (::getsockname(
+            listener.get(), reinterpret_cast<sockaddr*>(&listener_address),
+            &listener_address_size) == SOCKET_ERROR) {
+        std::cerr << "[FAIL] Could not read UDP failover listener port\n";
+        return false;
+    }
+    const std::uint16_t listener_port =
+        ::ntohs(listener_address.sin_port);
+
+    std::atomic<bool> cancel_server{false};
+    std::atomic<bool> server_handshake_completed{false};
+    std::exception_ptr server_error;
+    std::thread server_thread{[&]() {
+        try {
+            const SOCKET server_socket = listener.get();
+            auto send_to = [server_socket](
+                               const std::uint8_t* data,
+                               const std::size_t size,
+                               const sockaddr_storage& peer,
+                               const int peer_length) {
+                return ::sendto(
+                           server_socket,
+                           reinterpret_cast<const char*>(data),
+                           static_cast<int>(size), 0,
+                           reinterpret_cast<const sockaddr*>(&peer),
+                           peer_length) == static_cast<int>(size);
+            };
+            secure::WolfSslStatelessServer gate{
+                std::move(send_to),
+                std::span<const std::uint8_t>{
+                    reinterpret_cast<const std::uint8_t*>(
+                        kIntegrationSharedKey.data()),
+                    kIntegrationSharedKey.size()},
+                secure::CipherSuite::Aes256Gcm};
+
+            const auto deadline = std::chrono::steady_clock::now() + 35s;
+            while (!cancel_server.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                fd_set readable{};
+                FD_ZERO(&readable);
+                FD_SET(server_socket, &readable);
+                timeval wait{};
+                wait.tv_usec = 200'000L;
+                const int ready =
+                    ::select(0, &readable, nullptr, nullptr, &wait);
+                if (ready == SOCKET_ERROR) {
+                    throw std::system_error(
+                        ::WSAGetLastError(), std::system_category(),
+                        "UDP failover listener select");
+                }
+                if (ready == 0) continue;
+
+                std::array<std::uint8_t, 2'048> packet{};
+                sockaddr_storage peer{};
+                int peer_length = sizeof(peer);
+                const int received = ::recvfrom(
+                    server_socket, reinterpret_cast<char*>(packet.data()),
+                    static_cast<int>(packet.size()), 0,
+                    reinterpret_cast<sockaddr*>(&peer), &peer_length);
+                if (received <= 0) continue;
+                auto prepared = gate.process_datagram(
+                    std::span<const std::uint8_t>{
+                        packet.data(), static_cast<std::size_t>(received)},
+                    peer, peer_length);
+                if (!prepared) continue;
+
+                secure::SecureSocket server{
+                    server_socket,
+                    make_integration_dtls_peer_transport(
+                        server_socket, peer, peer_length),
+                    std::move(*prepared), false};
+                server.handshake();
+                server_handshake_completed.store(
+                    true, std::memory_order_release);
+                return;
+            }
+            if (!cancel_server.load(std::memory_order_acquire)) {
+                throw std::runtime_error(
+                    "UDP failover listener timed out waiting for DTLS");
+            }
+        } catch (...) {
+            server_error = std::current_exception();
+        }
+    }};
+
+    std::vector<std::string> attempted_addresses;
+    std::string selected_address;
+    std::uint16_t selected_port = 0U;
+    std::exception_ptr client_error;
+    VpnClient client{
+        "localhost", listener_port, std::string{kIntegrationSharedKey},
+        "endpoint-failover-test", "loopback",
+        secure::CipherSuite::Aes256Gcm, TransportProtocol::Udp,
+        secure::TrafficKeyRotationPolicy{}, 0U,
+        ConnectionRecoveryOptions{}, true};
+    client.set_integration_resolved_ipv4_addresses(
+        {"127.0.0.2", "127.0.0.1"});
+    client.set_integration_endpoint_attempt_observer(
+        [&attempted_addresses](
+            const std::string_view address, const std::uint16_t) {
+            attempted_addresses.emplace_back(address);
+        });
+    client.set_integration_endpoint_observer(
+        [&selected_address, &selected_port](
+            const std::string_view address, const std::uint16_t port) {
+            selected_address = address;
+            selected_port = port;
+        });
+    try {
+        client.integration_connect_secure_endpoint_only("127.0.0.1");
+    } catch (...) {
+        client_error = std::current_exception();
+    }
+    client.stop();
+    cancel_server.store(true, std::memory_order_release);
+    server_thread.join();
+
+    if (client_error || server_error ||
+        !server_handshake_completed.load(std::memory_order_acquire) ||
+        attempted_addresses.size() < 2U ||
+        attempted_addresses.front() != "127.0.0.2" ||
+        attempted_addresses.back() != "127.0.0.1" ||
+        selected_address != "127.0.0.1" || selected_port != listener_port) {
+        std::cerr << "[FAIL] UDP did not fall through a dead first resolved "
+                     "address to the live authenticated endpoint\n";
+        return false;
+    }
+
+    std::cout << "[PASS] UDP selected the live endpoint only after a real "
+                 "DTLS handshake\n";
+    return true;
+}
+
 bool run_source_binding_test() {
+    try {
+        WsaInit wsa;
+        constexpr std::uint16_t kExpectedPort = 61'337U;
+        for (const TransportProtocol transport :
+             {TransportProtocol::Tcp, TransportProtocol::Udp}) {
+            const auto [resolved_ip, resolved_port] =
+                VpnClient::integration_resolve_server_endpoint(
+                    "localhost", kExpectedPort, transport);
+            IN_ADDR loopback{};
+            if (resolved_port != kExpectedPort ||
+                ::inet_pton(AF_INET, resolved_ip.c_str(), &loopback) != 1 ||
+                (::ntohl(loopback.s_addr) & 0xFF000000UL) != 0x7F000000UL) {
+                std::cerr << "[FAIL] " << to_string(transport)
+                          << " hostname resolution did not preserve the "
+                             "IPv4 loopback endpoint and port\n";
+                return false;
+            }
+
+            const int socket_type = transport == TransportProtocol::Tcp
+                ? SOCK_STREAM : SOCK_DGRAM;
+            const int protocol = transport == TransportProtocol::Tcp
+                ? IPPROTO_TCP : IPPROTO_UDP;
+            SocketGuard listener{::socket(AF_INET, socket_type, protocol)};
+            if (listener.get() == INVALID_SOCKET) {
+                std::cerr << "[FAIL] Could not create " << to_string(transport)
+                          << " endpoint-test listener\n";
+                return false;
+            }
+            sockaddr_in listener_address{};
+            listener_address.sin_family = AF_INET;
+            listener_address.sin_port = 0;
+            listener_address.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+            if (::bind(
+                    listener.get(),
+                    reinterpret_cast<const sockaddr*>(&listener_address),
+                    sizeof(listener_address)) == SOCKET_ERROR) {
+                std::cerr << "[FAIL] Could not bind " << to_string(transport)
+                          << " endpoint-test listener\n";
+                return false;
+            }
+            int listener_address_size = sizeof(listener_address);
+            if (::getsockname(
+                    listener.get(),
+                    reinterpret_cast<sockaddr*>(&listener_address),
+                    &listener_address_size) == SOCKET_ERROR) {
+                std::cerr << "[FAIL] Could not read " << to_string(transport)
+                          << " endpoint-test port\n";
+                return false;
+            }
+            const std::uint16_t listener_port =
+                ::ntohs(listener_address.sin_port);
+            if (listener_port == 0U ||
+                (transport == TransportProtocol::Tcp &&
+                 ::listen(listener.get(), 1) == SOCKET_ERROR)) {
+                std::cerr << "[FAIL] Could not listen for "
+                          << to_string(transport) << " endpoint test\n";
+                return false;
+            }
+
+            bool observed_exact_endpoint = false;
+            VpnClient client{
+                "localhost", listener_port,
+                std::string{kIntegrationSharedKey}, "endpoint-target-test",
+                "loopback", secure::CipherSuite::Aes256Gcm, transport,
+                secure::TrafficKeyRotationPolicy{}, 0U,
+                ConnectionRecoveryOptions{}, true};
+            client.set_integration_endpoint_observer(
+                [&observed_exact_endpoint, listener_port](
+                    const std::string_view endpoint_ip,
+                    const std::uint16_t endpoint_port) {
+                    observed_exact_endpoint =
+                        endpoint_ip == "127.0.0.1" &&
+                        endpoint_port == listener_port;
+                });
+            client.integration_connect_endpoint_only("127.0.0.1");
+
+            SocketGuard accepted;
+            SOCKET receive_socket = listener.get();
+            if (transport == TransportProtocol::Tcp) {
+                accepted.reset(::accept(listener.get(), nullptr, nullptr));
+                if (accepted.get() == INVALID_SOCKET) {
+                    std::cerr << "[FAIL] TCP endpoint-test listener did not "
+                                 "accept the product connection\n";
+                    return false;
+                }
+                receive_socket = accepted.get();
+            }
+
+            constexpr std::array<std::uint8_t, 5> kEndpointProbe{
+                0x54U, 0x54U, 0x45U, 0x50U, 0x01U};
+            if (!client.integration_send_endpoint_probe(kEndpointProbe)) {
+                std::cerr << "[FAIL] " << to_string(transport)
+                          << " product connection could not send its endpoint probe\n";
+                return false;
+            }
+            constexpr DWORD kReceiveTimeoutMilliseconds = 2'000U;
+            if (::setsockopt(
+                    receive_socket, SOL_SOCKET, SO_RCVTIMEO,
+                    reinterpret_cast<const char*>(
+                        &kReceiveTimeoutMilliseconds),
+                    sizeof(kReceiveTimeoutMilliseconds)) == SOCKET_ERROR) {
+                std::cerr << "[FAIL] Could not bound " << to_string(transport)
+                          << " endpoint-test receive\n";
+                return false;
+            }
+            std::array<std::uint8_t, kEndpointProbe.size()> received{};
+            const int received_size = ::recv(
+                receive_socket, reinterpret_cast<char*>(received.data()),
+                static_cast<int>(received.size()), 0);
+            client.stop();
+            if (!observed_exact_endpoint ||
+                received_size != static_cast<int>(received.size()) ||
+                received != kEndpointProbe) {
+                std::cerr << "[FAIL] " << to_string(transport)
+                          << " did not reach the listener at its configured "
+                             "server address and port\n";
+                return false;
+            }
+        }
+
+        std::string embedded_nul_address{"localhost"};
+        embedded_nul_address.push_back('\0');
+        embedded_nul_address.append(".invalid");
+        const std::array<std::string, 2> invalid_addresses{
+            embedded_nul_address,
+            std::string{static_cast<char>(0xC3), static_cast<char>(0x28)}};
+        for (const auto& invalid_address : invalid_addresses) {
+            bool rejected = false;
+            try {
+                (void)VpnClient::integration_resolve_server_endpoint(
+                    invalid_address, kExpectedPort, TransportProtocol::Tcp);
+            } catch (const std::exception&) {
+                rejected = true;
+            }
+            if (!rejected) {
+                std::cerr << "[FAIL] Invalid UTF-8 or embedded-NUL server "
+                             "address was accepted\n";
+                return false;
+            }
+        }
+        if (!run_udp_resolved_endpoint_failover_test()) return false;
+    } catch (const std::exception& error) {
+        std::cerr << "[FAIL] Windows hostname endpoint resolution failed: "
+                  << error.what() << '\n';
+        return false;
+    }
+
     std::array<BYTE, 20> packet{};
     packet[0] = 0x45;
     packet[2] = 0;
@@ -347,7 +753,7 @@ bool run_source_binding_test() {
     try {
         VpnClient invalid_client{
             "127.0.0.1", 0, std::string{kIntegrationSharedKey}, "invalid-client",
-            "invalid-uplink", "127.0.0.1",
+            "invalid-uplink",
             secure::CipherSuite::Aes256Gcm, TransportProtocol::Tcp};
         (void)invalid_client;
     } catch (const std::invalid_argument&) {
@@ -373,11 +779,40 @@ bool run_source_binding_test() {
         return false;
     }
 
+    const HeartbeatControlFrame heartbeat{
+        0x0102030405060708ULL, 5'000U, 15'000U};
+    const auto encoded_heartbeat = encode_heartbeat_control_frame(heartbeat);
+    HeartbeatControlFrame decoded_heartbeat{};
+    if (encoded_heartbeat.front() != 0x01U ||
+        encoded_heartbeat[7] != 0x08U ||
+        encoded_heartbeat[8] != 0x00U ||
+        encoded_heartbeat[11] != 0x88U ||
+        !decode_heartbeat_control_frame(encoded_heartbeat, decoded_heartbeat) ||
+        decoded_heartbeat.sequence != heartbeat.sequence ||
+        decoded_heartbeat.interval_ms != heartbeat.interval_ms ||
+        decoded_heartbeat.timeout_ms != heartbeat.timeout_ms) {
+        std::cerr << "[FAIL] Heartbeat control framing is not canonical\n";
+        return false;
+    }
+    if (decode_heartbeat_control_frame(
+            std::span<const std::uint8_t>{encoded_heartbeat.data(),
+                                          encoded_heartbeat.size() - 1U},
+            decoded_heartbeat)) {
+        std::cerr << "[FAIL] Truncated heartbeat control frame was accepted\n";
+        return false;
+    }
+    auto zero_sequence = encoded_heartbeat;
+    std::fill_n(zero_sequence.begin(), std::size_t{8}, std::uint8_t{0});
+    if (decode_heartbeat_control_frame(zero_sequence, decoded_heartbeat)) {
+        std::cerr << "[FAIL] Zero-sequence heartbeat control frame was accepted\n";
+        return false;
+    }
+
     VpnController controller;
     if (controller.start(
             "client", "127.0.0.1", -1, {}, {},
             std::string{kIntegrationSharedKey}, "invalid-controller", {},
-            "127.0.0.1", "invalid-uplink",
+            "invalid-uplink",
             0U,
             secure::CipherSuite::Aes256Gcm, TransportProtocol::Tcp)) {
         std::cerr << "[FAIL] Controller started with an invalid port\n";
@@ -385,7 +820,8 @@ bool run_source_binding_test() {
         return false;
     }
 
-    std::cout << "[PASS] IPv4 bounds/source binding and public port validation\n";
+    std::cout << "[PASS] IPv4 bounds/source binding, hostname resolution, "
+                 "and exact endpoint port validation\n";
     return true;
 }
 
@@ -501,7 +937,7 @@ bool run_wintun_identity_derivation_test() {
     if (!controller.start(
             "client", adapter_ip, port, {}, {},
             std::string{kIntegrationSharedKey}, "TrueTunnel Cancel Client", {},
-            adapter_ip, adapter_name, 0U, secure::CipherSuite::Aes256Gcm,
+            adapter_name, 0U, secure::CipherSuite::Aes256Gcm,
             TransportProtocol::Tcp)) {
         std::cerr << "[FAIL] Controller cancellation test could not start its worker\n";
         return false;
@@ -541,7 +977,7 @@ bool run_wintun_identity_derivation_test() {
     if (!server_controller.start(
             "server", adapter_ip, port, {}, {},
             std::string{kIntegrationSharedKey}, "TrueTunnel Cancel Server", {},
-            adapter_ip, adapter_name, 0U, secure::CipherSuite::Aes256Gcm,
+            adapter_name, 0U, secure::CipherSuite::Aes256Gcm,
             TransportProtocol::Tcp)) {
         std::cerr << "[FAIL] Server setup cancellation test could not start its worker\n";
         return false;
@@ -638,6 +1074,20 @@ struct Scenario {
     std::string name;
 };
 
+void require_test(bool condition, std::string_view message);
+
+template <typename Predicate>
+bool wait_for_condition(Predicate&& predicate,
+                        const std::chrono::milliseconds timeout,
+                        const std::chrono::milliseconds poll = 10ms) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(poll);
+    }
+    return predicate();
+}
+
 bool wait_for_ip(const VpnClient& client,
                  std::chrono::milliseconds timeout,
                  std::chrono::milliseconds poll_interval = 200ms) {
@@ -665,6 +1115,205 @@ bool wait_for_message(VpnClient& client,
         std::this_thread::sleep_for(100ms);
     }
     return false;
+}
+
+bool wait_for_controller_phase(
+    const VpnController& controller,
+    const ConnectionPhase expected,
+    const std::chrono::milliseconds timeout) {
+    return wait_for_condition(
+        [&controller, expected]() {
+            return controller.connection_status().phase == expected;
+        }, timeout);
+}
+
+[[nodiscard]] bool run_controller_recovery_scenario(
+    const int index,
+    const Scenario& scenario,
+    const std::string& real_adapter_name,
+    const std::string& real_adapter_ip,
+    const std::uint64_t real_adapter_luid,
+    const std::string& password) {
+    const int port = 6700 + index;
+    const std::string server_adapter =
+        "TrueTunnel Recovery Server " + std::to_string(index);
+    const std::string client_adapter =
+        "TrueTunnel Recovery Client " + std::to_string(index);
+    ConnectionRecoveryOptions recovery{};
+    recovery.enabled = true;
+    recovery.heartbeat_interval = 100ms;
+    recovery.heartbeat_timeout = 400ms;
+    recovery.initial_retry_delay = 100ms;
+    recovery.maximum_retry_delay = 300ms;
+
+    std::cout << "\n[ RECOVERY ] " << scenario.name
+              << " | Port " << port << '\n';
+
+    VpnServer server(port, real_adapter_name, password, server_adapter,
+                     scenario.cipher, scenario.transport, {},
+                     real_adapter_luid);
+    VpnController controller;
+    bool success = false;
+    try {
+        server.start();
+        std::this_thread::sleep_for(300ms);
+        if (!controller.start(
+                "client", real_adapter_ip, port, {}, {}, password,
+                client_adapter, {}, real_adapter_name,
+                real_adapter_luid, scenario.cipher, scenario.transport,
+                recovery)) {
+            throw std::runtime_error("controller rejected recovery start");
+        }
+
+        require_test(
+            wait_for_controller_phase(controller, ConnectionPhase::Connected, 15s),
+            "controller did not reach Connected before heartbeat test");
+        require_test(wait_for_condition(
+                         [&server]() {
+                             return server.integration_heartbeat_requests() > 0U;
+                         },
+                         2s),
+                     "production client did not send an authenticated heartbeat");
+        require_test(wait_for_condition(
+                         [&server]() {
+                             return server.integration_connected_client_count() == 1U;
+                         },
+                         2s),
+                     "server did not register exactly one recovered client");
+
+        const auto drop_start = std::chrono::steady_clock::now();
+        server.set_integration_reject_authenticated_clients(1U);
+        server.set_integration_drop_heartbeat_acknowledgements(true);
+        require_test(
+            wait_for_controller_phase(controller, ConnectionPhase::Reconnecting, 5s),
+            "heartbeat loss did not move controller to Reconnecting");
+        const auto reconnecting_elapsed =
+            std::chrono::steady_clock::now() - drop_start;
+        require_test(reconnecting_elapsed < 1500ms,
+                     "heartbeat failure took too long to enter Reconnecting");
+
+        server.set_integration_drop_heartbeat_acknowledgements(false);
+        const auto restore_start = std::chrono::steady_clock::now();
+        require_test(wait_for_condition(
+                         [&server]() {
+                             return server.integration_rejected_authenticated_clients() == 1U;
+                         },
+                         8s),
+                     "injected authenticated reconnect failure did not execute");
+        require_test(wait_for_condition(
+                         [&controller]() {
+                             const ConnectionStatus status =
+                                 controller.connection_status();
+                             return status.phase == ConnectionPhase::Reconnecting &&
+                                    status.retry_attempt >= 2U;
+                         },
+                         3s),
+                     "failed reconnect did not advance the bounded retry scheduler");
+        require_test(
+            wait_for_controller_phase(controller, ConnectionPhase::Connected, 12s),
+            "controller did not reconnect after heartbeat acknowledgements resumed");
+        const auto restore_elapsed =
+            std::chrono::steady_clock::now() - restore_start;
+        require_test(restore_elapsed < 12s,
+                     "reconnect exceeded bounded recovery window");
+        require_test(wait_for_condition(
+                         [&server]() {
+                             return server.integration_connected_client_count() == 1U;
+                         },
+                         3s),
+                     "server retained duplicate or stale recovered peers");
+        require_test(controller.send_message(
+                         "RECOVERY_OK_" + std::to_string(index)),
+                     "recovered controller could not send an authenticated message");
+
+        const auto stop_start = std::chrono::steady_clock::now();
+        controller.stop();
+        const auto stop_elapsed = std::chrono::steady_clock::now() - stop_start;
+        require_test(stop_elapsed < 5s,
+                     "controller.stop hung after automatic recovery");
+        require_test(wait_for_condition(
+                         [&server]() {
+                             return server.integration_connected_client_count() == 0U;
+                         },
+                         2s),
+                     "server did not retire the explicitly stopped client");
+        const auto heartbeat_requests_after_stop =
+            server.integration_heartbeat_requests();
+        std::this_thread::sleep_for(800ms);
+        require_test(!controller.is_running() &&
+                         controller.connection_status().phase == ConnectionPhase::Idle,
+                     "explicit stop did not leave controller idle");
+        require_test(server.integration_heartbeat_requests() ==
+                         heartbeat_requests_after_stop,
+                     "explicit stop allowed a later reconnect/heartbeat");
+
+        const auto opt_out_heartbeat_baseline =
+            server.integration_heartbeat_requests();
+        VpnController opt_out_controller;
+        const std::string opt_out_adapter =
+            "TrueTunnel Recovery Opt Out " + std::to_string(index);
+        require_test(
+            opt_out_controller.start(
+                "client", real_adapter_ip, port, {}, {}, password,
+                opt_out_adapter, {}, real_adapter_name,
+                real_adapter_luid, scenario.cipher, scenario.transport),
+            "default-off recovery controller rejected start");
+        require_test(
+            wait_for_controller_phase(
+                opt_out_controller, ConnectionPhase::Connected, 15s),
+            "default-off recovery controller did not connect");
+        std::this_thread::sleep_for(300ms);
+        require_test(server.integration_heartbeat_requests() ==
+                         opt_out_heartbeat_baseline,
+                     "default-off client emitted a heartbeat");
+
+        server.integration_disconnect_all_clients();
+        require_test(
+            wait_for_condition(
+                [&opt_out_controller]() {
+                    return !opt_out_controller.is_running() &&
+                           opt_out_controller.connection_status().phase ==
+                               ConnectionPhase::Idle;
+                },
+                5s),
+            "default-off controller did not become idle after session loss");
+        require_test(
+            wait_for_condition(
+                [&server]() {
+                    return server.integration_connected_client_count() == 0U;
+                },
+                2s),
+            "server did not retire the disconnected default-off client");
+        std::this_thread::sleep_for(800ms);
+        require_test(!opt_out_controller.is_running() &&
+                         server.integration_connected_client_count() == 0U &&
+                         server.integration_heartbeat_requests() ==
+                             opt_out_heartbeat_baseline,
+                     "default-off client reconnected or sent a heartbeat");
+        opt_out_controller.stop();
+        std::cout << "[PASS] Recovery remains opt-in after live "
+                  << to_string(scenario.transport) << " session loss\n";
+
+        success = true;
+        std::cout << "[PASS] Optional heartbeat timeout/reconnect/stop for "
+                  << to_string(scenario.transport) << " (failure in "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(
+                         reconnecting_elapsed).count()
+                  << " ms, restored in "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(
+                         restore_elapsed).count()
+                  << " ms)\n";
+    } catch (const std::exception& ex) {
+        std::cerr << "[FAIL] Recovery scenario " << scenario.name
+                  << ": " << ex.what() << '\n';
+    }
+
+    server.set_integration_drop_heartbeat_acknowledgements(false);
+    server.set_integration_reject_authenticated_clients(0U);
+    controller.stop();
+    server.stop();
+    std::this_thread::sleep_for(1s);
+    return success;
 }
 
 constexpr std::uint8_t kIntegrationIpProtocol = 253U;
@@ -1727,7 +2376,7 @@ void verify_authenticated_chat_rate_limit(VpnServer& server,
     const std::string log_contents{
         std::istreambuf_iterator<char>{log_input},
         std::istreambuf_iterator<char>{}};
-    const std::array<std::string_view, 7> required_results{
+    const std::array<std::string_view, 8> required_results{
         "[SMOKE] D3D initialization: PASS",
         "[SMOKE] ImGui context: PASS",
         "[SMOKE] ImGui Win32 backend: PASS",
@@ -1735,6 +2384,7 @@ void verify_authenticated_chat_rate_limit(VpnServer& server,
         "[SMOKE] generated secret invariant: PASS",
         "[SMOKE] rendered frames (30 required): PASS",
         "[SMOKE] core controls rendered: PASS",
+        "[SMOKE] client recovery control visible and enabled: PASS",
     };
     for (const std::string_view result : required_results) {
         if (log_contents.find(result) == std::string::npos) {
@@ -1928,6 +2578,8 @@ bool run_scenario(int index,
                      real_adapter_luid);
     std::unique_ptr<VpnClient> clientA;
     std::unique_ptr<VpnClient> clientB;
+    std::atomic<std::uint32_t> endpoint_observations{0U};
+    std::atomic<bool> endpoint_mismatch{false};
     ProbeTracker trackerA;
     ProbeTracker trackerB;
 
@@ -1944,18 +2596,46 @@ bool run_scenario(int index,
 
         clientA = std::make_unique<VpnClient>(
             real_adapter_ip, port, password,
-            clientA_adapter, real_adapter_name, real_adapter_ip,
+            clientA_adapter, real_adapter_name,
             scenario.cipher, scenario.transport,
             secure::TrafficKeyRotationPolicy{}, real_adapter_luid);
 
         clientB = std::make_unique<VpnClient>(
             real_adapter_ip, port, password,
-            clientB_adapter, real_adapter_name, real_adapter_ip,
+            clientB_adapter, real_adapter_name,
             scenario.cipher, scenario.transport,
             secure::TrafficKeyRotationPolicy{}, real_adapter_luid);
 
+        const auto observe_endpoint =
+            [&endpoint_observations, &endpoint_mismatch, &real_adapter_ip,
+             port](const std::string_view resolved_ip,
+                   const std::uint16_t resolved_port) {
+                if (resolved_ip != real_adapter_ip ||
+                    resolved_port != static_cast<std::uint16_t>(port)) {
+                    endpoint_mismatch.store(true, std::memory_order_release);
+                }
+                endpoint_observations.fetch_add(1U, std::memory_order_release);
+            };
+        clientA->set_integration_endpoint_observer(observe_endpoint);
+        clientB->set_integration_endpoint_observer(observe_endpoint);
+
         start_client_with_timeout(*clientA, "Client A", 30s);
         start_client_with_timeout(*clientB, "Client B", 30s);
+
+        require_test(
+            wait_for_condition(
+                [&endpoint_observations]() {
+                    return endpoint_observations.load(
+                               std::memory_order_acquire) >= 2U;
+                },
+                2s),
+            "clients did not expose their selected server endpoints");
+        require_test(
+            !endpoint_mismatch.load(std::memory_order_acquire),
+            "client connected to an address or port other than its configured endpoint");
+        std::cout << "[PASS] " << to_string(scenario.transport)
+                  << " used the configured server address and port "
+                  << real_adapter_ip << ':' << port << '\n';
 
         if (!wait_for_ip(*clientA, 10s) || !wait_for_ip(*clientB, 10s)) {
             std::cerr << "[!] Timed out waiting for client IP assignment\n";
@@ -2028,7 +2708,7 @@ bool run_scenario(int index,
         }
         clientA = std::make_unique<VpnClient>(
             real_adapter_ip, port, password,
-            clientA_adapter, real_adapter_name, real_adapter_ip,
+            clientA_adapter, real_adapter_name,
             scenario.cipher, scenario.transport, reconnect_policy,
             real_adapter_luid);
         start_client_with_timeout(*clientA, "Reconnected client A", 30s);
@@ -2197,8 +2877,11 @@ int main(int argc, char** argv) {
     ComInit com;
     WsaInit wsa;
 
+    std::vector<std::wstring> suite_wintun_baseline_ids;
     try {
         LoadWintun();
+        suite_wintun_baseline_ids =
+            wintun_instance_ids(query_wintun_devices(false));
     } catch (const std::exception& ex) {
         std::cerr << "[!] Failed to load Wintun: " << ex.what() << '\n';
         return 1;
@@ -2334,13 +3017,42 @@ int main(int argc, char** argv) {
         }
     }
 
+    int recovery_passed = 0;
+    for (std::size_t i = 0; i < scenarios.size(); ++i) {
+        if (run_controller_recovery_scenario(
+                static_cast<int>(i), scenarios[i], real_adapter_name,
+                real_adapter_ip, real_adapter_luid, password)) {
+            ++recovery_passed;
+        }
+    }
+
     const bool gui_passed = run_gui_smoke_process();
+    bool wintun_cleanup_passed = false;
+    try {
+        wintun_cleanup_passed =
+            wait_for_wintun_baseline(suite_wintun_baseline_ids, 10s);
+        if (wintun_cleanup_passed) {
+            std::cout << "[PASS] Full E2E Wintun inventory returned to its "
+                         "exact pre-run baseline ("
+                      << suite_wintun_baseline_ids.size() << " devices)\n";
+        } else {
+            std::cerr << "[FAIL] Full E2E left a Wintun device outside the "
+                         "pre-run inventory\n";
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "[FAIL] Final Wintun inventory audit failed: "
+                  << ex.what() << '\n';
+    }
     std::cout << "\nSummary: " << passed << " / " << scenarios.size()
-              << " transport scenarios passed; GUI smoke: "
+              << " transport scenarios passed; recovery: "
+              << recovery_passed << " / " << scenarios.size()
+              << "; GUI smoke: "
               << (gui_passed ? "passed" : "failed") << '\n';
     if (pause_at_end) {
         std::cout << "Press Enter to exit...";
         std::cin.get();
     }
-    return passed == static_cast<int>(scenarios.size()) && gui_passed ? 0 : 1;
+    return passed == static_cast<int>(scenarios.size()) &&
+                   recovery_passed == static_cast<int>(scenarios.size()) &&
+                   gui_passed && wintun_cleanup_passed ? 0 : 1;
 }

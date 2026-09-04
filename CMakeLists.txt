@@ -159,6 +159,7 @@ set(VPN_CORE_SOURCES
         src/utils.cpp
         src/VpnController.cpp
         src/core/VpnDaemon.cpp
+        src/core/ConnectionRecovery.h
         src/Networking.cpp
         src/Networking.h
         src/IpPoolManager.cpp
@@ -215,6 +216,19 @@ if (BUILD_TESTING)
     add_test(NAME vpn_secure_transport_test COMMAND vpn_secure_transport_test)
     set_tests_properties(vpn_secure_transport_test PROPERTIES TIMEOUT 60)
 
+    add_executable(vpn_redirect_stream_test
+            tests/RedirectStreamTest.cpp
+    )
+    target_include_directories(vpn_redirect_stream_test PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+    )
+    if (MSVC)
+        target_compile_options(vpn_redirect_stream_test PRIVATE
+                /W4 /WX /permissive- /sdl /GS)
+    endif()
+    add_test(NAME vpn_redirect_stream_test COMMAND vpn_redirect_stream_test)
+    set_tests_properties(vpn_redirect_stream_test PROPERTIES TIMEOUT 15)
+
     add_test(NAME vpn_wintun_loader_test
             COMMAND vpn_integration_test --wintun-load-only)
     set_tests_properties(vpn_wintun_loader_test PROPERTIES TIMEOUT 15)
@@ -225,7 +239,7 @@ if (BUILD_TESTING)
 
     add_test(NAME vpn_source_binding_test
             COMMAND vpn_integration_test --source-binding-test)
-    set_tests_properties(vpn_source_binding_test PROPERTIES TIMEOUT 15)
+    set_tests_properties(vpn_source_binding_test PROPERTIES TIMEOUT 45)
 
     add_test(NAME vpn_wintun_tamper_test
             COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass

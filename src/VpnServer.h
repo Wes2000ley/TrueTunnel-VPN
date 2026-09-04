@@ -33,6 +33,7 @@
 #include <string_view>
 #include <utility>
 #include <limits>
+#include <span>
 
 //
 //  Project headers
@@ -69,6 +70,16 @@ public:
     void stop();    // blocks until fully shut down
     bool send_chat(const std::string& text);
     [[nodiscard]] bool is_active() const { return running_.load(); }
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+    void set_integration_drop_heartbeat_acknowledgements(bool drop) noexcept;
+    void set_integration_reject_authenticated_clients(
+        std::uint32_t count) noexcept;
+    void integration_disconnect_all_clients() noexcept;
+    [[nodiscard]] std::uint64_t integration_heartbeat_requests() const noexcept;
+    [[nodiscard]] std::uint32_t
+    integration_rejected_authenticated_clients() const noexcept;
+    [[nodiscard]] std::size_t integration_connected_client_count() const;
+#endif
 
 private:
     // ───────── setup / teardown ─────────
@@ -83,6 +94,7 @@ private:
     void acceptLoop();                    // accepts TCP and spawns handleClient
     void tunReaderEntry();                // single reader: tun → tls (calls tun_to_tls)
     void udpDispatchLoop();
+    void heartbeatWatchdogEntry();
 
 
     // ───────── per-client handling ──────
@@ -102,6 +114,11 @@ private:
                          secure::PreparedWolfSslServerSession prepared,
                          std::shared_ptr<UdpHandshakeReservation> reservation);
     void handle_client_message(secure::SecureSocket* tls, std::string_view message);
+    [[nodiscard]] bool handle_control_record(
+        secure::SecureSocket* tls,
+        const std::string& assigned_ip,
+        std::uint8_t type,
+        std::span<const std::uint8_t> payload);
     std::optional<std::pair<std::string, std::string>> find_client_info_for_tls(secure::SecureSocket* tls) const;
     enum class BroadcastStatus {
         Delivered,
@@ -124,17 +141,27 @@ private:
     bool forward_to_client_if_known(const BYTE *packet, UINT size);
 
 
+    struct PeerHeartbeatState {
+        std::mutex mutex;
+        bool participating{false};
+        bool closing{false};
+        std::chrono::steady_clock::time_point last_request{};
+        std::chrono::steady_clock::time_point deadline{};
+    };
+
     struct ClientEntry {
         std::shared_ptr<secure::SecureSocket> tls;
         // The write lock has to outlive the map entry when a sender snapshots
         // the connection. This lets stop() acquire client_map_mutex_, close the
         // socket, and wake blocked I/O without allowing concurrent TLS writes.
         std::shared_ptr<std::timed_mutex> write_mutex;
+        std::shared_ptr<PeerHeartbeatState> heartbeat;
         std::string client_id;
         explicit ClientEntry(std::shared_ptr<secure::SecureSocket> t,
                               std::string id)
             : tls(std::move(t)),
               write_mutex(std::make_shared<std::timed_mutex>()),
+              heartbeat(std::make_shared<PeerHeartbeatState>()),
               client_id(std::move(id)) {}
         ClientEntry(ClientEntry&&) = default;
         ClientEntry& operator=(ClientEntry&&) = default;
@@ -222,6 +249,20 @@ private:
     std::thread tun_reader_thread_;   // tun → tls dispatcher
     std::thread accept_thread_;       // TCP accept loop
     std::thread udp_dispatch_thread_;
+    std::thread heartbeat_watchdog_thread_;
+    std::mutex heartbeat_watchdog_mutex_;
+    std::condition_variable heartbeat_watchdog_cv_;
+    std::atomic<std::uint64_t> heartbeat_requests_{0U};
+    security::FixedWindowRateLimiter heartbeat_limiter_{
+        {3'072U, 64U * 1'024U},
+        {12U, 256U},
+        256U,
+        std::chrono::seconds{1}};
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+    std::atomic<bool> integration_drop_heartbeat_acknowledgements_{false};
+    std::atomic<std::uint32_t> integration_reject_authenticated_clients_{0U};
+    std::atomic<std::uint32_t> integration_rejected_authenticated_clients_{0U};
+#endif
     std::unordered_map<std::string, std::shared_ptr<UdpPeerState>> udp_peers_;
     std::mutex udp_peers_mutex_;
     std::mutex udp_admission_mutex_;
@@ -271,6 +312,9 @@ private:
     std::shared_ptr<UdpHandshakeReservation> tryReserveUdpHandshake(
         const std::string& source);
     void releaseUdpHandshake(const std::string& source) noexcept;
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+    [[nodiscard]] bool consume_integration_authenticated_rejection() noexcept;
+#endif
     static void tls_to_tun_server(VpnServer *self,
                                   WINTUN_SESSION_HANDLE session,
                                   secure::SecureSocket *ssl,
@@ -294,7 +338,14 @@ private:
         auto on_msg = [self, ssl](std::string_view text) {
             self->handle_client_message(ssl, text);
         };
-        tls_to_tun_common(session, ssl, running, session_mutex, fwd, on_msg);
+        auto on_control = [self, ssl, assigned_ip = expected_src_ip](
+                                  const std::uint8_t type,
+                                  const std::span<const std::uint8_t> payload) {
+            return self->handle_control_record(
+                ssl, assigned_ip, type, payload);
+        };
+        tls_to_tun_common(
+            session, ssl, running, session_mutex, fwd, on_msg, on_control);
     }
 
 };

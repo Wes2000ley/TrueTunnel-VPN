@@ -85,6 +85,16 @@ bool VpnDaemon::start(const SessionConfig &config) {
                               "VPN mode must be 'server' or 'client'");
                 return false;
         }
+        if (config.mode == "client" && config.server_ip.empty()) {
+                publish_event(EventType::Error,
+                              "VPN server address is required in client mode");
+                return false;
+        }
+        if (!is_valid_connection_recovery_options(config.recovery)) {
+                publish_event(EventType::Error,
+                              "Connection recovery timing policy is invalid");
+                return false;
+        }
         State expected = State::Idle;
         if (!state_.compare_exchange_strong(expected, State::Starting)) {
                 publish_event(EventType::Error, "VPN daemon is already running or starting");
@@ -108,11 +118,11 @@ bool VpnDaemon::start(const SessionConfig &config) {
                                          config.password,
                                          config.adapter_name,
                                          config.subnet_mask,
-                                         config.public_ip,
                                          config.real_adapter,
                                          config.real_adapter_luid,
                                          config.cipher_suite,
-                                         config.transport);
+                                         config.transport,
+                                         config.recovery);
 
         if (!started) {
                 state_.store(State::Idle);
@@ -184,6 +194,19 @@ bool VpnDaemon::is_running() const {
 VpnDaemon::State VpnDaemon::state() const {
         const_cast<VpnDaemon*>(this)->check_controller_health();
         return state_.load();
+}
+
+ConnectionStatus VpnDaemon::connection_status() const {
+        const_cast<VpnDaemon*>(this)->check_controller_health();
+        std::lock_guard<std::mutex> guard(controller_mutex_);
+        if (controller_) {
+                return controller_->connection_status();
+        }
+        if (state_.load() == State::Starting) {
+                return {ConnectionPhase::Connecting, 0U,
+                        std::chrono::milliseconds{0}};
+        }
+        return {};
 }
 
 void VpnDaemon::set_event_callback(EventCallback cb) {

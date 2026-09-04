@@ -26,7 +26,9 @@ void ImGuiStyleManager::SetupStyle(ImGuiStyle& style, const float scale) {
 	style.IndentSpacing = 18.0f;
 	style.ScrollbarSize = 9.0f;
 	style.GrabMinSize = 12.0f;
-	style.DisabledAlpha = 0.47f;
+	// Disabled settings must remain readable: their reduced contrast communicates
+	// that they are locked without making the active configuration disappear.
+	style.DisabledAlpha = 0.64f;
 	style.WindowBorderSize = 0.0f;
 	style.ChildBorderSize = 1.0f;
 	style.FrameBorderSize = 1.0f;

@@ -121,6 +121,41 @@ path are not available in the active build.
 - Temporary application-owned shared-key copies are cleared after secure socket
   construction and again during shutdown.
 
+## Optional client connection recovery
+
+- Automatic recovery is client-only and off by default. The Client dashboard
+  exposes the setting while idle; once connected, the setting is locked until
+  the user explicitly selects Disconnect. The status card reports when recovery
+  is armed and shows the reconnect attempt and next retry delay. The server
+  accepts both ordinary clients and recovery-enabled clients; watchdog tracking
+  begins only after an authenticated peer sends its first heartbeat.
+- An opted-in client sends an authenticated and encrypted heartbeat inside the
+  selected TLS/TCP or DTLS/UDP channel every five seconds. The server
+  acknowledges it and starts watchdog tracking only for peers that opt in. A
+  client declares the secure session stale after 15 seconds without an
+  authenticated receive, and the server applies the same negotiated timeout to
+  opted-in peers. Server-side heartbeat admission is bounded globally and per
+  authenticated peer. Enable recovery only when the peer runs a build that
+  supports these heartbeat control records.
+- Recovery retries use capped exponential equal-jitter backoff: one second at
+  the first retry, doubling toward a hard 30-second ceiling. Each scheduled
+  retry makes one bounded connection/handshake attempt; a failed attempt returns
+  to the scheduler instead of bypassing the backoff. The previous client and
+  Wintun state are fully torn down before a fresh handshake establishes new
+  session keys.
+- An explicit Disconnect cancels the heartbeat and retry waits immediately and
+  prevents automatic recovery. While recovery is armed, one additional
+  in-memory shared-key copy is retained for the next handshake. TrueTunnel asks
+  Windows to page-lock that buffer, reports if page locking is unavailable,
+  and explicitly zeroizes it at final stop; an administrator, debugger, or
+  process compromise can still read live key material. The key is never
+  persisted.
+- This is short-outage recovery, not seamless roaming: endpoint addresses are
+  not migrated, packets in flight or sent during the outage are not preserved,
+  and applications must tolerate the interruption. The shared key remains a
+  group credential, so recovery does not add per-device identity or revocation;
+  rotate the key when a member leaves or exposure is suspected.
+
 ## Wintun and network hardening
 
 - `wintun.dll` is loaded only from the executable's directory by absolute path.
@@ -167,6 +202,13 @@ path are not available in the active build.
   repeatedly resolved for privileged mutations. Legacy RRAS alias commands are
   immediately checked against that LUID, and cleanup fails closed if the alias
   no longer maps to the owned interface.
+- Client mode has one canonical server-address and port pair. Windows resolves
+  an IPv4 literal or UTF-8 hostname for each fresh connection attempt through a
+  cancellable, 10-second-bounded Winsock query, the socket uses that exact port,
+  and every resolved candidate must complete the TLS/DTLS handshake before it is
+  selected. Route protection pins only that authenticated numeric address. A
+  forged DNS answer alone cannot authenticate a peer because the subsequent
+  TLS/DTLS channel still requires the shared key.
 - The optional RRAS NAT compatibility path launches only the absolute System32
   `netsh.exe`, gives every invocation a 10-second ceiling, and cancels startup
   invocations when the endpoint is stopped; it cannot hold shutdown forever.
@@ -223,10 +265,11 @@ path are not available in the active build.
   This build is not the separate wolfSSL FIPS product and does not use wolfGuard's
   Linux kernel module. Standard TLS/DTLS primitives do not make the complete VPN
   equivalent to an audited, mature VPN product.
-- The tunnel is IPv4-only, uses an MTU of 1380, and has no automatic reconnect or
-  heartbeat, mobility/roaming, IPv6 policy, DNS-leak policy, or system-wide kill
-  switch. It also has no signed automatic-update or per-device key-provisioning
-  system.
+- The tunnel is IPv4-only and uses an MTU of 1380. Client automatic recovery is
+  opt-in and limited to short outages; it does not provide seamless roaming or
+  packet preservation. There is no IPv6 policy, DNS-leak policy, or system-wide
+  kill switch. It also has no signed automatic-update or per-device
+  key-provisioning system.
 - Internet sharing is optional and depends on the legacy Windows RRAS NAT
   component. If RRAS NAT is unavailable, authenticated peer-to-peer tunnel and
   chat traffic still work, but internet-bound traffic is not translated; the
@@ -248,7 +291,7 @@ This is the practical comparison, not a claim of cryptographic equivalence:
 | Data protection | TLS 1.3 over TCP or DTLS 1.3 over UDP; AES-256-GCM/SHA-384 | Fixed Noise construction with Curve25519, ChaCha20-Poly1305, BLAKE2s, and HKDF | IKEv2 negotiates SAs; ESP protects data, with security depending on the selected transforms and policy |
 | Forward secrecy and rekey | Ephemeral TLS/DHE sessions; UDP forces KeyUpdate at 1M records, 1 GiB, or one hour; TCP rotation is Schannel-managed or requires reconnect | Automatic timed/message-count handshakes and key erasure | Ephemeral DH for IKE; IKE/Child SA rekeying, with Child-SA PFS depending on negotiated DH |
 | Replay protection | TLS sequencing; DTLS record replay protection | Monotonic counters plus a sliding receive window | ESP sequence numbers and an anti-replay window when enabled (the normal default) |
-| Roaming/recovery | No endpoint migration, heartbeat, or automatic reconnect | Built-in endpoint roaming, keepalives, retry, and rekey timers | MOBIKE and dead-peer/rekey machinery when implemented and configured |
+| Roaming/recovery | Optional authenticated heartbeat and bounded reconnect; no seamless endpoint migration or packet preservation | Built-in endpoint roaming, keepalives, retry, and rekey timers | MOBIKE and dead-peer/rekey machinery when implemented and configured |
 | Network/product integration | Windows-only Wintun, IPv4-only, custom control/framing, no independent audit | Small purpose-built cross-platform VPN protocol and mature implementations | Long-standing IETF suite with broad OS, enterprise identity, and policy integration; substantially more configuration complexity |
 
 For a general-purpose modern VPN, WireGuard is the stronger default: it has
@@ -306,7 +349,7 @@ by that build.
 
 ## Tests
 
-The non-administrative suite contains seven registered tests:
+The non-administrative suite contains eight registered tests:
 
 - `vpn_secure_transport_test` covers Schannel TLS 1.3 and wolfSSL DTLS 1.3,
   strict profiles, maximum and empty records, malformed-buffer recovery,
@@ -317,29 +360,39 @@ The non-administrative suite contains seven registered tests:
   deadline, stalled and authenticated-I/O cancellation with concurrent idempotent close, failed-handshake non-retry
   behavior, forced stateless-cookie secret rollover, and forced low-threshold
   bidirectional DTLS traffic-key rotation;
+- `vpn_redirect_stream_test` verifies that unit-buffered error output and
+  concurrent writers remain complete logical lines in the GUI callback and
+  native test log;
 - `vpn_wintun_loader_test` accepts the supplied adjacent pinned DLL;
 - `vpn_wintun_identity_test` locks the canonical deterministic GUID, verifies
   Windows-insensitive name casing, and rejects ambiguous or oversized names;
 - `vpn_wintun_tamper_test` rejects a modified DLL;
 - `vpn_source_binding_test` rejects null, truncated, malformed-header, oversized,
-  IPv6, and authenticated source-address-spoofed packets, and rejects invalid
+  IPv6, and authenticated source-address-spoofed packets; resolves `localhost`
+  through the same cancellable Windows IPv4 endpoint path used by the product;
+  connects the real client TCP and UDP sockets to dynamic loopback listeners;
+  verifies a probe reaches the configured address and exact port; makes a real
+  DTLS client reject a dead first resolved IPv4 address and authenticate the
+  second; rejects embedded-NUL and malformed UTF-8 addresses; and rejects invalid
   client, server, and controller ports;
 - `vpn_gui_visual_test` compiles the exact production ImGui dashboard into a
   separate executable without the administrator manifest or VPN-daemon startup.
   It proves that it is unelevated, renders Server/Client and TCP/UDP states at
-  desktop and compact sizes, exercises connected/connecting/stopping states,
+  desktop and compact sizes, exercises connected/connecting/stopping,
+  recovery-enabled, and reconnecting states,
   opens both dialogs, focuses the endpoint through the real ImGui input path,
   verifies Tab focus order, Enter activation, and Escape dismissal, and renders
   field-level address, port, secret, adapter, and startup errors with the
   matching failure visible in Activity. It
   drives the outer dashboard to semantic card boundaries, snaps the Activity log
-  to complete rows, captures 23 Direct3D backbuffers to PNG with Windows Imaging
+  to complete rows, captures 31 Direct3D backbuffers to PNG with Windows Imaging
   Component, crops compact scrolled views to complete target sections, and
   rejects missing, blank, incorrectly sized, incompletely scrolled,
   state-inconsistent, partially clipped-control, or clipped-target-card
   captures; and
 - `vpn_daemon_harness` exercises lifecycle transitions, re-entrant callbacks,
-  invalid and retired secrets, failure recovery, and repeated start/stop cycles.
+  invalid and retired secrets, recovery-policy validation and propagation,
+  failure recovery, and repeated start/stop cycles.
 
 ```powershell
 ctest --test-dir build -C Release --output-on-failure
@@ -398,8 +451,17 @@ the update. TCP records that Schannel owns its provider-managed key epochs and
 does not expose application-initiated KeyUpdate. The TCP scenario then stalls an
 authenticated receiver, floods maximum-size encrypted tunnel frames until real
 Winsock backpressure stops progress, and requires server shutdown to interrupt
-the blocked TLS write within five seconds. This is a reconnect test, not an
-automatic-reconnect feature.
+the blocked TLS write within five seconds. A separate production-controller
+scenario for each transport enables a 100 ms test heartbeat, suppresses
+authenticated acknowledgements, requires the client to enter `Reconnecting`,
+restores acknowledgements, deliberately rejects the first newly authenticated
+reconnect, requires the bounded scheduler to advance to attempt two, verifies
+the next fresh session can send again, and proves explicit Stop prevents any
+later heartbeat or reconnect. It then drops a separate default-off client and
+proves that client becomes idle without sending a heartbeat or reconnecting. The
+suite finally requires the exact Wintun device inventory to match its pre-run
+baseline. Production defaults remain five seconds and 15 seconds; only the test
+policy is accelerated.
 
 At the end, the harness starts the actual adjacent `vpn.exe` directly with
 `CreateProcessW`. The GUI must initialize D3D11, ImGui, its Win32 and DX11

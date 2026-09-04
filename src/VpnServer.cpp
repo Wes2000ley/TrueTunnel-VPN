@@ -38,6 +38,7 @@
 // ——— Project headers ——————————————————————————————————————————
 #include "VpnServer.h"
 #include "IpPoolManager.h"
+#include "core/ConnectionRecovery.h"
 #include "utils.hpp"
 #include "vpn.hpp"
 #include "Networking.h"
@@ -113,6 +114,7 @@ void VpnServer::stop()
 {
     stop_requested_.store(true, std::memory_order_release);
     running_.store(false, std::memory_order_release);
+    heartbeat_watchdog_cv_.notify_all();
     std::lock_guard<std::mutex> lifecycle_guard(lifecycle_mutex_);
     std::cout << "[INFO] Stopping VPN server; notifying clients\n";
     running_ = false;
@@ -188,6 +190,9 @@ void VpnServer::stop()
     }
 
     if (tun_reader_thread_.joinable()) tun_reader_thread_.join();
+    if (heartbeat_watchdog_thread_.joinable()) {
+        heartbeat_watchdog_thread_.join();
+    }
     if (cancellation_event_) {
         ::CloseHandle(cancellation_event_);
         cancellation_event_ = nullptr;
@@ -345,6 +350,71 @@ bool VpnServer::send_chat(const std::string& text)
            BroadcastStatus::Delivered;
 }
 
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+void VpnServer::set_integration_drop_heartbeat_acknowledgements(
+    const bool drop) noexcept {
+    integration_drop_heartbeat_acknowledgements_.store(
+        drop, std::memory_order_release);
+}
+
+void VpnServer::set_integration_reject_authenticated_clients(
+    const std::uint32_t count) noexcept {
+    integration_reject_authenticated_clients_.store(
+        count, std::memory_order_release);
+}
+
+void VpnServer::integration_disconnect_all_clients() noexcept {
+    std::vector<std::shared_ptr<secure::SecureSocket>> clients;
+    try {
+        {
+            std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            clients.reserve(client_map_.size());
+            for (const auto& [_, entry] : client_map_) {
+                if (entry.tls) clients.push_back(entry.tls);
+            }
+        }
+        for (const auto& client : clients) {
+            try {
+                client->close();
+            } catch (...) {
+            }
+        }
+    } catch (...) {
+        // Integration fault injection must remain safe in cleanup paths.
+    }
+}
+
+std::uint64_t VpnServer::integration_heartbeat_requests() const noexcept {
+    return heartbeat_requests_.load(std::memory_order_acquire);
+}
+
+std::uint32_t
+VpnServer::integration_rejected_authenticated_clients() const noexcept {
+    return integration_rejected_authenticated_clients_.load(
+        std::memory_order_acquire);
+}
+
+std::size_t VpnServer::integration_connected_client_count() const {
+    std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+    return client_map_.size();
+}
+
+bool VpnServer::consume_integration_authenticated_rejection() noexcept {
+    std::uint32_t remaining = integration_reject_authenticated_clients_.load(
+        std::memory_order_acquire);
+    while (remaining != 0U) {
+        if (integration_reject_authenticated_clients_.compare_exchange_weak(
+                remaining, remaining - 1U,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+            integration_rejected_authenticated_clients_.fetch_add(
+                1U, std::memory_order_relaxed);
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
 // ───────────────────────────────────────────────────────────────────────────────
 //  private – setup / teardown
 // ───────────────────────────────────────────────────────────────────────────────
@@ -388,6 +458,8 @@ void VpnServer::setupServer()
 
     // ——— Threads ——————————————————————————————————————————————
     tun_reader_thread_ = std::thread(&VpnServer::tunReaderEntry, this);
+    heartbeat_watchdog_thread_ =
+        std::thread(&VpnServer::heartbeatWatchdogEntry, this);
     if (transport_ == TransportProtocol::Tcp) {
         accept_thread_ = std::thread(&VpnServer::acceptLoop, this);
     } else {
@@ -924,6 +996,61 @@ void set_socket_timeouts(const SOCKET socket, const DWORD milliseconds) {
     }
 }
 
+} // namespace
+
+void VpnServer::heartbeatWatchdogEntry() {
+    struct Snapshot {
+        std::string ip;
+        std::shared_ptr<secure::SecureSocket> tls;
+        std::shared_ptr<PeerHeartbeatState> heartbeat;
+    };
+
+    while (running_.load(std::memory_order_acquire)) {
+        std::unique_lock<std::mutex> wait_lock(heartbeat_watchdog_mutex_);
+        if (heartbeat_watchdog_cv_.wait_for(
+                wait_lock, std::chrono::milliseconds{100},
+                [this]() { return !running_.load(std::memory_order_acquire); })) {
+            return;
+        }
+        wait_lock.unlock();
+
+        std::vector<Snapshot> clients;
+        {
+            std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            clients.reserve(client_map_.size());
+            for (const auto& [ip, entry] : client_map_) {
+                clients.push_back(Snapshot{ip, entry.tls, entry.heartbeat});
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& client : clients) {
+            if (!client.tls || !client.heartbeat) continue;
+            bool expired = false;
+            {
+                std::lock_guard<std::mutex> heartbeat_lock(
+                    client.heartbeat->mutex);
+                if (client.heartbeat->participating &&
+                    !client.heartbeat->closing &&
+                    now >= client.heartbeat->deadline) {
+                    client.heartbeat->closing = true;
+                    expired = true;
+                }
+            }
+            if (!expired) continue;
+
+            std::cerr << "[!] Authenticated heartbeat expired for client "
+                      << client.ip << "; closing stale session\n";
+            try {
+                client.tls->close();
+            } catch (...) {
+            }
+        }
+    }
+}
+
+namespace {
+
 std::string peer_key_from_addr(const sockaddr_storage& addr, int len) {
     char host[NI_MAXHOST]{};
     char serv[NI_MAXSERV]{};
@@ -1119,6 +1246,12 @@ void VpnServer::handleClient(SOCKET sock,
         tls->handshake();
         std::cout << "[🔐] Client authenticated with native TLS 1.3 "
                      "(TLS_AES_256_GCM_SHA384, exporter-bound password authentication)\n";
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+        if (consume_integration_authenticated_rejection()) {
+            throw std::runtime_error(
+                "integration-injected rejection after TCP authentication");
+        }
+#endif
 
         int flag = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));  // ✅ actual client socket
@@ -1290,6 +1423,12 @@ void VpnServer::handleUdpClient(std::shared_ptr<UdpPeerState> state,
         reservation->release();
         std::cout << "[🔐] UDP client authenticated with wolfSSL DTLS 1.3 "
                      "(TLS_AES_256_GCM_SHA384, P-256 ECDHE-PSK)\n";
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+        if (consume_integration_authenticated_rejection()) {
+            throw std::runtime_error(
+                "integration-injected rejection after UDP authentication");
+        }
+#endif
 
         uint8_t typ = 0; std::array<uint8_t,kConfigRequest.size()> req{};
         int rn = tls->recv_record(typ, req.data(), req.size());
@@ -1476,6 +1615,89 @@ VpnServer::BroadcastStatus VpnServer::broadcast_message(
         std::cout << "[📨] " << from << ": " << text << '\n';
     }
     return status;
+}
+
+bool VpnServer::handle_control_record(
+    secure::SecureSocket* tls,
+    const std::string& assigned_ip,
+    const std::uint8_t type,
+    const std::span<const std::uint8_t> payload) {
+    if (tls == nullptr || type != PACKET_TYPE_HEARTBEAT) return false;
+
+    HeartbeatControlFrame frame{};
+    if (!decode_heartbeat_control_frame(payload, frame)) return false;
+    const auto requested_interval = std::chrono::milliseconds{frame.interval_ms};
+    const auto requested_timeout = std::chrono::milliseconds{frame.timeout_ms};
+    if (requested_interval < kMinimumHeartbeatInterval ||
+        requested_interval > kMaximumHeartbeatInterval ||
+        requested_timeout < requested_interval * 2 ||
+        requested_timeout > kMaximumHeartbeatTimeout) {
+        return false;
+    }
+
+    std::shared_ptr<secure::SecureSocket> authenticated_tls;
+    std::shared_ptr<std::timed_mutex> write_mutex;
+    std::shared_ptr<PeerHeartbeatState> heartbeat;
+    std::string client_id;
+    {
+        std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto it = client_map_.find(assigned_ip);
+        if (it != client_map_.end() && it->second.tls.get() == tls) {
+            authenticated_tls = it->second.tls;
+            write_mutex = it->second.write_mutex;
+            heartbeat = it->second.heartbeat;
+            client_id = it->second.client_id;
+        }
+    }
+    if (!authenticated_tls || !write_mutex || !heartbeat || client_id.empty()) {
+        return false;
+    }
+
+    // The frame is already authenticated by TLS/DTLS, but a compromised peer
+    // must not turn the acknowledgement path into unbounded CPU or lock work.
+    // Silently drop excess requests so one burst does not immediately tear down
+    // an otherwise valid session; normal liveness expiry remains fail-closed.
+    if (!heartbeat_limiter_.allow(client_id, payload.size())) return true;
+
+    {
+        std::lock_guard<std::mutex> heartbeat_lock(heartbeat->mutex);
+        if (heartbeat->closing) return false;
+        const auto now = std::chrono::steady_clock::now();
+        if (heartbeat->participating &&
+            now - heartbeat->last_request < requested_interval / 2) {
+            return true;
+        }
+        heartbeat->participating = true;
+        heartbeat->last_request = now;
+        heartbeat->deadline = now + requested_timeout;
+    }
+    heartbeat_requests_.fetch_add(1U, std::memory_order_relaxed);
+
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+    if (integration_drop_heartbeat_acknowledgements_.load(
+            std::memory_order_acquire)) {
+        return true;
+    }
+#endif
+
+    std::unique_lock<std::timed_mutex> write_guard{
+        *write_mutex, std::defer_lock};
+    const auto acknowledgement_lock_budget = (std::min)(
+        std::chrono::milliseconds{50}, requested_interval / 2);
+    if (!write_guard.try_lock_for(acknowledgement_lock_budget)) {
+        // A concurrent data-plane write can legitimately occupy this peer.
+        // Dropping one acknowledgement is safer than blocking every reader;
+        // the client has multiple heartbeat intervals before its timeout.
+        return true;
+    }
+    const int sent = authenticated_tls->send_record(
+        PACKET_TYPE_HEARTBEAT_ACK,
+        payload.data(),
+        static_cast<std::uint16_t>(payload.size()));
+    if (sent != static_cast<int>(payload.size())) {
+        throw std::runtime_error("short heartbeat acknowledgement write");
+    }
+    return true;
 }
 
 void VpnServer::handle_client_message(secure::SecureSocket* tls, std::string_view message) {

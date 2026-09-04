@@ -599,6 +599,7 @@ struct GuiRenderMetrics {
 	float network_anchor_y{0.0f};
 	float secret_anchor_y{0.0f};
 	float activity_anchor_y{0.0f};
+	float recovery_anchor_y{0.0f};
 	float security_anchor_y{0.0f};
 	float activity_scroll_y{0.0f};
 	float activity_scroll_max{0.0f};
@@ -616,12 +617,28 @@ struct GuiRenderMetrics {
 	bool help_button_available{false};
 	bool endpoint_input_available{false};
 	bool disconnect_button_available{false};
+	bool recovery_control_present{false};
+	bool recovery_toggle_visible{false};
+	bool recovery_toggle_enabled{false};
+	bool recovery_toggle_focused{false};
+	bool recovery_status_visible{false};
+	bool configuration_controls_locked{false};
+	bool secure_session_indicators_active{false};
+	bool role_server_control_available{false};
+	bool transport_tcp_control_available{false};
+	bool secret_action_available{false};
 	ImVec2 help_button_center{};
 	ImVec2 endpoint_input_center{};
 	ImVec2 disconnect_button_center{};
+	ImVec2 role_server_control_center{};
+	ImVec2 transport_tcp_control_center{};
+	ImVec2 secret_action_center{};
 	ImVec2 dashboard_clip_minimum{};
 	ImVec2 dashboard_clip_maximum{};
 	Bounds connection_card{};
+	Bounds recovery_card{};
+	Bounds endpoint_field{};
+	Bounds port_field{};
 	Bounds network_card{};
 	Bounds secret_card{};
 	Bounds activity_card{};
@@ -997,6 +1014,105 @@ bool segment_button(
 	return clicked;
 }
 
+bool toggle_switch(
+		const char* id,
+		bool& value,
+		const bool enabled,
+		const float scale,
+		bool* focused = nullptr) {
+	const ImVec2 size(48.0f * scale, 27.0f * scale);
+	ImGui::PushID(id);
+	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+	ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, size.y * 0.5f);
+	ImGui::BeginDisabled(!enabled);
+	const bool pressed = ImGui::Button("##Control", size);
+	const bool hovered = enabled && ImGui::IsItemHovered();
+	const bool keyboard_focused = enabled && ImGui::IsItemFocused();
+	const ImVec2 minimum = ImGui::GetItemRectMin();
+	const ImVec2 maximum = ImGui::GetItemRectMax();
+	ImGui::EndDisabled();
+	ImGui::PopStyleVar(2);
+	ImGui::PopStyleColor(4);
+	const bool keyboard_activation = enabled && keyboard_focused &&
+		ImGui::IsKeyPressed(ImGuiKey_Space, false);
+	const bool activated = enabled && (pressed || keyboard_activation);
+	if (activated) value = !value;
+	if (focused != nullptr) *focused = keyboard_focused;
+
+	// Persist a tiny amount of visual state in the current window so the thumb
+	// glides between positions without adding product-level state or timers.
+	const ImGuiID animation_id = ImGui::GetID("##Animation");
+	ImGuiStorage* storage = ImGui::GetStateStorage();
+	const float target = value ? 1.0f : 0.0f;
+	float position = storage->GetFloat(animation_id, target);
+	const float response = 1.0f - std::exp(
+		-24.0f * (std::max)(0.0f, ImGui::GetIO().DeltaTime));
+	position += (target - position) * response;
+	if (std::abs(target - position) < 0.002f) position = target;
+	storage->SetFloat(animation_id, position);
+
+	ImDrawList* draw = ImGui::GetWindowDrawList();
+	const float radius = size.y * 0.5f;
+	const ImVec4 track = value
+		? (enabled ? ImVec4(0.13f, 0.46f, 0.91f, 1.0f)
+		           : ImVec4(0.11f, 0.29f, 0.49f, 1.0f))
+		: (enabled ? ImVec4(0.070f, 0.096f, 0.135f, 1.0f)
+		           : ImVec4(0.055f, 0.073f, 0.100f, 1.0f));
+	const ImVec4 edge = value
+		? (enabled ? ImVec4(0.43f, 0.76f, 1.0f, 0.82f)
+		           : ImVec4(0.31f, 0.53f, 0.72f, 0.72f))
+		: ImVec4(0.28f, 0.34f, 0.43f, enabled ? 0.84f : 0.64f);
+	draw->AddRectFilled(
+		ImVec2(minimum.x, minimum.y + 2.0f * scale),
+		ImVec2(maximum.x, maximum.y + 3.0f * scale),
+		ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.30f)), radius);
+	draw->AddRectFilled(minimum, maximum, ImGui::GetColorU32(track), radius);
+	draw->AddRect(
+		minimum, maximum, ImGui::GetColorU32(edge), radius, 0, 1.0f * scale);
+	draw->AddLine(
+		ImVec2(minimum.x + radius, minimum.y + 1.0f * scale),
+		ImVec2(maximum.x - radius, minimum.y + 1.0f * scale),
+		ImGui::GetColorU32(ImVec4(0.86f, 0.94f, 1.0f, value ? 0.24f : 0.10f)),
+		1.0f * scale);
+	if (hovered) {
+		draw->AddRect(
+			ImVec2(minimum.x + 1.0f * scale, minimum.y + 1.0f * scale),
+			ImVec2(maximum.x - 1.0f * scale, maximum.y - 1.0f * scale),
+			ImGui::GetColorU32(ImVec4(0.68f, 0.86f, 1.0f, 0.30f)),
+			radius, 0, 1.0f * scale);
+	}
+	const float thumb_radius = 10.0f * scale;
+	const float thumb_x = minimum.x + radius +
+		(maximum.x - minimum.x - 2.0f * radius) * position;
+	const ImVec2 thumb_center(thumb_x, minimum.y + radius);
+	draw->AddCircleFilled(
+		ImVec2(thumb_center.x, thumb_center.y + 1.5f * scale),
+		thumb_radius + 0.7f * scale,
+		ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.30f)));
+	draw->AddCircleFilled(
+		thumb_center, thumb_radius,
+		ImGui::GetColorU32(enabled
+			? ImVec4(0.96f, 0.98f, 1.0f, 1.0f)
+			: ImVec4(0.67f, 0.72f, 0.79f, 1.0f)));
+	draw->AddCircle(
+		thumb_center, thumb_radius,
+		ImGui::GetColorU32(ImVec4(0.13f, 0.19f, 0.27f, 0.42f)),
+		0, 1.0f * scale);
+	if (keyboard_focused) {
+		draw->AddRect(
+			ImVec2(minimum.x - 3.0f * scale, minimum.y - 3.0f * scale),
+			ImVec2(maximum.x + 3.0f * scale, maximum.y + 3.0f * scale),
+			ImGui::GetColorU32(ImVec4(0.48f, 0.78f, 1.0f, 0.92f)),
+			radius + 3.0f * scale, 0, 1.5f * scale);
+	}
+	ImGui::PopID();
+	return activated;
+}
+
 void posture_row(
 		const char* title,
 		const char* detail,
@@ -1089,6 +1205,7 @@ enum class VisualContentTarget {
 	Network,
 	Secret,
 	Activity,
+	Recovery,
 	Bottom
 };
 
@@ -1120,6 +1237,10 @@ struct VisualCaptureCase {
 	bool tab_endpoint_to_port;
 	bool activate_primary_with_keyboard;
 	bool dismiss_help_with_escape;
+	int connection_phase;
+	bool recovery_enabled;
+	bool activate_recovery_with_keyboard;
+	bool attempt_locked_configuration;
 };
 
 constexpr VisualCaptureCase visual_case(
@@ -1142,7 +1263,11 @@ constexpr VisualCaptureCase visual_case(
 		const bool open_disconnect = false,
 		const bool tab_endpoint_to_port = false,
 		const bool activate_primary_with_keyboard = false,
-		const bool dismiss_help_with_escape = false) noexcept {
+		const bool dismiss_help_with_escape = false,
+		const int connection_phase = -1,
+		const bool recovery_enabled = false,
+		const bool activate_recovery_with_keyboard = false,
+		const bool attempt_locked_configuration = false) noexcept {
 	return {
 		filename, label, role, transport, daemon_state,
 		logical_width, logical_height, content_target,
@@ -1150,11 +1275,13 @@ constexpr VisualCaptureCase visual_case(
 		require_content_scroll, require_activity_scroll,
 		validation_field, validation_error, focus_endpoint,
 		open_help, open_disconnect, tab_endpoint_to_port,
-		activate_primary_with_keyboard, dismiss_help_with_escape
+		activate_primary_with_keyboard, dismiss_help_with_escape,
+		connection_phase, recovery_enabled, activate_recovery_with_keyboard,
+		attempt_locked_configuration
 	};
 }
 
-constexpr std::array<VisualCaptureCase, 23> kVisualCaptureCases{{
+constexpr std::array<VisualCaptureCase, 31> kVisualCaptureCases{{
 	visual_case(L"01-server-tcp-overview.png", "server TCP desktop",
 		0, 0, VpnDaemon::State::Idle),
 	visual_case(L"02-server-udp-overview.png", "server UDP desktop",
@@ -1231,6 +1358,38 @@ constexpr std::array<VisualCaptureCase, 23> kVisualCaptureCases{{
 		1, 1, VpnDaemon::State::Idle, 1180, 820,
 		VisualContentTarget::Top, 0.0f, 0.0f, false, false,
 		UiErrorField::None, nullptr, false, true, false, false, false, true),
+	visual_case(L"24-client-recovery-enabled.png", "client automatic recovery enabled",
+		1, 0, VpnDaemon::State::Idle, 1180, 820,
+		VisualContentTarget::Top, 0.0f, 0.0f, false, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false, 0, true),
+	visual_case(L"25-client-reconnecting.png", "client reconnecting status",
+		1, 0, VpnDaemon::State::Running, 1180, 820,
+		VisualContentTarget::Top, 0.0f, 0.0f, false, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false, 3, true),
+	visual_case(L"26-compact-client-recovery.png", "compact recovery settings",
+		1, 1, VpnDaemon::State::Idle, 780, 700,
+		VisualContentTarget::Recovery, 0.0f, 0.0f, true, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false, 0, true),
+	visual_case(L"27-compact-client-reconnecting.png", "compact reconnecting status",
+		1, 1, VpnDaemon::State::Running, 780, 700,
+		VisualContentTarget::Recovery, 0.0f, 0.0f, true, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false, 3, true),
+	visual_case(L"28-client-recovery-connected.png", "armed recovery on a connected client",
+		1, 1, VpnDaemon::State::Running, 1180, 820,
+		VisualContentTarget::Top, 0.0f, 0.0f, false, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false, 2, true),
+	visual_case(L"29-keyboard-recovery-toggle.png", "keyboard Space toggles recovery",
+		1, 0, VpnDaemon::State::Idle, 1180, 820,
+		VisualContentTarget::Top, 0.0f, 0.0f, false, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false, 0, false, true),
+	visual_case(L"30-keyboard-locked-recovery.png", "keyboard cannot change locked recovery",
+		1, 1, VpnDaemon::State::Running, 1180, 820,
+		VisualContentTarget::Top, 0.0f, 0.0f, false, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false, 2, false, true),
+	visual_case(L"31-locked-configuration.png", "active configuration rejects input",
+		1, 1, VpnDaemon::State::Running, 1180, 820,
+		VisualContentTarget::Top, 0.0f, 0.0f, false, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false, 2, false, false, true),
 }};
 
 bool process_is_elevated() noexcept {
@@ -1360,6 +1519,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 	bool smoke_transport_rendered = false;
 	bool smoke_cipher_rendered = false;
 	bool smoke_message_rendered = false;
+	bool smoke_recovery_rendered = false;
 	bool smoke_main_panel_visible = false;
 	const auto gui_smoke_deadline = std::chrono::steady_clock::now() +
 		std::chrono::seconds(kGuiVisualTestBuild ? 45 : 10);
@@ -1527,13 +1687,23 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 	char adapter_name[64] = "TrueTunnel VPN Adapter";
 	char subnet_mask[64] = "will decide of type choice";
 	char gateway[64] = "will decide of type choice";
-	char public_ip[64] = "";
+	char server_address[64] = "";
 	constexpr const char* mode_options[] = {"server", "client"};
 	constexpr const char* mode_labels[] = {"Server", "Client"};
 	int selected_mode = 0;
 	constexpr const char* transport_labels[] = {"TCP", "UDP"};
 	int selected_transport = 0;
 	char message_input[256] = "";
+	ConnectionRecoveryOptions recovery_options{};
+	#ifndef TRUETUNNEL_GUI_VISUAL_TEST
+	if (gui_smoke_test) {
+		// Exercise the optional client-only recovery surface in the shipping
+		// executable without creating a tunnel or requiring elevation.
+		selected_mode = 1;
+		strncpy_s(mode, mode_options[selected_mode], sizeof(mode) - 1U);
+		recovery_options.enabled = true;
+	}
+	#endif
 	bool auto_scroll = true;
 	int last_log_length = 0;
 	bool focus_message_input = false;
@@ -1556,32 +1726,37 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 	bool visual_focus_endpoint = false;
 	bool visual_tab_endpoint_to_port = false;
 	bool visual_activate_primary_with_keyboard = false;
+	bool visual_activate_recovery_with_keyboard = false;
+	bool visual_attempt_locked_configuration = false;
 	bool visual_dismiss_help_with_escape = false;
 	bool visual_help_popup_opened_once = false;
 	bool visual_help_was_visible = false;
 	bool visual_keyboard_primary_activated = false;
+	bool visual_keyboard_recovery_activated = false;
+	bool visual_locked_endpoint_activated = false;
 	unsigned int visual_input_stage = 0U;
 	bool visual_focus_reset_pending = false;
-	strncpy_s(public_ip, "vpn.example.net", sizeof(public_ip) - 1U);
+	ConnectionStatus visual_connection_status{};
+	strncpy_s(server_address, "vpn.example.net", sizeof(server_address) - 1U);
 	clear_logs();
 	constexpr std::array<const char*, 18> visual_activity{{
 		"[System] Configuration ready",
 		"[Network] Ethernet selected",
 		"[Network] Virtual adapter identity verified",
-		"[Security] TLS 1.3 profile loaded",
-		"[Session] Listening on port 5555",
+		"[Security] Secure transport profile loaded",
+		"[Session] Secure endpoint ready on port 5555",
 		"[Session] Peer handshake started",
 		"[Session] Peer authenticated",
 		"[Session] Tunnel connected",
 		"[Network] IPv4 route installed",
-		"[Network] Datagram path active",
+		"[Network] Encrypted data path active",
 		"[Security] Traffic key rotated",
 		"[Session] Keepalive acknowledged",
 		"[Network] 24 packets sent",
 		"[Network] 19 packets received",
 		"[Session] Peer latency 4 ms",
 		"[Security] Replay window healthy",
-		"[Session] Reconnect policy armed",
+		"[Session] Session policy loaded",
 		"[System] Ready",
 	}};
 	std::size_t visual_case_index = 0U;
@@ -1607,6 +1782,21 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			selected_mode = capture_case.role;
 			selected_transport = capture_case.transport;
 			visual_daemon_state = capture_case.daemon_state;
+			recovery_options = {};
+			recovery_options.enabled = capture_case.recovery_enabled;
+			visual_connection_status = {};
+			visual_connection_status.phase = capture_case.connection_phase >= 0
+				? static_cast<ConnectionPhase>(capture_case.connection_phase)
+				: (capture_case.daemon_state == VpnDaemon::State::Starting
+					? ConnectionPhase::Connecting
+					: capture_case.daemon_state == VpnDaemon::State::Running
+						? (capture_case.role == 0
+							? ConnectionPhase::Listening : ConnectionPhase::Connected)
+						: ConnectionPhase::Idle);
+			if (visual_connection_status.phase == ConnectionPhase::Reconnecting) {
+				visual_connection_status.retry_attempt = 2U;
+				visual_connection_status.retry_delay = std::chrono::seconds{4};
+			}
 			visual_content_target = capture_case.content_target;
 			visual_help_open = capture_case.open_help;
 			visual_disconnect_open = capture_case.open_disconnect;
@@ -1614,11 +1804,17 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			visual_tab_endpoint_to_port = capture_case.tab_endpoint_to_port;
 			visual_activate_primary_with_keyboard =
 				capture_case.activate_primary_with_keyboard;
+			visual_activate_recovery_with_keyboard =
+				capture_case.activate_recovery_with_keyboard;
+			visual_attempt_locked_configuration =
+				capture_case.attempt_locked_configuration;
 			visual_dismiss_help_with_escape =
 				capture_case.dismiss_help_with_escape;
 			visual_help_popup_opened_once = false;
 			visual_help_was_visible = false;
 			visual_keyboard_primary_activated = false;
+			visual_keyboard_recovery_activated = false;
+			visual_locked_endpoint_activated = false;
 			visual_input_stage = 0U;
 			visual_focus_reset_pending = true;
 			ui_error = capture_case.validation_error == nullptr
@@ -1630,6 +1826,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				append_log("[Network] Preparing the virtual adapter");
 				append_log(kSessionStartFailureLog);
 			} else {
+				if (visual_connection_status.phase == ConnectionPhase::Reconnecting) {
+					append_log("[Session] Heartbeat timeout · retry scheduled in 4s");
+				}
 				for (const char* entry : visual_activity) append_log(entry);
 			}
 			strncpy_s(mode, mode_options[selected_mode], sizeof(mode) - 1U);
@@ -1637,9 +1836,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			current_adapter_idx_ = capture_case.validation_field == UiErrorField::Adapter
 				? -1 : 0;
 			if (capture_case.validation_field == UiErrorField::Endpoint) {
-				public_ip[0] = '\0';
+				server_address[0] = '\0';
 			} else {
-				strncpy_s(public_ip, "vpn.example.net", sizeof(public_ip) - 1U);
+				strncpy_s(
+					server_address, "vpn.example.net",
+					sizeof(server_address) - 1U);
 			}
 			if (capture_case.validation_field == UiErrorField::Port) {
 				strncpy_s(port, "70000", sizeof(port) - 1U);
@@ -1752,7 +1953,58 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 		if (!done && visual_case_configured && !visual_focus_reset_pending) {
 			const VisualCaptureCase& capture_case =
 				kVisualCaptureCases[visual_case_index];
-			if (capture_case.activate_primary_with_keyboard) {
+			if (capture_case.attempt_locked_configuration) {
+				if (visual_input_stage < 8U) {
+					const unsigned int control_index = visual_input_stage / 2U;
+					ImVec2 target{};
+					bool available = false;
+					switch (control_index) {
+						case 0U:
+							target = render_metrics.role_server_control_center;
+							available = render_metrics.role_server_control_available;
+							break;
+						case 1U:
+							target = render_metrics.transport_tcp_control_center;
+							available = render_metrics.transport_tcp_control_available;
+							break;
+						case 2U:
+							target = render_metrics.endpoint_input_center;
+							available = render_metrics.endpoint_field.valid;
+							break;
+						case 3U:
+							target = render_metrics.secret_action_center;
+							available = render_metrics.secret_action_available;
+							break;
+						default:
+							break;
+					}
+					if (available) {
+						io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
+						io.AddMousePosEvent(target.x, target.y);
+						io.AddMouseButtonEvent(0, (visual_input_stage % 2U) == 0U);
+						++visual_input_stage;
+						visual_settle_frames = 0U;
+					}
+				} else if (visual_input_stage == 8U) {
+					io.AddMousePosEvent(
+						-std::numeric_limits<float>::max(),
+						-std::numeric_limits<float>::max());
+					visual_input_stage = 9U;
+					visual_settle_frames = 0U;
+				}
+			} else if (capture_case.activate_recovery_with_keyboard) {
+				if (visual_input_stage == 0U) {
+					// Render the recovery switch with keyboard focus before sending
+					// the standard Space press/release activation sequence.
+					visual_input_stage = 1U;
+					visual_settle_frames = 0U;
+				} else if (visual_input_stage < 3U) {
+					io.AddKeyEvent(
+						ImGuiKey_Space, visual_input_stage == 1U);
+					++visual_input_stage;
+					visual_settle_frames = 0U;
+				}
+			} else if (capture_case.activate_primary_with_keyboard) {
 				if (visual_input_stage == 0U) {
 					// First render one frame with a keyboard-focus request on the
 					// primary action, then deliver Enter through the input queue.
@@ -1829,7 +2081,20 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 		render_metrics.help_button_available = false;
 		render_metrics.endpoint_input_available = false;
 		render_metrics.disconnect_button_available = false;
+		render_metrics.recovery_control_present = false;
+		render_metrics.recovery_toggle_visible = false;
+		render_metrics.recovery_toggle_enabled = false;
+		render_metrics.recovery_toggle_focused = false;
+		render_metrics.recovery_status_visible = false;
+		render_metrics.configuration_controls_locked = false;
+		render_metrics.secure_session_indicators_active = false;
+		render_metrics.role_server_control_available = false;
+		render_metrics.transport_tcp_control_available = false;
+		render_metrics.secret_action_available = false;
 		render_metrics.connection_card = {};
+		render_metrics.recovery_card = {};
+		render_metrics.endpoint_field = {};
+		render_metrics.port_field = {};
 		render_metrics.network_card = {};
 		render_metrics.secret_card = {};
 		render_metrics.activity_card = {};
@@ -1891,28 +2156,72 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			const bool is_running = daemon_state == VpnDaemon::State::Running;
 			const bool is_starting = daemon_state == VpnDaemon::State::Starting;
 			const bool is_stopping = daemon_state == VpnDaemon::State::Stopping;
+			ConnectionStatus connection_status{};
+#ifdef TRUETUNNEL_GUI_VISUAL_TEST
+			connection_status = visual_connection_status;
+#else
+			if (g_vpn_daemon) connection_status = g_vpn_daemon->connection_status();
+#endif
+			const bool is_connecting =
+				connection_status.phase == ConnectionPhase::Connecting ||
+				(is_starting && connection_status.phase == ConnectionPhase::Idle);
+			const bool is_connected =
+				connection_status.phase == ConnectionPhase::Connected;
+			const bool is_reconnecting =
+				connection_status.phase == ConnectionPhase::Reconnecting;
+			const bool is_listening =
+				connection_status.phase == ConnectionPhase::Listening;
+			const bool configuration_locked = !is_idle;
+			const bool secure_session_active = is_connected || is_listening;
+			render_metrics.configuration_controls_locked = configuration_locked;
+			render_metrics.secure_session_indicators_active = secure_session_active;
 			ImVec4 state_color(0.58f, 0.66f, 0.77f, 1.0f);
-			if (is_running) state_color = ImVec4(0.28f, 0.88f, 0.56f, 1.0f);
-			else if (is_starting) state_color = ImVec4(1.0f, 0.78f, 0.26f, 1.0f);
-			else if (is_stopping) state_color = ImVec4(1.0f, 0.48f, 0.34f, 1.0f);
+			if (is_stopping) state_color = ImVec4(1.0f, 0.48f, 0.34f, 1.0f);
+			else if (is_reconnecting) state_color = ImVec4(1.0f, 0.70f, 0.24f, 1.0f);
+			else if (is_connected || is_listening) state_color = ImVec4(0.28f, 0.88f, 0.56f, 1.0f);
+			else if (is_connecting || is_starting) state_color = ImVec4(1.0f, 0.78f, 0.26f, 1.0f);
 			const bool has_general_error =
 				!ui_error.empty() && ui_error_field == UiErrorField::General;
 			if (has_general_error) {
 				state_color = ImVec4(1.0f, 0.38f, 0.36f, 1.0f);
 			}
 			const bool is_server = selected_mode == 0;
+			std::string status_detail_storage;
 			const char* status_title = has_general_error
 				? "Tunnel could not start"
-				: is_running ? (is_server ? "Server running" : "Tunnel connected")
-				: is_starting ? (is_server ? "Starting secure server" : "Connecting securely")
 				: is_stopping ? "Disconnecting"
+				: is_reconnecting ? "Connection lost · retrying"
+				: is_connected ? "Tunnel connected"
+				: is_listening ? "Server listening"
+				: is_connecting ? (is_server ? "Starting secure server" : "Connecting securely")
 				: (is_server ? "Ready to listen" : "Ready to connect");
-			const char* status_detail = has_general_error
-				? ui_error.c_str()
-				: is_running ? (is_server ? "Ready for an authenticated peer" : "Encrypted traffic is flowing")
-				: is_starting ? "Preparing the interface and secure session"
-				: is_stopping ? "Closing keys and network resources"
-				: "No active tunnel";
+			if (has_general_error) {
+				status_detail_storage = ui_error;
+			} else if (is_stopping) {
+				status_detail_storage = "Closing keys and network resources";
+			} else if (is_reconnecting) {
+				status_detail_storage = "Attempt " +
+					std::to_string(connection_status.retry_attempt);
+				if (connection_status.retry_delay.count() > 0) {
+					const auto retry_seconds = (std::max)(1LL,
+						(connection_status.retry_delay.count() + 999LL) / 1000LL);
+					status_detail_storage += " · next retry in " +
+						std::to_string(retry_seconds) + "s";
+				} else {
+					status_detail_storage += " · reconnecting now";
+				}
+			} else if (is_connected) {
+				status_detail_storage = recovery_options.enabled
+					? "Encrypted traffic is flowing · recovery is armed"
+					: "Encrypted traffic is flowing";
+			} else if (is_listening) {
+				status_detail_storage = "Ready for an authenticated peer";
+			} else if (is_connecting) {
+				status_detail_storage = "Preparing the interface and secure session";
+			} else {
+				status_detail_storage = "No active tunnel";
+			}
+			const char* status_detail = status_detail_storage.c_str();
 
 			// A quiet application bar keeps identity and help available without
 			// displacing the connection workflow with marketing copy.
@@ -1973,6 +2282,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				ImGui::BulletText("Server listens for an authenticated peer; Client connects to one.");
 				ImGui::BulletText("Generate the shared key on Server, then paste it into Client.");
 				ImGui::BulletText("Use TCP for reliable streams or UDP for latency-sensitive traffic.");
+				ImGui::BulletText("Client automatic recovery is optional: encrypted heartbeat plus bounded retries.");
 				ImGui::BulletText("Minimize to keep TrueTunnel in the system tray.");
 				if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
 				if (ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
@@ -2007,6 +2317,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						render_metrics.validation_error_visible = ImGui::IsItemVisible();
 					} else {
 						ImGui::TextDisabled("%s", status_detail);
+					}
+					if (is_reconnecting && ImGui::IsItemVisible()) {
+						render_metrics.recovery_status_visible = true;
 					}
 
 					ImGui::TableSetColumnIndex(1);
@@ -2096,7 +2409,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 							: "[System] Connect requested");
 						int port_num = 0;
 						try { port_num = std::stoi(port); } catch (...) { port_num = 0; }
-						if (selected_mode == 1 && public_ip[0] == '\0') {
+						if (selected_mode == 1 && server_address[0] == '\0') {
 							ui_error = "Enter the server address.";
 							ui_error_field = UiErrorField::Endpoint;
 							append_log("[!] Server address is required");
@@ -2126,14 +2439,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						} else {
 							VpnDaemon::SessionConfig config{};
 							config.mode = mode;
-							config.server_ip = public_ip;
+							config.server_ip = server_address;
 							config.port = port_num;
 							config.local_ip = local_ip;
 							config.gateway = gateway;
 							config.password = password.data();
 							config.adapter_name = adapter_name;
 							config.subnet_mask = subnet_mask;
-							config.public_ip = public_ip;
 							config.real_adapter = (current_adapter_idx_ >= 0 &&
 								current_adapter_idx_ < static_cast<int>(real_adapters_.size()))
 								? real_adapters_[current_adapter_idx_].alias : "Unknown";
@@ -2142,6 +2454,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 								? real_adapters_[current_adapter_idx_].luid_value : 0U;
 							config.transport = native_tcp
 								? TransportProtocol::Tcp : TransportProtocol::Udp;
+							config.recovery = is_server
+								? ConnectionRecoveryOptions{}
+								: recovery_options;
 							append_log(std::string("[*] Transport: ") +
 								transport_labels[selected_transport]);
 							config.cipher_suite = secure::CipherSuite::Aes256Gcm;
@@ -2238,6 +2553,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					case VisualContentTarget::Activity:
 						requested_scroll_y = render_metrics.activity_anchor_y;
 						break;
+					case VisualContentTarget::Recovery:
+						requested_scroll_y = render_metrics.recovery_anchor_y;
+						break;
 					case VisualContentTarget::Bottom:
 						requested_scroll_y = render_metrics.security_anchor_y;
 						break;
@@ -2283,12 +2601,15 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			if (begin_card("##ConnectionCard", scale)) {
 				card_heading(
 					fonts.semibold, "Connection",
-					"Choose how this device joins the tunnel.");
+					configuration_locked
+						? "Settings are locked to the active tunnel."
+						: "Choose how this device joins the tunnel.");
 
 				ImGui::TextDisabled("Role");
 				const float segment_gap = ImGui::GetStyle().ItemSpacing.x;
 				const float segment_width =
 					(ImGui::GetContentRegionAvail().x - segment_gap) * 0.5f;
+				ImGui::BeginDisabled(configuration_locked);
 				if (segment_button(
 						"Server##role", selected_mode == 0,
 						ImVec2(segment_width, 40.0f * scale))) {
@@ -2296,6 +2617,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					strncpy_s(mode, mode_options[0], sizeof(mode) - 1U);
 					clear_ui_error();
 				}
+				render_metrics.role_server_control_available = ImGui::IsItemVisible();
+				render_metrics.role_server_control_center = last_item_center();
 				observe_last_control(
 					render_metrics, dashboard_clip_minimum, dashboard_clip_maximum);
 				ImGui::SameLine(0.0f, segment_gap);
@@ -2308,18 +2631,24 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				}
 				observe_last_control(
 					render_metrics, dashboard_clip_minimum, dashboard_clip_maximum);
-				ImGui::TextDisabled("%s", selected_mode == 0
-					? "Listen for one authenticated peer"
-					: "Connect to a server");
+				ImGui::EndDisabled();
+				if (wide_layout) {
+					ImGui::TextDisabled("%s", selected_mode == 0
+						? "Listen for one authenticated peer"
+						: "Connect to a server");
+				}
 
 				ImGui::Dummy(ImVec2(0.0f, 3.0f * scale));
 				ImGui::TextDisabled("Transport");
+				ImGui::BeginDisabled(configuration_locked);
 				if (segment_button(
 						"TCP  |  Reliable##transport", selected_transport == 0,
 						ImVec2(segment_width, 40.0f * scale))) {
 					selected_transport = 0;
 					clear_ui_error();
 				}
+				render_metrics.transport_tcp_control_available = ImGui::IsItemVisible();
+				render_metrics.transport_tcp_control_center = last_item_center();
 				observe_last_control(
 					render_metrics, dashboard_clip_minimum, dashboard_clip_maximum);
 				ImGui::SameLine(0.0f, segment_gap);
@@ -2335,55 +2664,74 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					(!kGuiVisualTestBuild || ImGui::IsItemVisible())) {
 					smoke_transport_rendered = true;
 				}
-				ImGui::TextDisabled("%s", native_tcp
-					? "Best compatibility for general network traffic"
-					: "Preserves datagram boundaries for latency-sensitive traffic");
+				ImGui::EndDisabled();
+				if (wide_layout) {
+					ImGui::TextDisabled("%s", native_tcp
+						? "Best compatibility for general network traffic"
+						: "Preserves datagram boundaries for latency-sensitive traffic");
+				}
 
 				ImGui::Dummy(ImVec2(0.0f, 3.0f * scale));
 				if (selected_mode == 1) {
+					const bool endpoint_invalid =
+						ui_error_field == UiErrorField::Endpoint;
+					const bool port_invalid = ui_error_field == UiErrorField::Port;
 					if (ImGui::BeginTable(
 							"##ClientEndpoint", 2,
-							ImGuiTableFlags_SizingStretchProp |
+							ImGuiTableFlags_SizingFixedFit |
 							ImGuiTableFlags_NoSavedSettings)) {
 						ImGui::TableSetupColumn(
-							"Address", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+							"Address", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 						ImGui::TableSetupColumn(
-							"Port", ImGuiTableColumnFlags_WidthStretch, 0.72f);
+							"Port", ImGuiTableColumnFlags_WidthFixed, 112.0f * scale);
+
+						// Labels and fields get their own shared rows. This keeps both
+						// baselines and both frame tops pixel-aligned at every DPI.
 						ImGui::TableNextRow();
 						ImGui::TableSetColumnIndex(0);
+						ImGui::AlignTextToFramePadding();
 						ImGui::TextDisabled("Server address");
+						ImGui::TableSetColumnIndex(1);
+						ImGui::AlignTextToFramePadding();
+						ImGui::TextDisabled("Port");
+
+						ImGui::TableNextRow();
+						ImGui::TableSetColumnIndex(0);
 						ImGui::SetNextItemWidth(-1.0f);
-						const bool endpoint_invalid =
-							ui_error_field == UiErrorField::Endpoint;
 						push_validation_frame(endpoint_invalid);
+						ImGui::BeginDisabled(configuration_locked);
 						if (ImGui::InputTextWithHint(
-							"##public_ip", "vpn.example.net or 203.0.113.10",
-							public_ip, IM_ARRAYSIZE(public_ip))) {
+							"##server_address", "vpn.example.net or 203.0.113.10",
+							server_address, IM_ARRAYSIZE(server_address))) {
 							clear_ui_error();
 						}
+						ImGui::EndDisabled();
 						pop_validation_frame(endpoint_invalid);
-						render_metrics.endpoint_input_available = ImGui::IsItemVisible();
+						render_metrics.endpoint_input_available =
+							ImGui::IsItemVisible() && !configuration_locked;
 						render_metrics.endpoint_input_center = last_item_center();
+						record_last_item_bounds(render_metrics.endpoint_field);
 						observe_last_control(
 							render_metrics, dashboard_clip_minimum,
 							dashboard_clip_maximum);
 #ifdef TRUETUNNEL_GUI_VISUAL_TEST
+						if (visual_attempt_locked_configuration && ImGui::IsItemActive()) {
+							visual_locked_endpoint_activated = true;
+						}
 						if (visual_focus_endpoint) {
 							render_metrics.endpoint_focused = ImGui::IsItemActive();
 						}
 #endif
-						if (endpoint_invalid) {
-							inline_validation_error(render_metrics, ui_error);
-						}
 						ImGui::TableSetColumnIndex(1);
-						ImGui::TextDisabled("Port");
 						ImGui::SetNextItemWidth(-1.0f);
-						const bool port_invalid = ui_error_field == UiErrorField::Port;
 						push_validation_frame(port_invalid);
+						ImGui::BeginDisabled(configuration_locked);
 						if (ImGui::InputText("##port", port, IM_ARRAYSIZE(port))) {
 							clear_ui_error();
 						}
+						ImGui::EndDisabled();
 						pop_validation_frame(port_invalid);
+						record_last_item_bounds(render_metrics.port_field);
 						observe_last_control(
 							render_metrics, dashboard_clip_minimum,
 							dashboard_clip_maximum);
@@ -2392,19 +2740,21 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 							render_metrics.port_focused = ImGui::IsItemFocused();
 						}
 #endif
-						if (port_invalid) {
-							inline_validation_error(render_metrics, ui_error);
-						}
 						ImGui::EndTable();
+					}
+					if (endpoint_invalid || port_invalid) {
+						inline_validation_error(render_metrics, ui_error);
 					}
 				} else {
 					ImGui::TextDisabled("Listening port");
 					ImGui::SetNextItemWidth(-1.0f);
 					const bool port_invalid = ui_error_field == UiErrorField::Port;
 					push_validation_frame(port_invalid);
+					ImGui::BeginDisabled(configuration_locked);
 					if (ImGui::InputText("##port", port, IM_ARRAYSIZE(port))) {
 						clear_ui_error();
 					}
+					ImGui::EndDisabled();
 					pop_validation_frame(port_invalid);
 					observe_last_control(
 						render_metrics, dashboard_clip_minimum,
@@ -2417,6 +2767,114 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						dashboard_clip_maximum);
 					if (port_invalid) {
 						inline_validation_error(render_metrics, ui_error);
+					}
+				}
+
+				if (!is_server) {
+					render_metrics.recovery_control_present = true;
+					ImGui::Dummy(ImVec2(0.0f, 6.0f * scale));
+					render_metrics.recovery_anchor_y =
+						content_anchor(ImGui::GetCursorScreenPos().y);
+					ImGui::BeginGroup();
+					ImGui::PushStyleColor(
+						ImGuiCol_ChildBg, ImVec4(0.043f, 0.061f, 0.088f, 0.92f));
+					ImGui::PushStyleColor(
+						ImGuiCol_Border, ImVec4(0.30f, 0.39f, 0.52f, 0.72f));
+					ImGui::PushStyleVar(
+						ImGuiStyleVar_ChildRounding, 12.0f * scale);
+					ImGui::PushStyleVar(
+						ImGuiStyleVar_WindowPadding,
+						ImVec2(14.0f * scale, 9.0f * scale));
+					ImGui::BeginChild(
+						"##RecoverySection", ImVec2(0.0f, 0.0f),
+						ImGuiChildFlags_Borders |
+						ImGuiChildFlags_AlwaysUseWindowPadding |
+						ImGuiChildFlags_AutoResizeY |
+						ImGuiChildFlags_AlwaysAutoResize,
+						ImGuiWindowFlags_NoScrollbar |
+						ImGuiWindowFlags_NoScrollWithMouse);
+					const bool recovery_controls_disabled = !is_idle;
+					ImGui::TextDisabled("Connection recovery");
+					if (ImGui::BeginTable(
+							"##RecoveryControl", 2,
+							ImGuiTableFlags_SizingStretchProp |
+							ImGuiTableFlags_NoSavedSettings)) {
+						ImGui::TableSetupColumn(
+							"Description", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+						ImGui::TableSetupColumn(
+							"Control", ImGuiTableColumnFlags_WidthFixed, 86.0f * scale);
+						ImGui::TableNextRow();
+						ImGui::TableSetColumnIndex(0);
+						ImGui::TextUnformatted("Automatic reconnect");
+						ImGui::PushTextWrapPos(0.0f);
+						ImGui::TextDisabled(
+							recovery_controls_disabled
+								? (recovery_options.enabled
+									? "Monitoring enabled · disconnect to change."
+									: "Off for this session · disconnect to change.")
+								: "Encrypted heartbeat and bounded retries.");
+						ImGui::PopTextWrapPos();
+						ImGui::TableSetColumnIndex(1);
+						ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f * scale);
+						ImGui::AlignTextToFramePadding();
+						ImGui::TextColored(
+							recovery_options.enabled
+								? ImVec4(0.55f, 0.82f, 1.0f, 1.0f)
+								: ImVec4(0.61f, 0.68f, 0.77f, 1.0f),
+							recovery_options.enabled ? "On" : "Off");
+						ImGui::SameLine(0.0f, 7.0f * scale);
+					#ifdef TRUETUNNEL_GUI_VISUAL_TEST
+						if (visual_activate_recovery_with_keyboard &&
+							visual_input_stage >= 1U &&
+							visual_input_stage < 3U &&
+							!recovery_controls_disabled &&
+							!visual_keyboard_recovery_activated) {
+							ImGui::SetKeyboardFocusHere();
+						}
+					#endif
+						bool recovery_toggle_focused = false;
+						if (toggle_switch(
+								"Recovery", recovery_options.enabled,
+								!recovery_controls_disabled, scale,
+								&recovery_toggle_focused)) {
+							clear_ui_error();
+							append_log(recovery_options.enabled
+								? "[System] Automatic recovery enabled"
+								: "[System] Automatic recovery disabled");
+						#ifdef TRUETUNNEL_GUI_VISUAL_TEST
+							if (visual_activate_recovery_with_keyboard) {
+								visual_keyboard_recovery_activated = true;
+							}
+						#endif
+						}
+						render_metrics.recovery_toggle_visible = ImGui::IsItemVisible();
+						render_metrics.recovery_toggle_enabled =
+							!recovery_controls_disabled;
+						render_metrics.recovery_toggle_focused = recovery_toggle_focused;
+						observe_last_control(
+							render_metrics, dashboard_clip_minimum,
+							dashboard_clip_maximum);
+						if (gui_smoke_test && ImGui::IsItemVisible() &&
+							!is_server && recovery_options.enabled) {
+							smoke_recovery_rendered = true;
+						}
+						ImGui::EndTable();
+					}
+					ImGui::EndChild();
+					ImGui::PopStyleVar(2);
+					ImGui::PopStyleColor(2);
+					ImGui::EndGroup();
+					record_last_item_bounds(render_metrics.recovery_card);
+					if (render_metrics.recovery_card.valid) {
+						ImGui::GetWindowDrawList()->AddLine(
+							ImVec2(
+								render_metrics.recovery_card.minimum.x + 14.0f * scale,
+								render_metrics.recovery_card.minimum.y + 1.0f * scale),
+							ImVec2(
+								render_metrics.recovery_card.maximum.x - 14.0f * scale,
+								render_metrics.recovery_card.minimum.y + 1.0f * scale),
+							ImGui::GetColorU32(ImVec4(0.78f, 0.90f, 1.0f, 0.13f)),
+							1.0f * scale);
 					}
 				}
 
@@ -2435,7 +2893,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			if (begin_card("##NetworkCard", scale)) {
 				card_heading(
 					fonts.semibold, "Windows network",
-					"Choose the physical path used by the tunnel.");
+					configuration_locked
+						? "The active tunnel keeps its physical path locked."
+						: "Choose the physical path used by the tunnel.");
 				ImGui::PushStyleColor(
 					ImGuiCol_ChildBg, ImVec4(0.052f, 0.069f, 0.094f, 0.96f));
 				ImGui::PushStyleColor(
@@ -2450,8 +2910,16 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				ImGui::SameLine();
 				ImGui::TextUnformatted(adapter_name);
 				ImGui::TextColored(
-					ImVec4(0.43f, 0.80f, 0.65f, 1.0f),
-					"Stable identity verified");
+					secure_session_active
+						? ImVec4(0.43f, 0.80f, 0.65f, 1.0f)
+						: is_reconnecting
+							? ImVec4(1.0f, 0.70f, 0.32f, 1.0f)
+							: ImVec4(0.49f, 0.72f, 0.96f, 1.0f),
+					secure_session_active
+						? "Stable identity active"
+						: is_reconnecting
+							? "Stable identity reserved for retry"
+							: "Stable Windows identity reserved");
 				ImGui::EndChild();
 				ImGui::PopStyleVar();
 				ImGui::PopStyleColor(2);
@@ -2461,11 +2929,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					const bool adapter_invalid =
 						ui_error_field == UiErrorField::Adapter;
 					push_validation_frame(adapter_invalid);
+					ImGui::BeginDisabled(configuration_locked);
 					if (ImGui::Combo(
 						"##real_adapter", &current_adapter_idx_,
 						adapter_cstrs_.data(), static_cast<int>(adapter_cstrs_.size()))) {
 						clear_ui_error();
 					}
+					ImGui::EndDisabled();
 					pop_validation_frame(adapter_invalid);
 					observe_last_control(
 						render_metrics, dashboard_clip_minimum,
@@ -2487,11 +2957,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				render_metrics.secret_anchor_y =
 					content_anchor(ImGui::GetCursorScreenPos().y);
 			if (begin_card("##CredentialsCard", scale)) {
+				const char* secret_subtitle = configuration_locked
+					? "Locked for the active tunnel; copying remains available."
+					: is_server
+						? "Generate the server key here, then copy it to each client."
+						: "Paste the server's generated 256-bit key exactly.";
 				card_heading(
 					fonts.semibold, "Shared key",
-					is_server
-						? "Generate the server key here, then copy it to each client."
-						: "Paste the server's generated 256-bit key exactly.");
+					secret_subtitle);
 				const bool current_secret_valid =
 					shared_secret_invariants_hold(password);
 				const bool secret_invalid =
@@ -2502,12 +2975,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					ImGuiInputTextFlags_Password |
 					(is_server ? ImGuiInputTextFlags_ReadOnly
 					           : ImGuiInputTextFlags_None);
+				ImGui::BeginDisabled(configuration_locked);
 				if (ImGui::InputText(
 						"##password", password.data(), password.size(),
 						secret_input_flags)) {
 					password_generated = false;
 					clear_ui_error();
 				}
+				ImGui::EndDisabled();
 				pop_validation_frame(secret_invalid);
 				observe_last_control(
 					render_metrics, dashboard_clip_minimum,
@@ -2528,6 +3003,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						"Copy", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 					ImGui::TableNextRow();
 					ImGui::TableSetColumnIndex(0);
+					ImGui::BeginDisabled(configuration_locked);
 					if (ImGui::Button(
 							is_server ? "Regenerate##password" : "Clear##password",
 							ImVec2(-1.0f, 0.0f))) {
@@ -2544,6 +3020,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 							append_log("[!] Windows CSPRNG failed; shared key was cleared");
 						}
 					}
+					render_metrics.secret_action_available = ImGui::IsItemVisible();
+					render_metrics.secret_action_center = last_item_center();
 					observe_last_control(
 						render_metrics, dashboard_clip_minimum,
 						dashboard_clip_maximum);
@@ -2551,6 +3029,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						(!kGuiVisualTestBuild || ImGui::IsItemVisible())) {
 						smoke_regenerate_rendered = true;
 					}
+					ImGui::EndDisabled();
 					ImGui::TableSetColumnIndex(1);
 					ImGui::BeginDisabled(
 						!current_secret_valid || (is_server && !password_generated));
@@ -2729,7 +3208,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						smoke_message_rendered = true;
 					}
 					ImGui::TableSetColumnIndex(1);
-					ImGui::BeginDisabled(!is_running || message_input[0] == '\0');
+					const bool session_can_send = is_connected || is_listening;
+					ImGui::BeginDisabled(!session_can_send || message_input[0] == '\0');
 					const bool send_clicked = ImGui::Button("Send", ImVec2(-1.0f, 0.0f));
 					observe_last_control(
 						render_metrics, dashboard_clip_minimum,
@@ -2738,7 +3218,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					const bool send_requested = enter_pressed || send_clicked;
 					if (send_requested && message_input[0] != '\0') {
 						bool sent = false;
-						if (g_vpn_daemon && g_vpn_daemon->is_running()) {
+						if (g_vpn_daemon && session_can_send && g_vpn_daemon->is_running()) {
 							sent = g_vpn_daemon->send_message(message_input);
 						}
 						append_log(std::string(sent ? "[You] " : "[!] Failed to send: ") +
@@ -2756,23 +3236,38 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			render_metrics.security_anchor_y =
 				content_anchor(ImGui::GetCursorScreenPos().y);
 			if (begin_card("##SecurityPosture", scale)) {
-				card_heading(
-					fonts.semibold, "Security",
-					"");
+				if (fonts.semibold != nullptr) ImGui::PushFont(fonts.semibold);
+				ImGui::TextUnformatted("Security");
+				if (fonts.semibold != nullptr) ImGui::PopFont();
+				ImGui::SameLine();
+				ImGui::TextColored(
+					is_reconnecting
+						? ImVec4(1.0f, 0.70f, 0.32f, 1.0f)
+						: secure_session_active
+							? ImVec4(0.43f, 0.80f, 0.65f, 1.0f)
+							: ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
+					is_reconnecting
+						? "· Awaiting authenticated session"
+						: secure_session_active ? "· Active" : "· Inactive");
+				ImGui::Spacing();
 				posture_row(
 					"Protocol",
-					native_tcp ? "TLS 1.3" : "DTLS 1.3",
-					scale, is_running);
+					native_tcp
+						? (is_reconnecting ? "TLS 1.3 · pending" : "TLS 1.3")
+						: (is_reconnecting ? "DTLS 1.3 · pending" : "DTLS 1.3"),
+					scale, secure_session_active);
 				posture_row(
 					"Provider",
 					native_tcp ? "Windows Schannel" : "wolfSSL",
-					scale, is_running);
+					scale, secure_session_active);
 				posture_row(
 					"Cipher",
-					"AES-256-GCM", scale, is_running);
+					is_reconnecting ? "AES-256-GCM · pending" : "AES-256-GCM",
+					scale, secure_session_active);
 				posture_row(
 					"Key rotation",
-					"Automatic", scale, is_running);
+					is_reconnecting ? "Resumes after reconnect" : "Automatic",
+					scale, secure_session_active);
 				if (gui_smoke_test &&
 					(!kGuiVisualTestBuild || ImGui::IsItemVisible())) {
 					smoke_cipher_rendered = true;
@@ -2840,10 +3335,15 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					case VisualContentTarget::Activity:
 						target_card = &render_metrics.activity_card;
 						break;
+					case VisualContentTarget::Recovery:
+						target_card = &render_metrics.recovery_card;
+						break;
 					case VisualContentTarget::Bottom:
 						target_card = &render_metrics.security_card;
 						break;
 				}
+				const bool compact_section_capture =
+					capture_case.logical_width < 1080;
 				const float containment_tolerance = 2.0f * g_ui_scale;
 				const bool target_card_contained = target_card != nullptr &&
 					target_card->valid &&
@@ -2857,8 +3357,6 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						render_metrics.dashboard_clip_maximum.y + containment_tolerance;
 
 				RECT capture_region{0L, 0L, expected_width, expected_height};
-				const bool compact_section_capture =
-					capture_case.logical_width < 1080;
 				if (compact_section_capture && target_card != nullptr &&
 					target_card->valid) {
 					const float margin = 12.0f * g_ui_scale;
@@ -2941,30 +3439,109 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 							: render_metrics.endpoint_focused)) &&
 					(capture_case.validation_field != UiErrorField::General ||
 						render_metrics.activity_error_visible);
+				const bool endpoint_alignment_ok = capture_case.role != 1 ||
+					(render_metrics.endpoint_field.valid &&
+					 render_metrics.port_field.valid &&
+					 std::abs(render_metrics.endpoint_field.minimum.y -
+						render_metrics.port_field.minimum.y) <= 1.0f * g_ui_scale &&
+					 std::abs(render_metrics.endpoint_field.maximum.y -
+						render_metrics.port_field.maximum.y) <= 1.0f * g_ui_scale);
 				const unsigned int required_input_stage =
-					capture_case.activate_primary_with_keyboard ? 3U
+					capture_case.attempt_locked_configuration ? 9U
+					: (capture_case.activate_primary_with_keyboard ||
+					 capture_case.activate_recovery_with_keyboard) ? 3U
 					: (capture_case.tab_endpoint_to_port ||
 						capture_case.dismiss_help_with_escape) ? 4U : 2U;
 				const bool input_path_ok =
 					visual_input_stage >= required_input_stage;
+				const bool recovery_keyboard_path_ok =
+					!capture_case.activate_recovery_with_keyboard ||
+					(capture_case.daemon_state == VpnDaemon::State::Idle
+						? visual_keyboard_recovery_activated &&
+							render_metrics.recovery_toggle_focused
+						: !visual_keyboard_recovery_activated &&
+							!render_metrics.recovery_toggle_focused);
 				const bool keyboard_path_ok =
 					(!capture_case.activate_primary_with_keyboard ||
 						(visual_keyboard_primary_activated &&
 							render_metrics.primary_action_focused)) &&
+					recovery_keyboard_path_ok &&
 					(!capture_case.dismiss_help_with_escape ||
 						(visual_help_was_visible && !render_metrics.help_visible));
 				const bool help_state_ok = !capture_case.open_help ||
 					(capture_case.dismiss_help_with_escape
 						? visual_help_was_visible && !render_metrics.help_visible
 						: render_metrics.help_visible);
+				const bool recovery_expected = capture_case.role == 1;
+				const bool recovery_visibility_required = recovery_expected &&
+					(capture_case.content_target == VisualContentTarget::Top ||
+					 capture_case.content_target == VisualContentTarget::Recovery);
+				const bool recovery_value_expected =
+					(capture_case.activate_recovery_with_keyboard &&
+					 capture_case.daemon_state == VpnDaemon::State::Idle)
+						? true : capture_case.recovery_enabled;
+				const bool recovery_state_ok =
+					render_metrics.recovery_control_present == recovery_expected &&
+					(!recovery_visibility_required ||
+					 render_metrics.recovery_toggle_visible) &&
+					(!recovery_expected ||
+						(recovery_options.enabled == recovery_value_expected &&
+						 render_metrics.recovery_toggle_enabled ==
+							(capture_case.daemon_state == VpnDaemon::State::Idle)));
+				const bool configuration_state_ok =
+					render_metrics.configuration_controls_locked ==
+						(capture_case.daemon_state != VpnDaemon::State::Idle);
+				const bool configuration_behavior_ok =
+					!capture_case.attempt_locked_configuration ||
+					(selected_mode == capture_case.role &&
+					 selected_transport == capture_case.transport &&
+					 std::string_view{server_address} == "vpn.example.net" &&
+					 shared_secret_invariants_hold(password) &&
+					 !visual_locked_endpoint_activated);
+				const bool secure_session_expected =
+					visual_connection_status.phase == ConnectionPhase::Connected ||
+					visual_connection_status.phase == ConnectionPhase::Listening;
+				const bool security_state_ok =
+					render_metrics.secure_session_indicators_active ==
+						secure_session_expected;
+				const bool phase_state_ok =
+					capture_case.connection_phase < 0 ||
+					(static_cast<int>(visual_connection_status.phase) == capture_case.connection_phase &&
+						(capture_case.connection_phase !=
+							static_cast<int>(ConnectionPhase::Reconnecting) ||
+						 render_metrics.recovery_status_visible));
 				const bool interaction_ok = action_state_ok && validation_state_ok &&
+					endpoint_alignment_ok &&
 					input_path_ok && keyboard_path_ok && help_state_ok &&
+					recovery_state_ok && configuration_state_ok &&
+					configuration_behavior_ok && security_state_ok && phase_state_ok &&
 					(!capture_case.open_disconnect ||
 						render_metrics.disconnect_confirmation_visible);
 				const bool containment_ok = !render_metrics.partial_control_visible;
+				const auto card_is_contained = [&](
+						const GuiRenderMetrics::Bounds& bounds) noexcept {
+					return bounds.valid &&
+						bounds.minimum.x >= render_metrics.dashboard_clip_minimum.x -
+							containment_tolerance &&
+						bounds.minimum.y >= render_metrics.dashboard_clip_minimum.y -
+							containment_tolerance &&
+						bounds.maximum.x <= render_metrics.dashboard_clip_maximum.x +
+							containment_tolerance &&
+						bounds.maximum.y <= render_metrics.dashboard_clip_maximum.y +
+							containment_tolerance;
+				};
+				const bool desktop_dashboard_contained = compact_section_capture ||
+					(card_is_contained(render_metrics.connection_card) &&
+					 card_is_contained(render_metrics.network_card) &&
+					 card_is_contained(render_metrics.secret_card) &&
+					 card_is_contained(render_metrics.activity_card) &&
+					 card_is_contained(render_metrics.security_card) &&
+					 (!recovery_expected ||
+						card_is_contained(render_metrics.recovery_card)));
 				const bool capture_ok =
 					encoded && dimensions_ok && contrast_ok && scroll_ok &&
-					interaction_ok && containment_ok && target_card_contained;
+					interaction_ok && containment_ok && target_card_contained &&
+					desktop_dashboard_contained;
 
 				std::ostringstream result;
 				result << "[VISUAL] " << (capture_ok ? "PASS: " : "FAIL: ")
@@ -2975,9 +3552,19 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				       << render_metrics.content_scroll_max
 				       << " | activity " << render_metrics.activity_scroll_y << '/'
 				       << render_metrics.activity_scroll_max
-				       << " | interaction " << (interaction_ok ? "ok" : "failed")
-				       << " | keyboard " << (keyboard_path_ok ? "ok" : "failed")
-				       << " | controls " << (containment_ok ? "contained" : "clipped")
+					   << " | interaction " << (interaction_ok ? "ok" : "failed")
+					   << " | endpoint alignment "
+					   << (endpoint_alignment_ok ? "ok" : "failed")
+					   << " | recovery " << (recovery_state_ok ? "ok" : "failed")
+					   << " | config lock " << (configuration_state_ok ? "ok" : "failed")
+					   << " | locked input "
+					   << (configuration_behavior_ok ? "rejected" : "changed")
+					   << " | security state " << (security_state_ok ? "ok" : "failed")
+					   << " | phase " << (phase_state_ok ? "ok" : "failed")
+					   << " | keyboard " << (keyboard_path_ok ? "ok" : "failed")
+					   << " | controls " << (containment_ok ? "contained" : "clipped")
+					   << " | dashboard "
+					   << (desktop_dashboard_contained ? "complete" : "clipped")
 				       << " | target card "
 				       << (target_card_contained ? "complete" : "clipped")
 				       << " | capture "
@@ -3027,11 +3614,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			action_states_ok &&
 			smoke_password_rendered && smoke_regenerate_rendered &&
 			smoke_transport_rendered && smoke_cipher_rendered &&
-			smoke_message_rendered && smoke_main_panel_visible;
+			smoke_message_rendered && smoke_recovery_rendered &&
+			smoke_main_panel_visible;
 		append_log(std::string("[SMOKE] rendered frames (30 required): ") +
 		           (frames_ok ? "PASS" : "FAIL"));
 		append_log(std::string("[SMOKE] core controls rendered: ") +
 		           (controls_ok ? "PASS" : "FAIL"));
+		append_log(std::string("[SMOKE] client recovery control visible and enabled: ") +
+		           (smoke_recovery_rendered ? "PASS" : "FAIL"));
 		if (!frames_ok || !controls_ok || g_gui_smoke_log_write_failed) {
 			gui_smoke_failed = true;
 		}

@@ -23,11 +23,11 @@ public:
                 std::string password;
                 std::string adapter_name;
                 std::string subnet_mask;
-                std::string public_ip;
                 std::string real_adapter;
                 std::uint64_t real_adapter_luid{0U};
                 secure::CipherSuite cipher_suite{secure::CipherSuite::Aes256Gcm};
                 TransportProtocol transport{TransportProtocol::Tcp};
+                ConnectionRecoveryOptions recovery{};
         };
 
         enum class State {
@@ -65,6 +65,7 @@ public:
         void stop();
         [[nodiscard]] bool is_running() const;
         [[nodiscard]] State state() const;
+        [[nodiscard]] ConnectionStatus connection_status() const;
 
         void set_event_callback(EventCallback cb);
         bool send_message(const std::string& text);
@@ -79,7 +80,7 @@ private:
 
         ControllerFactory factory_;
         std::unique_ptr<IVpnController> controller_;
-        std::mutex controller_mutex_;
+        mutable std::mutex controller_mutex_;
 
         std::mutex callback_mutex_;
         EventCallback event_callback_;
