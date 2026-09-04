@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -807,6 +808,159 @@ bool run_source_binding_test() {
         std::cerr << "[FAIL] Zero-sequence heartbeat control frame was accepted\n";
         return false;
     }
+
+    SessionReplacementRequest replacement_request{};
+    for (std::size_t index = 0U;
+         index < replacement_request.nonce.size(); ++index) {
+        replacement_request.nonce[index] =
+            static_cast<std::uint8_t>(index + 1U);
+    }
+    replacement_request.assigned_ipv4 = {10U, 10U, 100U, 10U};
+    for (std::size_t index = 0U;
+         index < replacement_request.proof.size(); ++index) {
+        replacement_request.proof[index] =
+            static_cast<std::uint8_t>(0xA0U + index);
+    }
+    const auto encoded_replacement =
+        encode_session_replacement_request(replacement_request);
+    SessionReplacementRequest decoded_replacement{};
+    if (encoded_replacement.size() != kSessionReplacementRequestSize ||
+        encoded_replacement.front() != kSessionReplacementProtocolVersion ||
+        !decode_session_replacement_request(encoded_replacement,
+                                             decoded_replacement) ||
+        decoded_replacement.nonce != replacement_request.nonce ||
+        decoded_replacement.assigned_ipv4 != replacement_request.assigned_ipv4 ||
+        decoded_replacement.proof != replacement_request.proof) {
+        std::cerr << "[FAIL] Session replacement framing is not canonical\n";
+        return false;
+    }
+    auto malformed_replacement = encoded_replacement;
+    malformed_replacement[0] = 0U;
+    if (decode_session_replacement_request(malformed_replacement,
+                                           decoded_replacement) ||
+        decode_session_replacement_request(
+            std::span<const std::uint8_t>{encoded_replacement.data(),
+                                          encoded_replacement.size() - 1U},
+            decoded_replacement)) {
+        std::cerr << "[FAIL] Malformed session replacement frame was accepted\n";
+        return false;
+    }
+    auto zero_replacement_nonce = encoded_replacement;
+    std::fill_n(zero_replacement_nonce.begin() + 1U,
+                kSessionReplacementNonceSize, std::uint8_t{0U});
+    if (decode_session_replacement_request(zero_replacement_nonce,
+                                           decoded_replacement)) {
+        std::cerr << "[FAIL] Zero-nonce session replacement was accepted\n";
+        return false;
+    }
+    const auto encoded_ack = encode_session_replacement_ack(
+        replacement_request.nonce);
+    std::array<std::uint8_t, kSessionReplacementNonceSize> decoded_nonce{};
+    if (!decode_session_replacement_ack(encoded_ack, decoded_nonce) ||
+        decoded_nonce != replacement_request.nonce ||
+        decode_session_replacement_ack(
+            std::span<const std::uint8_t>{encoded_ack.data(),
+                                          encoded_ack.size() - 1U},
+            decoded_nonce)) {
+        std::cerr << "[FAIL] Session replacement acknowledgement framing failed\n";
+        return false;
+    }
+    // FREEZE is an OLD-generation control and FREEZE_ACK is its authenticated
+    // response. They intentionally reuse the canonical nonce-only framing,
+    // but are tested independently so a future wire-format change cannot
+    // silently leave the pre-handshake pause unvalidated.
+    const auto encoded_freeze = encode_session_drain_frame(
+        replacement_request.nonce);
+    std::array<std::uint8_t, kSessionReplacementNonceSize> decoded_freeze_nonce{};
+    if (encoded_freeze.size() != kSessionDrainFrameSize ||
+        encoded_freeze.front() != kSessionReplacementProtocolVersion ||
+        !decode_session_drain_frame(encoded_freeze, decoded_freeze_nonce) ||
+        decoded_freeze_nonce != replacement_request.nonce ||
+        decode_session_drain_frame(
+            std::span<const std::uint8_t>{encoded_freeze.data(),
+                                          encoded_freeze.size() - 1U},
+            decoded_freeze_nonce)) {
+        std::cerr << "[FAIL] Session replacement FREEZE framing failed\n";
+        return false;
+    }
+    auto zero_freeze_nonce = encoded_freeze;
+    std::fill_n(zero_freeze_nonce.begin() + 1U,
+                kSessionReplacementNonceSize, std::uint8_t{0U});
+    if (decode_session_drain_frame(zero_freeze_nonce, decoded_freeze_nonce)) {
+        std::cerr << "[FAIL] Zero-nonce session FREEZE was accepted\n";
+        return false;
+    }
+    std::array<std::uint8_t, 32> continuity_binding{};
+    continuity_binding.fill(0x5AU);
+    std::array<std::uint8_t, 32> replacement_binding{};
+    replacement_binding.fill(0xA5U);
+    const auto proof = secure::SecureSocket::replacement_proof(
+        continuity_binding, replacement_binding, replacement_request.nonce,
+        replacement_request.assigned_ipv4);
+    auto wrong_nonce = replacement_request.nonce;
+    wrong_nonce.front() ^= 0x01U;
+    const auto wrong_nonce_proof = secure::SecureSocket::replacement_proof(
+        continuity_binding, replacement_binding, wrong_nonce,
+        replacement_request.assigned_ipv4);
+    auto wrong_ip = replacement_request.assigned_ipv4;
+    wrong_ip.back() ^= 0x01U;
+    const auto wrong_ip_proof = secure::SecureSocket::replacement_proof(
+        continuity_binding, replacement_binding, replacement_request.nonce,
+        wrong_ip);
+    auto wrong_new_binding = replacement_binding;
+    wrong_new_binding.front() ^= 0x01U;
+    const auto wrong_new_binding_proof = secure::SecureSocket::replacement_proof(
+        continuity_binding, wrong_new_binding, replacement_request.nonce,
+        replacement_request.assigned_ipv4);
+    if (proof == wrong_nonce_proof || proof == wrong_ip_proof ||
+        proof == wrong_new_binding_proof) {
+        std::cerr << "[FAIL] Session replacement proof was not bound to the full TLS transcript\n";
+        return false;
+    }
+
+    static_assert(PACKET_TYPE_SESSION_REPLACEMENT_READY >
+                      PACKET_TYPE_SESSION_DRAIN_ABORT &&
+                  PACKET_TYPE_SESSION_REPLACEMENT_ACTIVATE >
+                      PACKET_TYPE_SESSION_REPLACEMENT_READY &&
+                  PACKET_TYPE_SESSION_REPLACEMENT_COMMIT_ACK >
+                      PACKET_TYPE_SESSION_REPLACEMENT_ACTIVATE &&
+                  PACKET_TYPE_SESSION_REPLACEMENT_FREEZE >
+                      PACKET_TYPE_SESSION_REPLACEMENT_COMMIT_ACK &&
+                  PACKET_TYPE_SESSION_REPLACEMENT_FREEZE_ACK >
+                      PACKET_TYPE_SESSION_REPLACEMENT_FREEZE,
+                  "Session replacement phase constants must be append-only");
+
+    secure::TrafficKeyRotationPolicy tiny_tcp_policy{};
+    tiny_tcp_policy.max_records = 4U;
+    bool tiny_tcp_rejected = false;
+    try {
+        VpnClient invalid_tcp_policy{
+            "127.0.0.1", 443, std::string{kIntegrationSharedKey},
+            "invalid-policy-client", "invalid-uplink",
+            secure::CipherSuite::Aes256Gcm, TransportProtocol::Tcp,
+            tiny_tcp_policy};
+        (void)invalid_tcp_policy;
+    } catch (const std::invalid_argument&) {
+        tiny_tcp_rejected = true;
+    }
+    if (!tiny_tcp_rejected) {
+        std::cerr << "[FAIL] Unusable TCP rotation reserve was accepted\n";
+        return false;
+    }
+    const auto extreme_age = std::chrono::seconds{
+        (std::numeric_limits<std::chrono::seconds::rep>::max)()};
+    if (secure::rotation_age_limit_microseconds(extreme_age) !=
+        (std::numeric_limits<std::uint64_t>::max)()) {
+        std::cerr << "[FAIL] Extreme traffic-key age did not saturate safely\n";
+        return false;
+    }
+    secure::TrafficKeyRotationPolicy tiny_udp_policy{};
+    tiny_udp_policy.max_records = 2U;
+    VpnClient udp_tiny_policy{
+        "127.0.0.1", 443, std::string{kIntegrationSharedKey},
+        "tiny-policy-client", "invalid-uplink",
+        secure::CipherSuite::Aes256Gcm, TransportProtocol::Udp,
+        tiny_udp_policy};
 
     VpnController controller;
     if (controller.start(
@@ -1812,17 +1966,23 @@ void write_u32_be(std::uint8_t* const output,
 
 class ProbeTracker final {
 public:
-    void begin_data_run(const std::size_t expected_frames) {
+    void begin_data_run(const std::size_t expected_frames,
+                        const bool strict_sequence = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         data_seen_.assign(expected_frames, false);
+        next_expected_data_.reset();
+        strict_sequence_ = strict_sequence;
         data_frames_ = 0U;
         data_bytes_ = 0U;
         failure_.clear();
     }
 
-    void begin_latency_run() {
+    void begin_latency_run(const bool strict_sequence = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         acknowledgements_.clear();
+        acknowledged_history_.clear();
+        next_expected_ack_.reset();
+        strict_sequence_ = strict_sequence;
         failure_.clear();
     }
 
@@ -1833,15 +1993,38 @@ public:
         if (index >= data_seen_.size()) {
             set_failure_locked("probe sequence exceeded the expected window");
         } else if (!data_seen_[index]) {
+            if (strict_sequence_ && next_expected_data_.has_value() &&
+                sequence != *next_expected_data_) {
+                set_failure_locked("probe data arrived out of order");
+            }
             data_seen_[index] = true;
             ++data_frames_;
             data_bytes_ += payload_size;
+            next_expected_data_ = sequence + 1U;
+        } else if (strict_sequence_) {
+            set_failure_locked("duplicate probe data was received");
         }
         ready_.notify_all();
     }
 
     void note_ack(const std::uint32_t sequence) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (strict_sequence_ && acknowledged_history_.contains(sequence)) {
+            set_failure_locked(
+                "duplicate probe acknowledgement was received: sequence=" +
+                std::to_string(sequence));
+        }
+        if (strict_sequence_ && next_expected_ack_.has_value() &&
+            sequence != *next_expected_ack_) {
+            set_failure_locked(
+                "probe acknowledgement arrived out of order: expected=" +
+                std::to_string(*next_expected_ack_) + ", received=" +
+                std::to_string(sequence));
+        }
+        if (strict_sequence_) {
+            acknowledged_history_.insert(sequence);
+            next_expected_ack_ = sequence + 1U;
+        }
         acknowledgements_.insert(sequence);
         ready_.notify_all();
     }
@@ -1890,17 +2073,96 @@ private:
     std::condition_variable ready_;
     std::vector<bool> data_seen_;
     std::unordered_set<std::uint32_t> acknowledgements_;
+    std::unordered_set<std::uint32_t> acknowledged_history_;
+    std::optional<std::uint32_t> next_expected_data_;
+    std::optional<std::uint32_t> next_expected_ack_;
+    bool strict_sequence_{false};
     std::size_t data_frames_{0U};
     std::size_t data_bytes_{0U};
     std::string failure_;
 };
 
+// The production client receives encrypted packets on one worker and sends
+// Wintun packets on another. Keep the E2E probe responder equally independent:
+// replying inline from the receive callback would block that sole callback
+// during the intentional TCP write freeze and prevent it from dispatching the
+// authenticated FREEZE_ACK queued immediately behind the probe.
+class ProbeResponder final {
+public:
+    ProbeResponder(VpnClient& client, ProbeTracker& tracker)
+        : client_{client}, tracker_{tracker}, worker_{[this]() { run(); }} {}
+
+    ~ProbeResponder() { stop(); }
+
+    ProbeResponder(const ProbeResponder&) = delete;
+    ProbeResponder& operator=(const ProbeResponder&) = delete;
+
+    [[nodiscard]] bool enqueue(std::vector<std::uint8_t> packet) noexcept {
+        try {
+            std::lock_guard lock{mutex_};
+            if (stopping_ || pending_.size() >= kMaximumPendingResponses) {
+                return false;
+            }
+            pending_.push_back(std::move(packet));
+            ready_.notify_one();
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    void stop() noexcept {
+        {
+            std::lock_guard lock{mutex_};
+            if (stopping_) {
+                if (!worker_.joinable()) return;
+            }
+            stopping_ = true;
+            pending_.clear();
+        }
+        ready_.notify_all();
+        if (worker_.joinable()) worker_.join();
+    }
+
+private:
+    void run() noexcept {
+        for (;;) {
+            std::vector<std::uint8_t> packet;
+            {
+                std::unique_lock lock{mutex_};
+                ready_.wait(lock, [this]() {
+                    return stopping_ || !pending_.empty();
+                });
+                if (stopping_) return;
+                packet = std::move(pending_.front());
+                pending_.pop_front();
+            }
+            if (!client_.send_integration_ipv4_packet(packet)) {
+                if (client_.is_active()) {
+                    tracker_.fail("failed to send probe acknowledgement");
+                }
+                return;
+            }
+        }
+    }
+
+    static constexpr std::size_t kMaximumPendingResponses = 64U;
+    VpnClient& client_;
+    ProbeTracker& tracker_;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<std::vector<std::uint8_t>> pending_;
+    bool stopping_{false};
+    std::thread worker_;
+};
+
 void configure_probe_observer(VpnClient& client,
                               const std::string& local_ip,
                               const std::string& peer_ip,
-                              ProbeTracker& tracker) {
+                              ProbeTracker& tracker,
+                              ProbeResponder& responder) {
     client.set_integration_packet_observer(
-        [&client, local_ip, peer_ip, &tracker](
+        [local_ip, peer_ip, &tracker, &responder](
             const std::span<const std::uint8_t> packet) {
             const auto parsed = parse_probe_packet(packet);
             if (!parsed) return false;
@@ -1916,8 +2178,8 @@ void configure_probe_observer(VpnClient& client,
                     const auto acknowledgement = make_probe_packet(
                         local_ip, peer_ip, ProbeKind::Ack,
                         parsed->sequence, 0U);
-                    if (!client.send_integration_ipv4_packet(acknowledgement)) {
-                        tracker.fail("failed to send probe acknowledgement");
+                    if (!responder.enqueue(acknowledgement)) {
+                        tracker.fail("probe acknowledgement queue is unavailable");
                     }
                     break;
                 }
@@ -2027,6 +2289,291 @@ struct LatencyResult {
               << std::setprecision(2) << median << " ms, p95=" << p95
               << " ms, samples=" << sample_count << '\n';
     return {median, p95};
+}
+
+void verify_tcp_session_replacement(
+    VpnServer& server,
+    VpnClient& sender,
+    VpnClient& receiver,
+    ProbeTracker& sender_tracker,
+    ProbeTracker& receiver_tracker,
+    const std::string& sender_ip,
+    const std::string& receiver_ip,
+    const bool inject_commit_failure) {
+    const NET_LUID adapter_luid_before = ResolveNetworkAdapterLuid(
+        sender.adapter_name(), 0U);
+    const std::string sender_ip_before = sender.local_ip();
+    const std::string receiver_ip_before = receiver.local_ip();
+    GUID adapter_guid_before{};
+    require_test(::ConvertInterfaceLuidToGuid(
+                     &adapter_luid_before, &adapter_guid_before) == NO_ERROR,
+                 "could not read the Wintun GUID before TCP replacement");
+    const auto wintun_instances_before =
+        wintun_instance_ids(query_wintun_devices(false));
+    const auto rotation_before = sender.integration_rotation_stats();
+    if (inject_commit_failure) {
+        // Consume more than the minimum accepted 200 ms heartbeat timeout
+        // inside authenticated FREEZE. The bounded handoff grace must keep
+        // the healthy OLD generation alive, then the injected pre-ACTIVATE
+        // failure must roll back and retry successfully.
+        server.set_integration_session_replacement_freeze_delay(220ms);
+        server.set_integration_fail_next_session_replacement_commit(true);
+    }
+    sender_tracker.begin_latency_run(true);
+    receiver_tracker.begin_latency_run(true);
+
+    std::mutex timing_mutex;
+    std::mutex failure_mutex;
+    std::string worker_failure;
+    std::atomic<bool> stop_workers{false};
+    std::atomic<bool> replacement_seen{false};
+    std::atomic<std::size_t> completed_sender{0U};
+    std::atomic<std::size_t> completed_receiver{0U};
+    std::atomic<std::size_t> replacement_round{(std::numeric_limits<std::size_t>::max)()};
+    double maximum_probe_rtt_ms = 0.0;
+    double maximum_ack_interval_ms = 0.0;
+    // Exercise the real 100 ms production scheduler and its retry path. The
+    // injected failure is deliberately before ACTIVATE, so the production
+    // authenticated ABORT path must resume OLD and a later retry must succeed.
+    constexpr std::size_t kMaximumRounds = 10'000U;
+    constexpr std::size_t kProbeWindow = 4U;
+    constexpr auto kProbeWindowPacing = 4ms;
+    const auto record_failure = [&](std::string message) {
+        std::lock_guard lock{failure_mutex};
+        if (worker_failure.empty()) worker_failure = std::move(message);
+        stop_workers.store(true, std::memory_order_release);
+    };
+    const auto run_direction = [&](VpnClient& probe_sender,
+                                   ProbeTracker& probe_tracker,
+                                   const std::string& source_ip,
+                                   const std::string& destination_ip,
+                                   const std::uint32_t sequence_base,
+                                   std::atomic<std::size_t>& completed,
+                                   std::atomic<std::size_t>& other_completed) {
+        std::chrono::steady_clock::time_point previous_ack{};
+        std::size_t index = 0U;
+        while (index < kMaximumRounds &&
+               !stop_workers.load(std::memory_order_acquire)) {
+            // Keep several authenticated probes in flight in each direction.
+            // This ensures the old-generation barrier crosses real application
+            // traffic rather than measuring an idle request/response loop.
+            struct OutstandingProbe {
+                std::uint32_t sequence;
+                std::chrono::steady_clock::time_point started;
+            };
+            std::array<OutstandingProbe, kProbeWindow> window{};
+            const std::size_t window_size =
+                (std::min)(kProbeWindow, kMaximumRounds - index);
+            for (std::size_t offset = 0U; offset < window_size; ++offset) {
+                const auto sequence =
+                    sequence_base + static_cast<std::uint32_t>(index + offset);
+                const auto packet = make_probe_packet(
+                    source_ip, destination_ip, ProbeKind::Ping, sequence, 35U);
+                const auto started = std::chrono::steady_clock::now();
+                if (!probe_sender.send_integration_ipv4_packet(packet)) {
+                    record_failure(
+                        "bidirectional probe send failed during TCP replacement");
+                    return;
+                }
+                window[offset] = OutstandingProbe{sequence, started};
+            }
+            for (std::size_t offset = 0U; offset < window_size; ++offset) {
+                const auto& probe = window[offset];
+                if (!probe_tracker.wait_for_ack(probe.sequence, 2s)) {
+                    const auto tracker_failure = probe_tracker.failure();
+                    record_failure(
+                        tracker_failure.empty()
+                            ? "bidirectional probe acknowledgement was lost "
+                              "during TCP replacement"
+                            : "bidirectional probe tracker rejected traffic "
+                              "during TCP replacement: " + tracker_failure);
+                    return;
+                }
+                const auto acknowledged_at = std::chrono::steady_clock::now();
+                {
+                    std::lock_guard lock{timing_mutex};
+                    maximum_probe_rtt_ms = (std::max)(
+                        maximum_probe_rtt_ms,
+                        std::chrono::duration<double, std::milli>(
+                            acknowledged_at - probe.started)
+                            .count());
+                    if (previous_ack != std::chrono::steady_clock::time_point{}) {
+                        maximum_ack_interval_ms = (std::max)(
+                            maximum_ack_interval_ms,
+                            std::chrono::duration<double, std::milli>(
+                                acknowledged_at - previous_ack)
+                                .count());
+                    }
+                    previous_ack = acknowledged_at;
+                }
+                const std::size_t completed_round =
+                    completed.fetch_add(1U, std::memory_order_acq_rel) + 1U;
+                const auto rotation = sender.integration_rotation_stats();
+                if (rotation.session_replacement_successes >
+                    rotation_before.session_replacement_successes &&
+                    !replacement_seen.exchange(true, std::memory_order_acq_rel)) {
+                    const std::size_t other_rounds =
+                        other_completed.load(std::memory_order_acquire);
+                    replacement_round.store(
+                        (std::min)(completed_round, other_rounds),
+                        std::memory_order_release);
+                }
+                const auto first_replacement_round =
+                    replacement_round.load(std::memory_order_acquire);
+                if (replacement_seen.load(std::memory_order_acquire) &&
+                    (std::min)(completed_sender.load(std::memory_order_acquire),
+                               completed_receiver.load(std::memory_order_acquire)) >=
+                        first_replacement_round + 8U) {
+                    stop_workers.store(true, std::memory_order_release);
+                    break;
+                }
+            }
+            index += window_size;
+            if (!stop_workers.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(kProbeWindowPacing);
+            }
+        }
+    };
+    std::thread sender_worker([&]() {
+        run_direction(sender, sender_tracker, sender_ip, receiver_ip,
+                      0x5000U, completed_sender, completed_receiver);
+    });
+    std::thread receiver_worker([&]() {
+        run_direction(receiver, receiver_tracker, receiver_ip, sender_ip,
+                      0x6000U, completed_receiver, completed_sender);
+    });
+    sender_worker.join();
+    receiver_worker.join();
+    require_test(worker_failure.empty(), worker_failure);
+
+    const auto adapter_luid_after = ResolveNetworkAdapterLuid(
+        sender.adapter_name(), adapter_luid_before.Value);
+    GUID adapter_guid_after{};
+    require_test(::ConvertInterfaceLuidToGuid(
+                     &adapter_luid_after, &adapter_guid_after) == NO_ERROR,
+                 "could not read the Wintun GUID after TCP replacement");
+    const auto wintun_instances_after =
+        wintun_instance_ids(query_wintun_devices(false));
+    const auto rotation_after = sender.integration_rotation_stats();
+    require_test(replacement_seen.load(std::memory_order_acquire),
+                 "low TCP traffic-key threshold did not establish a replacement session");
+    require_test(sender.is_active() && receiver.is_active(),
+                 "a client became inactive during TCP replacement");
+    require_test(sender.local_ip() == sender_ip_before &&
+                     receiver.local_ip() == receiver_ip_before,
+                 "TCP replacement changed an assigned VPN IPv4 address");
+    require_test(adapter_luid_after.Value == adapter_luid_before.Value &&
+                     ::IsEqualGUID(adapter_guid_after, adapter_guid_before),
+                 "TCP replacement changed the active Wintun identity");
+    require_test(wintun_instances_after == wintun_instances_before,
+                 "TCP replacement created or removed a Wintun instance");
+    require_test(server.integration_connected_client_count() == 2U,
+                 "TCP replacement changed the authenticated client count");
+    require_test(maximum_probe_rtt_ms < 500.0,
+                 "TCP replacement exceeded the 500 ms local probe RTT target");
+    require_test(maximum_ack_interval_ms < 500.0,
+                 "TCP replacement exceeded the 500 ms inter-ack gap target");
+    if (inject_commit_failure) {
+        require_test(rotation_after.session_replacement_failures >
+                         rotation_before.session_replacement_failures,
+                     "failed TCP replacement injection was not observed");
+    } else {
+        require_test(rotation_after.session_replacement_failures ==
+                         rotation_before.session_replacement_failures,
+                     "TCP replacement reported a failed attempt");
+    }
+    require_test(rotation_after.last_handoff_pause_microseconds > 0U &&
+                     rotation_after.last_handoff_pause_microseconds < 500'000U,
+                 "TCP replacement handoff pause was zero or exceeded 500 ms");
+    std::cout << "[ROTATION] TCP full-session replacements="
+              << rotation_after.session_replacement_successes
+              << ", max probe RTT=" << std::fixed
+              << std::setprecision(2) << maximum_probe_rtt_ms
+              << " ms, max inter-ack gap=" << maximum_ack_interval_ms
+              << " ms, measured write pause="
+              << (static_cast<double>(
+                      rotation_after.last_handoff_pause_microseconds) /
+                  1'000.0)
+              << " ms, Wintun GUID/LUID preserved, strict bidirectional "
+                  "sequence probes=ok\n";
+}
+
+void verify_post_activate_failure_fails_closed(
+    VpnServer& server,
+    const std::string& server_address,
+    const int port,
+    const std::string& password,
+    const std::string& real_adapter_name,
+    const std::uint64_t real_adapter_luid,
+    const secure::CipherSuite cipher,
+    const int scenario_index) {
+    const auto wintun_instances_before =
+        wintun_instance_ids(query_wintun_devices(false));
+    const std::size_t clients_before =
+        server.integration_connected_client_count();
+
+    secure::TrafficKeyRotationPolicy policy{};
+    // Keep this policy at the production minimum. The integration-only force
+    // hook below exercises the same replacement implementation without
+    // weakening the reserve required for the real scheduler.
+    policy.max_records = secure::kMinimumTcpRotationRecords;
+    policy.max_bytes = secure::kMinimumTcpRotationBytes;
+    policy.max_age = secure::kMinimumTcpRotationAge;
+    const std::string adapter_name =
+        "TrueTunnel Test Activate Fault " + std::to_string(scenario_index);
+
+    {
+        VpnClient client{
+            server_address, port, password, adapter_name, real_adapter_name,
+            cipher, TransportProtocol::Tcp, policy, real_adapter_luid};
+        start_client_with_timeout(client, "Post-ACTIVATE fault client", 30s);
+        require_test(wait_for_ip(client, 10s),
+                     "post-ACTIVATE fault client did not receive an IP address");
+        require_test(
+            wait_for_condition(
+                [&]() {
+                    return server.integration_connected_client_count() ==
+                        clients_before + 1U;
+                },
+                5s),
+            "server did not register the post-ACTIVATE fault client");
+
+        const auto before = client.integration_rotation_stats();
+        server.set_integration_fail_next_session_replacement_after_activate(true);
+        client.force_integration_tcp_session_replacement();
+        require_test(
+            wait_for_condition(
+                [&]() {
+                    const auto current = client.integration_rotation_stats();
+                    return current.session_replacement_failures >
+                               before.session_replacement_failures &&
+                        !client.is_active();
+                },
+                10s),
+            "post-ACTIVATE ambiguity did not fail closed on the client");
+        require_test(!client.send_chat_message("OLD_MUST_NOT_RESUME"),
+                     "client resumed application traffic on OLD after ACTIVATE");
+        require_test(
+            wait_for_condition(
+                [&]() {
+                    return server.integration_connected_client_count() ==
+                        clients_before;
+                },
+                5s),
+            "server retained a client mapping after post-ACTIVATE failure");
+        client.stop();
+    }
+
+    require_test(
+        wait_for_condition(
+            [&]() {
+                return wintun_instance_ids(query_wintun_devices(false)) ==
+                    wintun_instances_before;
+            },
+            5s),
+        "post-ACTIVATE failure leaked or replaced a Wintun device");
+    std::cout << "[PASS] Post-ACTIVATE loss closes both TLS generations, "
+                 "removes the exact server mapping, and leaves no Wintun leak\n";
 }
 
 void verify_backpressured_server_shutdown(
@@ -2582,6 +3129,8 @@ bool run_scenario(int index,
     std::atomic<bool> endpoint_mismatch{false};
     ProbeTracker trackerA;
     ProbeTracker trackerB;
+    std::unique_ptr<ProbeResponder> responderA;
+    std::unique_ptr<ProbeResponder> responderB;
 
     try {
         server.start();
@@ -2652,8 +3201,10 @@ bool run_scenario(int index,
                      "source binding and peer routing, and client IPv4 "
                      "validation; same-host probes are consumed immediately "
                      "before Wintun injection.\n";
-        configure_probe_observer(*clientA, ipA, ipB, trackerA);
-        configure_probe_observer(*clientB, ipB, ipA, trackerB);
+        responderA = std::make_unique<ProbeResponder>(*clientA, trackerA);
+        responderB = std::make_unique<ProbeResponder>(*clientB, trackerB);
+        configure_probe_observer(*clientA, ipA, ipB, trackerA, *responderA);
+        configure_probe_observer(*clientB, ipB, ipA, trackerB, *responderB);
 
         verify_chat_roundtrip(*clientA, *clientB, ipA, ipB,
                               "BASE_" + std::to_string(index));
@@ -2664,8 +3215,10 @@ bool run_scenario(int index,
                               "A -> B -> A", 30U, 0x1000U);
         (void)measure_latency(*clientB, trackerB, ipB, ipA,
                               "B -> A -> B", 30U, 0x2000U);
-        (void)measure_throughput(*clientA, trackerB, ipA, ipB, "A -> B");
-        (void)measure_throughput(*clientB, trackerA, ipB, ipA, "B -> A");
+        const auto baseline_a_to_b =
+            measure_throughput(*clientA, trackerB, ipA, ipB, "A -> B");
+        const auto baseline_b_to_a =
+            measure_throughput(*clientB, trackerA, ipB, ipA, "B -> A");
 
         trackerB.begin_data_run(1U);
         const auto maximum_packet = make_probe_packet(
@@ -2696,6 +3249,7 @@ bool run_scenario(int index,
         // identity while the server and the other authenticated peer stay up.
         clientA->set_integration_packet_observer({});
         clientB->set_integration_packet_observer({});
+        responderA.reset();
         clientA->stop();
         clientA.reset();
         std::this_thread::sleep_for(1'100ms);
@@ -2705,20 +3259,37 @@ bool run_scenario(int index,
             reconnect_policy.max_records = 8U;
             reconnect_policy.max_bytes = 1ULL << 30U;
             reconnect_policy.max_age = std::chrono::hours{24};
+        } else {
+            // Force a complete Schannel session replacement while leaving
+            // enough records for the authenticated drain/commit barrier.
+            reconnect_policy.max_records = 16'384U;
+            reconnect_policy.max_bytes = 64ULL << 20U;
+            reconnect_policy.max_age = std::chrono::hours{24};
+        }
+        ConnectionRecoveryOptions replacement_recovery{};
+        if (scenario.transport == TransportProtocol::Tcp) {
+            // Exercise the minimum accepted heartbeat timing during the
+            // deliberately delayed authenticated FREEZE regression below.
+            replacement_recovery.enabled = true;
+            replacement_recovery.heartbeat_interval = 100ms;
+            replacement_recovery.heartbeat_timeout = 200ms;
+            replacement_recovery.initial_retry_delay = 100ms;
+            replacement_recovery.maximum_retry_delay = 300ms;
         }
         clientA = std::make_unique<VpnClient>(
             real_adapter_ip, port, password,
             clientA_adapter, real_adapter_name,
             scenario.cipher, scenario.transport, reconnect_policy,
-            real_adapter_luid);
+            real_adapter_luid, replacement_recovery);
         start_client_with_timeout(*clientA, "Reconnected client A", 30s);
         require_test(wait_for_ip(*clientA, 10s),
                      "reconnected client did not receive an IP address");
         const std::string reconnected_ipA = clientA->local_ip();
+        responderA = std::make_unique<ProbeResponder>(*clientA, trackerA);
         configure_probe_observer(
-            *clientA, reconnected_ipA, ipB, trackerA);
+            *clientA, reconnected_ipA, ipB, trackerA, *responderA);
         configure_probe_observer(
-            *clientB, ipB, reconnected_ipA, trackerB);
+            *clientB, ipB, reconnected_ipA, trackerB, *responderB);
         verify_chat_roundtrip(
             *clientA, *clientB, reconnected_ipA, ipB,
             "RECONNECT_" + std::to_string(index));
@@ -2753,10 +3324,61 @@ bool run_scenario(int index,
         } else {
             require_test(!rotation_before.application_initiation_supported,
                          "Schannel unexpectedly advertised app-initiated rotation");
-            std::cout << "[ROTATION] TCP uses Schannel provider-managed TLS 1.3 "
-                         "key epochs; app-initiated KeyUpdate is unavailable.\n";
+            verify_tcp_session_replacement(
+                server, *clientA, *clientB, trackerA, trackerB,
+                reconnected_ipA, ipB, true);
+            const auto post_replacement_a_to_b = measure_throughput(
+                *clientA, trackerB, reconnected_ipA, ipB,
+                "post-replacement A -> B");
+            const auto post_replacement_b_to_a = measure_throughput(
+                *clientB, trackerA, ipB, reconnected_ipA,
+                "post-replacement B -> A");
+            require_test(
+                post_replacement_a_to_b.megabits_per_second >=
+                    baseline_a_to_b.megabits_per_second * 0.60,
+                "post-replacement A->B throughput regressed by more than 40%");
+            require_test(
+                post_replacement_b_to_a.megabits_per_second >=
+                    baseline_b_to_a.megabits_per_second * 0.60,
+                "post-replacement B->A throughput regressed by more than 40%");
+            std::cout << "[ROTATION] TCP uses deterministic full-session TLS "
+                         "renewal; app-initiated TLS KeyUpdate remains "
+                         "unavailable through Schannel.\n";
+            verify_post_activate_failure_fails_closed(
+                server, real_adapter_ip, port, password, real_adapter_name,
+                real_adapter_luid, scenario.cipher, index);
+
+            // The shutdown regression deliberately prevents a receiver from
+            // processing any authenticated records until its TCP receive
+            // window fills. Do not reuse the aggressive 200 ms heartbeat
+            // client from the handoff test: its watchdog is expected to close
+            // an intentionally stalled channel before a 300 ms backpressure
+            // observation can complete. Reconnect the source with recovery
+            // disabled so this case isolates server stop/write lock ordering
+            // without weakening production heartbeat liveness.
+            clientA->set_integration_packet_observer({});
+            responderA.reset();
+            clientA->stop();
+            clientA.reset();
+            require_test(
+                wait_for_condition(
+                    [&server]() {
+                        return server.integration_connected_client_count() == 1U;
+                    },
+                    5s),
+                "server did not retire the heartbeat-enabled handoff client");
+            clientA = std::make_unique<VpnClient>(
+                real_adapter_ip, port, password,
+                clientA_adapter, real_adapter_name,
+                scenario.cipher, scenario.transport,
+                secure::TrafficKeyRotationPolicy{}, real_adapter_luid);
+            start_client_with_timeout(
+                *clientA, "Backpressure source client", 30s);
+            require_test(wait_for_ip(*clientA, 10s),
+                         "backpressure source did not receive an IP address");
+            const std::string backpressure_source_ip = clientA->local_ip();
             verify_backpressured_server_shutdown(
-                server, *clientA, *clientB, reconnected_ipA, ipB);
+                server, *clientA, *clientB, backpressure_source_ip, ipB);
         }
 
         success = true;
@@ -2766,10 +3388,12 @@ bool run_scenario(int index,
 
     if (clientA) {
         clientA->set_integration_packet_observer({});
+        responderA.reset();
         clientA->stop();
     }
     if (clientB) {
         clientB->set_integration_packet_observer({});
+        responderB.reset();
         clientB->stop();
     }
     server.stop();

@@ -10,6 +10,7 @@
 #include <mswsock.h>
 
 #include "secure/SecureSocket.h"
+#include "secure/SchannelSocket.h"
 #include "secure/SharedSecret.h"
 #include "secure/WolfSslDatagramSocket.h"
 #include "security/FixedWindowRateLimiter.h"
@@ -180,7 +181,9 @@ using EndpointAction = std::function<void(secure::SecureSocket&)>;
 void run_authenticated_session(const std::string& client_password,
                                const std::string& server_password,
                                EndpointAction server_action,
-                               EndpointAction client_action) {
+                               EndpointAction client_action,
+                               const secure::TrafficKeyRotationPolicy server_policy = {},
+                               const secure::TrafficKeyRotationPolicy client_policy = {}) {
     Listener listener = make_listener();
     std::exception_ptr server_error;
 
@@ -195,7 +198,8 @@ void run_authenticated_session(const std::string& client_password,
             secure::SecureSocket tls{accepted.get(),
                                      server_password,
                                      true,
-                                     secure::CipherSuite::Aes256Gcm};
+                                     secure::CipherSuite::Aes256Gcm,
+                                     server_policy};
             (void)accepted.release();
             tls.handshake();
             server_action(tls);
@@ -211,7 +215,8 @@ void run_authenticated_session(const std::string& client_password,
         secure::SecureSocket tls{client.get(),
                                  client_password,
                                  false,
-                                 secure::CipherSuite::Aes256Gcm};
+                                 secure::CipherSuite::Aes256Gcm,
+                                 client_policy};
         (void)client.release();
         tls.handshake();
         client_action(tls);
@@ -1828,6 +1833,487 @@ void test_fixed_window_rate_limiter() {
             "rate limiter accounting changed unexpectedly");
 }
 
+void test_partial_tls_write_is_terminal() {
+    run_authenticated_session(
+        std::string{kPassword},
+        std::string{kPassword},
+        [](secure::SecureSocket& server) {
+            server.set_test_partial_write_failure_after(1U);
+            constexpr std::array<std::uint8_t, 8> payload{
+                0x10U, 0x20U, 0x30U, 0x40U,
+                0x50U, 0x60U, 0x70U, 0x80U};
+            bool injected_failure_seen = false;
+            try {
+                (void)server.send_record(
+                    0x78U, payload.data(),
+                    static_cast<std::uint16_t>(payload.size()));
+            } catch (const std::exception& error) {
+                injected_failure_seen =
+                    std::string_view{error.what()}.find(
+                        "partial ciphertext write failure") !=
+                    std::string_view::npos;
+            }
+            require(injected_failure_seen,
+                    "partial Schannel ciphertext failure was not injected");
+            require(server.native() == INVALID_SOCKET,
+                    "partially written TLS stream remained open");
+
+            bool reuse_rejected = false;
+            try {
+                (void)server.send_record(
+                    0x78U, payload.data(),
+                    static_cast<std::uint16_t>(payload.size()));
+            } catch (const std::exception&) {
+                reuse_rejected = true;
+            }
+            require(reuse_rejected,
+                    "partially written TLS stream was reusable");
+        },
+        [](secure::SecureSocket& client) {
+            std::array<std::uint8_t, 32> payload{};
+            std::uint8_t type = 0U;
+            bool truncated_stream_rejected = false;
+            try {
+                truncated_stream_rejected =
+                    client.recv_record(type, payload.data(), payload.size()) < 0;
+            } catch (const std::exception&) {
+                truncated_stream_rejected = true;
+            }
+            require(truncated_stream_rejected,
+                    "peer accepted a truncated TLS ciphertext record");
+        });
+}
+
+void test_schannel_explicit_record_deadlines() {
+    run_authenticated_session(
+        std::string{kPassword},
+        std::string{kPassword},
+        [](secure::SecureSocket& server) {
+            std::array<std::uint8_t, 16> request{};
+            std::uint8_t type = 0U;
+            const int size =
+                server.recv_record(type, request.data(), request.size());
+            require(type == 0x7AU && size == 1 && request[0] == 0xA5U,
+                    "deadline test request changed");
+            std::this_thread::sleep_for(std::chrono::milliseconds{350});
+            constexpr std::uint8_t response = 0x5AU;
+            require(server.send_record(0x7BU, &response, 1U) == 1,
+                    "deadline test response send failed");
+        },
+        [](secure::SecureSocket& client) {
+            constexpr std::uint8_t request = 0xA5U;
+            bool expired_send_rejected = false;
+            try {
+                (void)client.send_record_until(
+                    0x79U, &request, 1U,
+                    std::chrono::steady_clock::now() -
+                        std::chrono::milliseconds{1});
+            } catch (const std::exception& error) {
+                expired_send_rejected =
+                    std::string_view{error.what()}.find("deadline") !=
+                        std::string_view::npos ||
+                    std::string_view{error.what()}.find("timed out") !=
+                        std::string_view::npos;
+            }
+            require(expired_send_rejected,
+                    "expired Schannel write deadline was accepted");
+            require(client.send_record(0x7AU, &request, 1U) == 1,
+                    "deadline test request send failed");
+
+            std::array<std::uint8_t, 16> response{};
+            std::uint8_t type = 0U;
+            const auto started = std::chrono::steady_clock::now();
+            bool read_timed_out = false;
+            try {
+                (void)client.recv_record_until(
+                    type, response.data(), response.size(),
+                    started + std::chrono::milliseconds{150});
+            } catch (const std::exception& error) {
+                read_timed_out =
+                    std::string_view{error.what()}.find("read") !=
+                        std::string_view::npos &&
+                    std::string_view{error.what()}.find("timed out") !=
+                        std::string_view::npos;
+            }
+            const auto elapsed = std::chrono::steady_clock::now() - started;
+            require(read_timed_out,
+                    "stalled Schannel deadline-aware receive did not time out");
+            require(elapsed >= std::chrono::milliseconds{75} &&
+                        elapsed < std::chrono::milliseconds{500},
+                    "Schannel receive exceeded its explicit deadline window");
+
+            const int size =
+                client.recv_record(type, response.data(), response.size());
+            require(type == 0x7BU && size == 1 && response[0] == 0x5AU,
+                    "connection did not recover after a pre-read deadline");
+        });
+}
+
+void test_schannel_prospective_hard_limits() {
+    secure::TrafficKeyRotationPolicy record_policy{};
+    record_policy.max_records = 1U;
+    record_policy.max_bytes = 0U;
+    run_authenticated_session(
+        std::string{kPassword},
+        std::string{kPassword},
+        [&](secure::SecureSocket& server) {
+            std::array<std::uint8_t, 1> payload{};
+            std::uint8_t type = 0U;
+            require(server.recv_record(type, payload.data(), payload.size()) == 1,
+                    "hard record limit rejected the exact final record");
+        },
+        [&](secure::SecureSocket& client) {
+            const std::uint8_t payload = 0x41U;
+            require(client.send_record(0x51U, &payload, 1U) == 1,
+                    "hard record limit exact record failed");
+            bool rejected = false;
+            try {
+                (void)client.send_record(0x52U, &payload, 1U);
+            } catch (const std::exception&) {
+                rejected = true;
+            }
+            require(rejected, "record after the hard limit was transmitted");
+        },
+        secure::TrafficKeyRotationPolicy{},
+        record_policy);
+
+    secure::TrafficKeyRotationPolicy byte_policy{};
+    byte_policy.max_records = 0U;
+    byte_policy.max_bytes = 3U;
+    run_authenticated_session(
+        std::string{kPassword},
+        std::string{kPassword},
+        [&](secure::SecureSocket&) {},
+        [&](secure::SecureSocket& client) {
+            const std::array<std::uint8_t, 3> payload{1U, 2U, 3U};
+            require(client.send_record(0x53U, payload.data(),
+                                        static_cast<std::uint16_t>(payload.size())) ==
+                        static_cast<int>(payload.size()),
+                    "hard byte limit exact payload failed");
+            bool rejected = false;
+            try {
+                const std::uint8_t extra = 4U;
+                (void)client.send_record(0x54U, &extra, 1U);
+            } catch (const std::exception&) {
+                rejected = true;
+            }
+            require(rejected, "record crossing the hard byte limit was transmitted");
+        },
+        secure::TrafficKeyRotationPolicy{},
+        byte_policy);
+
+    secure::TrafficKeyRotationPolicy receive_policy{};
+    receive_policy.max_records = 0U;
+    receive_policy.max_bytes = 2U;
+    run_authenticated_session(
+        std::string{kPassword},
+        std::string{kPassword},
+        [&](secure::SecureSocket& server) {
+            std::array<std::uint8_t, 4> payload{};
+            std::uint8_t type = 0U;
+            bool crossing_rejected = false;
+            try {
+                (void)server.recv_record(type, payload.data(), payload.size());
+            } catch (const std::exception&) {
+                crossing_rejected = true;
+            }
+            require(crossing_rejected,
+                    "receiver accepted an announced record crossing its byte limit");
+            bool poisoned = false;
+            try {
+                (void)server.recv_record(type, payload.data(), payload.size());
+            } catch (const std::exception&) {
+                poisoned = true;
+            }
+            require(poisoned, "receiver remained reusable after a partial frame failure");
+        },
+        [&](secure::SecureSocket& client) {
+            const std::array<std::uint8_t, 3> payload{5U, 6U, 7U};
+            require(client.send_record(0x55U, payload.data(),
+                                       static_cast<std::uint16_t>(payload.size())) ==
+                        static_cast<int>(payload.size()),
+                    "unlimited sender could not provide crossing receive test");
+        },
+        receive_policy,
+        secure::TrafficKeyRotationPolicy{});
+}
+
+void test_direct_schannel_concurrent_limit_is_atomic() {
+    Listener listener = make_listener();
+    std::exception_ptr server_error;
+    std::thread server_thread{[&]() {
+        try {
+            SocketOwner accepted{::accept(listener.socket.get(), nullptr, nullptr)};
+            if (accepted.get() == INVALID_SOCKET) fail("accept failed");
+            set_socket_timeouts(accepted.get());
+            const auto password = std::span<const std::uint8_t>{
+                reinterpret_cast<const std::uint8_t*>(kPassword.data()),
+                kPassword.size()};
+            secure::SchannelSocket tls{
+                accepted.get(), password, true,
+                secure::CipherSuite::Aes256Gcm, {}};
+            tls.handshake();
+
+            std::array<std::uint8_t, 1> payload{};
+            std::uint8_t type = 0U;
+            require(tls.recv_record(type, payload.data(), payload.size()) == 1,
+                    "concurrent hard-limit test did not receive its one record");
+            require(type == 0x56U && payload[0] == 0xA6U,
+                    "concurrent hard-limit record changed in transit");
+            require(tls.recv_record(type, payload.data(), payload.size()) < 0,
+                    "a second concurrent record crossed the sender hard limit");
+            const auto stats = tls.rotation_stats();
+            require(stats.received_records == 1U && stats.received_bytes == 1U,
+                    "receiver accounting changed after concurrent limit test");
+            tls.shutdown();
+        } catch (...) {
+            server_error = std::current_exception();
+        }
+    }};
+
+    std::exception_ptr client_error;
+    try {
+        SocketOwner client = connect_client(listener.address);
+        set_socket_timeouts(client.get());
+        secure::TrafficKeyRotationPolicy policy{};
+        policy.max_records = 1U;
+        policy.max_bytes = 0U;
+        const auto password = std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t*>(kPassword.data()),
+            kPassword.size()};
+        secure::SchannelSocket tls{
+            client.get(), password, false,
+            secure::CipherSuite::Aes256Gcm, policy};
+        tls.handshake();
+
+        std::mutex start_mutex;
+        std::condition_variable start_cv;
+        bool start = false;
+        std::atomic<unsigned> successes{0U};
+        std::atomic<unsigned> rejections{0U};
+        std::exception_ptr unexpected_error;
+        std::mutex error_mutex;
+        const auto sender = [&]() {
+            {
+                std::unique_lock start_lock{start_mutex};
+                start_cv.wait(start_lock, [&]() { return start; });
+            }
+            constexpr std::uint8_t payload = 0xA6U;
+            try {
+                if (tls.send_record(0x56U, &payload, 1U) == 1) {
+                    successes.fetch_add(1U, std::memory_order_relaxed);
+                }
+            } catch (const std::exception& error) {
+                if (std::string_view{error.what()}.find("hard record/byte limit") !=
+                    std::string_view::npos) {
+                    rejections.fetch_add(1U, std::memory_order_relaxed);
+                } else {
+                    std::lock_guard error_lock{error_mutex};
+                    if (!unexpected_error) unexpected_error = std::current_exception();
+                }
+            } catch (...) {
+                std::lock_guard error_lock{error_mutex};
+                if (!unexpected_error) unexpected_error = std::current_exception();
+            }
+        };
+
+        std::thread first{sender};
+        std::thread second{sender};
+        {
+            std::lock_guard start_lock{start_mutex};
+            start = true;
+        }
+        start_cv.notify_all();
+        first.join();
+        second.join();
+        if (unexpected_error) std::rethrow_exception(unexpected_error);
+        require(successes.load(std::memory_order_relaxed) == 1U &&
+                    rejections.load(std::memory_order_relaxed) == 1U,
+                "concurrent direct Schannel senders did not reserve one hard-limit slot");
+        const auto stats = tls.rotation_stats();
+        require(stats.sent_records == 1U && stats.sent_bytes == 1U,
+                "concurrent direct Schannel send accounting crossed its limit");
+        tls.shutdown();
+    } catch (...) {
+        client_error = std::current_exception();
+    }
+
+    server_thread.join();
+    if (client_error || server_error) {
+        throw std::runtime_error(
+            "Concurrent direct Schannel hard-limit test failed (client: " +
+            exception_text(client_error) + "; server: " +
+            exception_text(server_error) + ")");
+    }
+}
+
+void test_partial_frame_deadline_is_terminal() {
+    Listener listener = make_listener();
+    std::exception_ptr server_error;
+    std::thread server_thread{[&]() {
+        try {
+            SocketOwner accepted{::accept(listener.socket.get(), nullptr, nullptr)};
+            if (accepted.get() == INVALID_SOCKET) fail("accept failed");
+            set_socket_timeouts(accepted.get());
+            const auto password = std::span<const std::uint8_t>{
+                reinterpret_cast<const std::uint8_t*>(kPassword.data()),
+                kPassword.size()};
+            secure::SchannelSocket tls{
+                accepted.get(), password, true,
+                secure::CipherSuite::Aes256Gcm, {}};
+            tls.handshake();
+            tls.set_test_plaintext_chunk_pause_after(
+                1U, std::chrono::milliseconds{350});
+
+            const std::vector<std::uint8_t> payload(65'535U, 0xC7U);
+            require(tls.send_record(
+                        0x57U, payload.data(),
+                        static_cast<std::uint16_t>(payload.size())) ==
+                        static_cast<int>(payload.size()),
+                    "partial-frame deadline source record was not sent");
+            tls.shutdown();
+        } catch (...) {
+            server_error = std::current_exception();
+        }
+    }};
+
+    std::exception_ptr client_error;
+    try {
+        SocketOwner client = connect_client(listener.address);
+        set_socket_timeouts(client.get());
+        const auto password = std::span<const std::uint8_t>{
+            reinterpret_cast<const std::uint8_t*>(kPassword.data()),
+            kPassword.size()};
+        secure::SchannelSocket tls{
+            client.get(), password, false,
+            secure::CipherSuite::Aes256Gcm, {}};
+        tls.handshake();
+
+        std::vector<std::uint8_t> payload(65'535U);
+        std::uint8_t type = 0U;
+        const auto started = std::chrono::steady_clock::now();
+        bool timed_out = false;
+        try {
+            (void)tls.recv_record_until(
+                type, payload.data(), payload.size(),
+                started + std::chrono::milliseconds{150});
+        } catch (const std::exception& error) {
+            const std::string_view message{error.what()};
+            timed_out = message.find("read") != std::string_view::npos &&
+                message.find("timed out") != std::string_view::npos;
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        require(timed_out,
+                "partial application frame did not expire at its deadline");
+        require(elapsed >= std::chrono::milliseconds{75} &&
+                    elapsed < std::chrono::milliseconds{500},
+                "partial-frame receive did not honor its bounded deadline");
+
+        bool reuse_rejected = false;
+        try {
+            (void)tls.recv_record(type, payload.data(), payload.size());
+        } catch (const std::exception& error) {
+            reuse_rejected = std::string_view{error.what()}.find(
+                                 "partial frame failure") !=
+                std::string_view::npos;
+        }
+        require(reuse_rejected,
+                "TLS stream remained reusable after partial-frame timeout");
+
+        // Keep the socket alive long enough for the peer's deliberately
+        // delayed remaining ciphertext to drain into Winsock. The second read
+        // above must still fail immediately from the terminal framing state.
+        std::this_thread::sleep_for(std::chrono::milliseconds{400});
+        tls.shutdown();
+    } catch (...) {
+        client_error = std::current_exception();
+    }
+
+    server_thread.join();
+    if (client_error || server_error) {
+        throw std::runtime_error(
+            "Partial-frame Schannel deadline test failed (client: " +
+            exception_text(client_error) + "; server: " +
+            exception_text(server_error) + ")");
+    }
+}
+
+void test_schannel_explicit_write_deadline_under_backpressure() {
+    Listener listener = make_listener();
+    std::exception_ptr server_error;
+    bool timed_out = false;
+    std::chrono::steady_clock::duration elapsed{};
+
+    std::thread server_thread{[&]() {
+        try {
+            SocketOwner accepted{::accept(listener.socket.get(), nullptr, nullptr)};
+            if (accepted.get() == INVALID_SOCKET) fail("accept failed");
+            set_socket_timeouts(accepted.get());
+            secure::SecureSocket tls{accepted.get(), std::string{kPassword}, true,
+                                     secure::CipherSuite::Aes256Gcm};
+            (void)accepted.release();
+            tls.handshake();
+
+            int send_buffer = 4'096;
+            require(::setsockopt(tls.native(), SOL_SOCKET, SO_SNDBUF,
+                                 reinterpret_cast<const char*>(&send_buffer),
+                                 sizeof(send_buffer)) == 0,
+                    "could not reduce the explicit-deadline send buffer");
+            const std::vector<std::uint8_t> payload(65'535U, 0x6CU);
+            const auto started = std::chrono::steady_clock::now();
+            const auto deadline = started + std::chrono::milliseconds{250};
+            try {
+                for (;;) {
+                    (void)tls.send_record_until(
+                        0x7CU, payload.data(),
+                        static_cast<std::uint16_t>(payload.size()), deadline);
+                }
+            } catch (const std::exception& error) {
+                elapsed = std::chrono::steady_clock::now() - started;
+                const std::string_view message{error.what()};
+                timed_out = message.find("write") != std::string_view::npos &&
+                    (message.find("deadline") != std::string_view::npos ||
+                     message.find("timed out") != std::string_view::npos);
+                if (!timed_out) throw;
+            }
+            tls.close();
+        } catch (...) {
+            server_error = std::current_exception();
+        }
+    }};
+
+    std::exception_ptr client_error;
+    try {
+        SocketOwner client = connect_client(listener.address);
+        int receive_buffer = 4'096;
+        require(::setsockopt(client.get(), SOL_SOCKET, SO_RCVBUF,
+                             reinterpret_cast<const char*>(&receive_buffer),
+                             sizeof(receive_buffer)) == 0,
+                "could not reduce the explicit-deadline receive buffer");
+        secure::SecureSocket tls{client.get(), std::string{kPassword}, false,
+                                 secure::CipherSuite::Aes256Gcm};
+        (void)client.release();
+        tls.handshake();
+        std::this_thread::sleep_for(std::chrono::milliseconds{700});
+        tls.close();
+    } catch (...) {
+        client_error = std::current_exception();
+    }
+
+    server_thread.join();
+    if (client_error || server_error) {
+        throw std::runtime_error(
+            "Explicit Schannel write-deadline test failed (client: " +
+            exception_text(client_error) + "; server: " +
+            exception_text(server_error) + ")");
+    }
+    require(timed_out,
+            "explicit Schannel write deadline did not stop backpressure");
+    require(elapsed >= std::chrono::milliseconds{125} &&
+                elapsed < std::chrono::milliseconds{700},
+            "explicit Schannel write deadline was outside its bounded window");
+}
+
 void test_schannel_application_write_deadline() {
     Listener listener = make_listener();
     std::exception_ptr server_error;
@@ -1914,6 +2400,12 @@ int main() {
         test_small_buffer_does_not_desynchronize_stream();
         test_concurrent_bidirectional_io();
         test_wrong_password_is_rejected_by_both_peers();
+        test_partial_tls_write_is_terminal();
+        test_schannel_explicit_record_deadlines();
+        test_schannel_prospective_hard_limits();
+        test_direct_schannel_concurrent_limit_is_atomic();
+        test_partial_frame_deadline_is_terminal();
+        test_schannel_explicit_write_deadline_under_backpressure();
         test_schannel_application_write_deadline();
         test_strict_dtls_profile_validation();
         test_short_dtls_psk_identities_are_rejected_safely();

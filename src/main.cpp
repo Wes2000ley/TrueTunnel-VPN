@@ -2354,8 +2354,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				}
 			} else if (is_connected) {
 				status_detail_storage = recovery_options.enabled
-					? "Encrypted traffic is flowing · recovery is armed"
-					: "Encrypted traffic is flowing";
+					? "Encrypted · key renewal + recovery armed"
+					: "Encrypted · automatic key renewal armed";
 			} else if (is_listening) {
 				status_detail_storage = "Ready for an authenticated peer";
 			} else if (is_connecting) {
@@ -2449,7 +2449,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				ImGui::Spacing();
 				ImGui::BulletText("Server listens for an authenticated peer; Client connects to one.");
 				ImGui::BulletText("Generate the shared key on Server, then paste it into Client.");
-				ImGui::BulletText("Use TCP for reliable streams or UDP for latency-sensitive traffic.");
+				ImGui::BulletText("TCP favors compatibility; UDP preserves latency-friendly datagrams.");
+				ImGui::BulletText("Both transports renew traffic keys automatically while connected.");
 				ImGui::BulletText("Client recovery is optional: 5s heartbeat, 15s timeout, capped retry delay.");
 				ImGui::BulletText("Minimize to keep TrueTunnel in the system tray.");
 				if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
@@ -3348,7 +3349,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						is_reconnecting
 							? "Fresh keys on reconnect"
 							: secure_session_active
-								? (native_tcp ? "Provider-managed" : "Automatic")
+								? (native_tcp ? "Automatic renewal" : "Automatic KeyUpdate")
 								: "Starts after authentication",
 						scale, secure_session_active);
 					if (gui_smoke_test &&

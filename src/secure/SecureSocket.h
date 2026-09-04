@@ -14,11 +14,14 @@
 #include "TrafficKeyRotation.h"
 
 #include <atomic>
+#include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <span>
 
 namespace secure {
 	class SchannelSocket;
@@ -58,11 +61,41 @@ namespace secure {
 		// Send a framed, protected record with an app-level type.
 		// Returns plaintext bytes sent; transport and protocol failures throw.
 		int send_record(uint8_t type, const uint8_t* data, uint16_t len);
+		// TCP-only absolute-deadline variants used by the bounded session
+		// handoff. They include time spent waiting for this wrapper's I/O lock.
+		int send_record_until(
+			uint8_t type,
+			const uint8_t* data,
+			uint16_t len,
+			std::chrono::steady_clock::time_point deadline);
 
 		// Returns the plaintext length, or -1 for closure/rejection, and sets type.
 		int recv_record(uint8_t& type, uint8_t* out, size_t cap);
+		int recv_record_until(
+			uint8_t& type,
+			uint8_t* out,
+			size_t cap,
+			std::chrono::steady_clock::time_point deadline);
 
 		[[nodiscard]] TrafficKeyRotationStats rotation_stats() const noexcept;
+
+		// TCP-only exporter-derived continuity material used to authenticate a
+		// make-before-break full-session replacement.  UDP has an in-place DTLS
+		// KeyUpdate path and intentionally does not expose this API.
+		[[nodiscard]] std::array<std::uint8_t, 32> continuity_binding() const;
+		[[nodiscard]] std::array<std::uint8_t, 32> replacement_proof(
+			std::span<const std::uint8_t> request_nonce,
+			std::span<const std::uint8_t> assigned_ipv4,
+			std::span<const std::uint8_t> new_binding) const;
+		[[nodiscard]] static std::array<std::uint8_t, 32> replacement_proof(
+			const std::array<std::uint8_t, 32>& old_binding,
+			const std::array<std::uint8_t, 32>& new_binding,
+			std::span<const std::uint8_t> request_nonce,
+			std::span<const std::uint8_t> assigned_ipv4);
+
+#ifdef TRUETUNNEL_SECURE_TRANSPORT_TEST
+		void set_test_partial_write_failure_after(std::size_t ciphertext_bytes);
+#endif
 
 		// Best-effort graceful protocol shutdown followed by socket closure.
 		// Safe to call concurrently with handshake/send/receive and idempotent
@@ -81,8 +114,8 @@ namespace secure {
 		std::unique_ptr<WolfSslDatagramSocket> wolfssl_;
 
 		std::mutex handshake_mutex_;
-		std::mutex send_mutex_;
-		std::mutex recv_mutex_;
+		std::timed_mutex send_mutex_;
+		std::timed_mutex recv_mutex_;
 		std::mutex close_mutex_;
 		TrafficKeyRotationPolicy rotation_policy_{};
 		bool handshake_attempted_{false};

@@ -11,6 +11,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <array>
+#include <algorithm>
 #include <cstdint>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -26,6 +27,7 @@
 #include <stdexcept>
 #include <string>
 #include <functional>		  //  ← ask() validator
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string_view>
@@ -142,7 +144,104 @@ constexpr uint8_t PACKET_TYPE_IP  = 0x01;
 constexpr uint8_t PACKET_TYPE_MSG = 0x02;
 constexpr uint8_t PACKET_TYPE_HEARTBEAT = 0x03;
 constexpr uint8_t PACKET_TYPE_HEARTBEAT_ACK = 0x04;
+// A replacement is a complete, separately authenticated TLS session.  It is
+// deliberately distinct from heartbeat and DTLS KeyUpdate controls.
+constexpr uint8_t PACKET_TYPE_SESSION_REPLACEMENT = 0x05;
+constexpr uint8_t PACKET_TYPE_SESSION_REPLACEMENT_ACK = 0x06;
+constexpr uint8_t PACKET_TYPE_SESSION_DRAIN_REQUEST = 0x07;
+constexpr uint8_t PACKET_TYPE_SESSION_DRAIN_ACK = 0x08;
+constexpr uint8_t PACKET_TYPE_SESSION_DRAIN_BARRIER = 0x09;
+constexpr uint8_t PACKET_TYPE_SESSION_REPLACEMENT_COMMIT = 0x0A;
+constexpr uint8_t PACKET_TYPE_SESSION_DRAIN_ABORT = 0x0B;
+// Explicit make-before-break decision phases.  These values are appended to
+// the public wire enum so old record meanings never change.
+constexpr uint8_t PACKET_TYPE_SESSION_REPLACEMENT_READY = 0x0C;
+constexpr uint8_t PACKET_TYPE_SESSION_REPLACEMENT_ACTIVATE = 0x0D;
+constexpr uint8_t PACKET_TYPE_SESSION_REPLACEMENT_COMMIT_ACK = 0x0E;
+constexpr uint8_t PACKET_TYPE_SESSION_REPLACEMENT_FREEZE = 0x0F;
+constexpr uint8_t PACKET_TYPE_SESSION_REPLACEMENT_FREEZE_ACK = 0x10;
 constexpr std::size_t kHeartbeatControlPayloadSize = 16U;
+
+constexpr std::uint8_t kSessionReplacementProtocolVersion = 2U;
+constexpr std::size_t kSessionReplacementNonceSize = 16U;
+constexpr std::size_t kSessionReplacementRequestSize =
+    1U + kSessionReplacementNonceSize + 4U + 32U;
+constexpr std::size_t kSessionReplacementAckSize =
+    1U + kSessionReplacementNonceSize;
+constexpr std::size_t kSessionDrainFrameSize = kSessionReplacementAckSize;
+
+struct SessionReplacementRequest {
+    std::array<std::uint8_t, kSessionReplacementNonceSize> nonce{};
+    std::array<std::uint8_t, 4> assigned_ipv4{};
+    std::array<std::uint8_t, 32> proof{};
+};
+
+[[nodiscard]] inline std::array<std::uint8_t,
+                                  kSessionReplacementRequestSize>
+encode_session_replacement_request(
+    const SessionReplacementRequest& request) noexcept {
+    std::array<std::uint8_t, kSessionReplacementRequestSize> bytes{};
+    bytes[0] = kSessionReplacementProtocolVersion;
+    std::copy(request.nonce.begin(), request.nonce.end(), bytes.begin() + 1U);
+    std::copy(request.assigned_ipv4.begin(), request.assigned_ipv4.end(),
+              bytes.begin() + 1U + kSessionReplacementNonceSize);
+    std::copy(request.proof.begin(), request.proof.end(),
+              bytes.begin() + 1U + kSessionReplacementNonceSize + 4U);
+    return bytes;
+}
+
+[[nodiscard]] inline bool decode_session_replacement_request(
+    const std::span<const std::uint8_t> bytes,
+    SessionReplacementRequest& request) noexcept {
+    if (bytes.size() != kSessionReplacementRequestSize ||
+        bytes[0] != kSessionReplacementProtocolVersion) {
+        return false;
+    }
+    request = {};
+    std::copy(bytes.begin() + 1U,
+              bytes.begin() + 1U + kSessionReplacementNonceSize,
+              request.nonce.begin());
+    std::copy(bytes.begin() + 1U + kSessionReplacementNonceSize,
+              bytes.begin() + 1U + kSessionReplacementNonceSize + 4U,
+              request.assigned_ipv4.begin());
+    std::copy(bytes.begin() + 1U + kSessionReplacementNonceSize + 4U,
+              bytes.end(), request.proof.begin());
+    return std::any_of(request.nonce.begin(), request.nonce.end(),
+                       [](const std::uint8_t value) { return value != 0U; });
+}
+
+[[nodiscard]] inline std::array<std::uint8_t, kSessionReplacementAckSize>
+encode_session_replacement_ack(
+    const std::array<std::uint8_t, kSessionReplacementNonceSize>& nonce) noexcept {
+    std::array<std::uint8_t, kSessionReplacementAckSize> bytes{};
+    bytes[0] = kSessionReplacementProtocolVersion;
+    std::copy(nonce.begin(), nonce.end(), bytes.begin() + 1U);
+    return bytes;
+}
+
+[[nodiscard]] inline bool decode_session_replacement_ack(
+    const std::span<const std::uint8_t> bytes,
+    std::array<std::uint8_t, kSessionReplacementNonceSize>& nonce) noexcept {
+    if (bytes.size() != kSessionReplacementAckSize ||
+        bytes[0] != kSessionReplacementProtocolVersion) {
+        return false;
+    }
+    std::copy(bytes.begin() + 1U, bytes.end(), nonce.begin());
+    return std::any_of(nonce.begin(), nonce.end(),
+                       [](const std::uint8_t value) { return value != 0U; });
+}
+
+[[nodiscard]] inline std::array<std::uint8_t, kSessionDrainFrameSize>
+encode_session_drain_frame(
+    const std::array<std::uint8_t, kSessionReplacementNonceSize>& nonce) noexcept {
+    return encode_session_replacement_ack(nonce);
+}
+
+[[nodiscard]] inline bool decode_session_drain_frame(
+    const std::span<const std::uint8_t> bytes,
+    std::array<std::uint8_t, kSessionReplacementNonceSize>& nonce) noexcept {
+    return decode_session_replacement_ack(bytes, nonce);
+}
 
 struct HeartbeatControlFrame {
     std::uint64_t sequence{0U};
@@ -236,8 +335,12 @@ inline bool ipv4_source_matches(const BYTE* packet,
 
 //— Packet pumps
 void tun_to_tls(WINTUN_SESSION_HANDLE session,
-                secure::SecureSocket* tls,
+                const std::function<std::shared_ptr<secure::SecureSocket>()>&
+                    tls_snapshot,
+                std::mutex& tls_write_mutex,
                 std::atomic<bool>& running,
+                const std::atomic<bool>* old_writes_blocked = nullptr,
+                const std::atomic<bool>* control_write_pending = nullptr,
                 HANDLE cancellation_event = nullptr);
 
 void tls_to_tun(WINTUN_SESSION_HANDLE session, secure::SecureSocket* tls, std::atomic<bool> &running, std::mutex &session_mutex) ;

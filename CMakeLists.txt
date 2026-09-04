@@ -210,6 +210,9 @@ if (BUILD_TESTING)
             ${VPN_SECURE_SOURCES}
             tests/SchannelSocketTest.cpp
     )
+    target_compile_definitions(vpn_secure_transport_test PRIVATE
+            TRUETUNNEL_SECURE_TRANSPORT_TEST
+    )
     target_include_directories(vpn_secure_transport_test PRIVATE
             ${CMAKE_SOURCE_DIR}/src
     )

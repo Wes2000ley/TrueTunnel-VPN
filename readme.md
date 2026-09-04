@@ -43,9 +43,42 @@ path are not available in the active build.
   plaintext. Schannel supplies encryption, authentication, ordering, replay
   protection, and processing of TLS 1.3 post-handshake messages.
 - Schannel does not expose a supported application-initiated TLS 1.3 KeyUpdate
-  API. Windows owns the native provider's internal traffic-key lifecycle;
-  TrueTunnel accepts and processes peer post-handshake updates and reports that
-  application-initiated rotation is unavailable for this backend.
+  API. TrueTunnel therefore renews TCP keys with a fresh, fully authenticated
+  TLS 1.3 session instead of claiming that an undocumented provider operation is
+  a KeyUpdate. Before opening that replacement session, the client sends an
+  authenticated `FREEZE` on OLD and waits for `FREEZE_ACK`; application writes
+  are paused for the bounded handoff window. This prevents the replacement
+  decision from racing with NEW authentication while keeping rollback safe.
+- TCP renewal begins with 20% policy headroom before one million application
+  records, 1 GiB of application payload, or one hour. A versioned HMAC proof
+  binds the exact OLD and NEW TLS exporters, a fresh nonce, and the assigned IP,
+  so authorization cannot be transplanted onto another replacement session.
+  The authenticated `FREEZE_ACK -> PREP_ACK -> DRAIN/BARRIER -> READY ->
+  ACTIVATE -> COMMIT -> COMMIT_ACK` transaction orders the cutover without
+  replacing the Wintun adapter or tunnel IP. The server queues application egress after `FREEZE` and
+  flushes it only after `COMMIT_ACK`; failures before `ACTIVATE` send an
+  authenticated abort and resume the intact OLD stream, while a post-`ACTIVATE`
+  ambiguity closes both generations and lets optional automatic recovery
+  establish a clean connection instead of risking split brain.
+- The client caps every application-write pause at 450 ms from `FREEZE` and
+  reserves the final 50 ms for rollback; the server independently caps the
+  corresponding freeze/drain/flush/commit state at 450 ms without extending
+  the deadline between phases. Those are
+  fail-fast implementation budgets and an E2E-enforced local/LAN target, not a
+  latency guarantee for an arbitrary network. Heartbeat grace is tied to the
+  same finite handoff deadline. The old continuity binding is erased and the
+  retired TLS session is closed. Reaching a hard limit without a safe replacement
+  fails closed.
+- Schannel checks the prospective record and byte total atomically with each
+  same-direction application operation, including overflow. A partial
+  application-frame read or any possibly partial TLS write makes that stream
+  terminal; an idle deadline before a new frame consumes bytes remains
+  recoverable.
+- The TCP client retains the uniformly random group key for replacement
+  handshakes, while a server retains it in either transport so it can authenticate
+  future peers. Retained storage is page-locked when Windows permits and always
+  wiped at teardown. UDP clients do not need a second handshake for DTLS
+  KeyUpdate, so they wipe their copy immediately after initial authentication.
 - The implementation handles fragmented and coalesced TLS input,
   `SECBUFFER_EXTRA`, incomplete records, post-handshake messages, and orderly
   `close_notify`.
@@ -53,6 +86,10 @@ path are not available in the active build.
   and configuration exchange. Each complete application write has a five-second
   deadline, so a peer that stops reading cannot pin a worker forever. Server
   shutdown also interrupts unauthenticated connections before joining workers.
+- Handoff control records use one absolute deadline per endpoint across lock waits,
+  queue flushing, Schannel encryption, and Winsock polling. Deadline-aware reads
+  clamp the socket poll to the remaining budget. A failed TCP write may have
+  emitted partial ciphertext, so TrueTunnel never reuses that TLS byte stream.
 - Temporary shared-key copies, TLS exporter bytes, derived keys, and proofs are
   explicitly cleared when no longer needed.
 
@@ -257,9 +294,12 @@ path are not available in the active build.
   of the shared key authenticates the peer through the exporter-bound proof.
 - An abnormal process termination can leave a randomly named, non-exportable
   `TrueTunnel-TLS-*` CNG key container behind; normal cleanup removes it.
-- Schannel's public API does not let this application force traffic-key updates;
-  if explicit application-timed rotation is a deployment requirement, use UDP
-  mode or reconnect the TCP session on the desired interval.
+- Schannel's public API does not let this application emit a TLS 1.3 KeyUpdate.
+  TCP instead performs a make-before-break full TLS renewal. This keeps the
+  logical tunnel persistent during a successful renewal, but it is not a promise
+  of uninterrupted service on a failed network: if renewal cannot finish before
+  the conservative hard limit, TrueTunnel closes the old session rather than
+  continuing indefinitely on over-age keys.
 - This project, its application framing, and its wolfSSL configuration have not
   been independently audited and make no FIPS validation or certification claim.
   This build is not the separate wolfSSL FIPS product and does not use wolfGuard's
@@ -289,7 +329,7 @@ This is the practical comparison, not a claim of cryptographic equivalence:
 |---|---|---|---|
 | Peer identity | One 256-bit group key; no per-peer revocation | Static Curve25519 public key per peer; optional extra PSK | Certificates, public-key signatures, PSKs, or EAP depending on policy |
 | Data protection | TLS 1.3 over TCP or DTLS 1.3 over UDP; AES-256-GCM/SHA-384 | Fixed Noise construction with Curve25519, ChaCha20-Poly1305, BLAKE2s, and HKDF | IKEv2 negotiates SAs; ESP protects data, with security depending on the selected transforms and policy |
-| Forward secrecy and rekey | Ephemeral TLS/DHE sessions; UDP forces KeyUpdate at 1M records, 1 GiB, or one hour; TCP rotation is Schannel-managed or requires reconnect | Automatic timed/message-count handshakes and key erasure | Ephemeral DH for IKE; IKE/Child SA rekeying, with Child-SA PFS depending on negotiated DH |
+| Forward secrecy and rekey | Ephemeral TLS/DHE sessions; UDP forces KeyUpdate and TCP performs a make-before-break full TLS renewal before 1M application records, 1 GiB, or one hour | Automatic timed/message-count handshakes and key erasure | Ephemeral DH for IKE; IKE/Child SA rekeying, with Child-SA PFS depending on negotiated DH |
 | Replay protection | TLS sequencing; DTLS record replay protection | Monotonic counters plus a sliding receive window | ESP sequence numbers and an anti-replay window when enabled (the normal default) |
 | Roaming/recovery | Optional authenticated heartbeat and bounded reconnect; no seamless endpoint migration or packet preservation | Built-in endpoint roaming, keepalives, retry, and rekey timers | MOBIKE and dead-peer/rekey machinery when implemented and configured |
 | Network/product integration | Windows-only Wintun, IPv4-only, custom control/framing, no independent audit | Small purpose-built cross-platform VPN protocol and mature implementations | Long-standing IETF suite with broad OS, enterprise identity, and policy integration; substantially more configuration complexity |
@@ -357,9 +397,12 @@ The non-administrative suite contains eight registered tests:
   wrong-password pre-admission rejection,
   concurrent bidirectional traffic, wrong-password rejection, dropped-handshake
   retransmission, short DTLS PSK identities, a stalled DTLS application-write
-  deadline, stalled and authenticated-I/O cancellation with concurrent idempotent close, failed-handshake non-retry
-  behavior, forced stateless-cookie secret rollover, and forced low-threshold
-  bidirectional DTLS traffic-key rotation;
+  deadline, explicit 150 ms Schannel reads and 250 ms backpressured Schannel
+  writes, stalled and authenticated-I/O cancellation with concurrent idempotent
+  close, failed-handshake non-retry behavior, prospective record/byte limit
+  boundaries, concurrent same-direction hard-limit reservation, terminal
+  partial-frame timeout handling, forced stateless-cookie secret rollover, and
+  forced low-threshold bidirectional DTLS traffic-key rotation;
 - `vpn_redirect_stream_test` verifies that unit-buffered error output and
   concurrent writers remain complete logical lines in the GUI callback and
   native test log;
@@ -373,8 +416,9 @@ The non-administrative suite contains eight registered tests:
   connects the real client TCP and UDP sockets to dynamic loopback listeners;
   verifies a probe reaches the configured address and exact port; makes a real
   DTLS client reject a dead first resolved IPv4 address and authenticate the
-  second; rejects embedded-NUL and malformed UTF-8 addresses; and rejects invalid
-  client, server, and controller ports;
+  second; rejects embedded-NUL and malformed UTF-8 addresses; validates canonical
+  session-replacement and authenticated FREEZE nonce framing; and rejects
+  invalid client, server, and controller ports;
 - `vpn_gui_visual_test` compiles the exact production ImGui dashboard into a
   separate executable without the administrator manifest or VPN-daemon startup.
   It proves that it is unelevated, renders Server/Client and TCP/UDP states at
@@ -449,8 +493,20 @@ Before TCP clients connect, 96 raw sockets hit the real listener and the test
 requires the pre-Schannel per-source worker cap to hold and recover.
 UDP reconnect uses an eight-record rotation threshold, requires at
 least one wolfSSL DTLS 1.3 KeyUpdate with zero failures, and proves traffic after
-the update. TCP records that Schannel owns its provider-managed key epochs and
-does not expose application-initiated KeyUpdate. The TCP scenario then stalls an
+the update. TCP uses the production make-before-break renewal with an explicit
+E2E policy threshold and the minimum accepted 100/200 ms heartbeat timing. It
+authenticates `FREEZE` on OLD before the NEW handshake, deliberately holds that
+phase beyond the ordinary heartbeat timeout, then injects a pre-`ACTIVATE`
+failure to prove bounded liveness grace and rollback, including queued-server
+egress recovery. A separate post-`ACTIVATE` fault case invokes the same
+production replacement path through an integration-only force hook while the
+policy remains at the minimum valid reserve; it proves that both TLS generations
+fail closed, the exact server mapping is removed, OLD cannot resume application
+traffic, and no Wintun device leaks. The successful path keeps strictly numbered
+traffic flowing in both directions, rejects loss, duplication, or reordering,
+enforces a 500 ms local interruption ceiling, verifies the tunnel IP plus Wintun
+GUID/LUID/device inventory do not change, and compares throughput after renewal
+with the pre-renewal baseline. The scenario then stalls an
 authenticated receiver, floods maximum-size encrypted tunnel frames until real
 Winsock backpressure stops progress, and requires server shutdown to interrupt
 the blocked TLS write within five seconds. A separate production-controller

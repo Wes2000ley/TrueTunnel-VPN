@@ -35,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -52,6 +53,10 @@ constexpr ULONGLONG kPasswordKdfIterations = 100'000ULL;
 constexpr std::array<std::uint8_t, 4> kAuthMagic{'T', 'T', 'A', '1'};
 constexpr std::string_view kPasswordSaltLabel = "TrueTunnel password KDF v1";
 constexpr std::string_view kProofLabel = "TrueTunnel password proof v1";
+constexpr std::string_view kContinuityLabel =
+    "TrueTunnel session continuity binding v1";
+constexpr std::string_view kReplacementProofLabel =
+    "TrueTunnel session replacement proof v2";
 
 enum class AuthMessage : std::uint8_t {
     ClientNonce = 1,
@@ -163,10 +168,11 @@ public:
          const std::span<const std::uint8_t> password,
          const bool is_server,
          const CipherSuite suite,
-         const TrafficKeyRotationPolicy)
+         const TrafficKeyRotationPolicy rotation_policy)
         : socket_{socket},
           is_server_{is_server},
-          suite_{suite} {
+          suite_{suite},
+          rotation_policy_{rotation_policy} {
         SecInvalidateHandle(&credential_);
         SecInvalidateHandle(&context_);
 
@@ -221,6 +227,11 @@ public:
 
             authenticate_password();
             wipe(password_);
+            established_ticks_.store(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count(),
+                std::memory_order_release);
             if (shutdown_started_.load(std::memory_order_acquire)) {
                 throw std::runtime_error("TLS connection was closed during authentication");
             }
@@ -240,10 +251,34 @@ public:
     int send_record(const std::uint8_t type,
                     const std::uint8_t* data,
                     const std::uint16_t length) {
+        return send_record_until(type, data, length,
+                                 std::chrono::steady_clock::now() +
+                                     kApplicationWriteTimeout);
+    }
+
+    int send_record_until(
+        const std::uint8_t type,
+        const std::uint8_t* data,
+        const std::uint16_t length,
+        const std::chrono::steady_clock::time_point deadline) {
         require_ready();
         if (length != 0U && data == nullptr) {
             throw std::invalid_argument("send_record received a null payload");
         }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("Schannel TLS application write timed out");
+        }
+
+        // Keep the prospective limit check, TLS write, and accounting in one
+        // critical section. Direct SchannelSocket callers need this guarantee
+        // even when SecureSocket is not providing an outer lock.
+        std::unique_lock<std::timed_mutex> accounting_lock{
+            send_accounting_mutex_, std::defer_lock};
+        if (!accounting_lock.try_lock_until(deadline)) {
+            throw std::runtime_error("Schannel TLS application write timed out");
+        }
+        require_ready();
+        enforce_hard_rotation_policy(/*sending=*/true, length);
 
         std::vector<std::uint8_t> frame(3U + static_cast<std::size_t>(length));
         frame[0] = type;
@@ -253,8 +288,9 @@ public:
         }
 
         try {
-            send_plaintext(frame);
+            send_plaintext(frame, deadline);
         } catch (...) {
+            application_write_poisoned_.store(true, std::memory_order_release);
             wipe(frame);
             throw;
         }
@@ -267,22 +303,90 @@ public:
     int recv_record(std::uint8_t& type,
                     std::uint8_t* output,
                     const std::size_t capacity) {
+        return recv_record_impl(type, output, capacity, {});
+    }
+
+    int recv_record_until(
+        std::uint8_t& type,
+        std::uint8_t* output,
+        const std::size_t capacity,
+        const std::chrono::steady_clock::time_point deadline) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("Schannel TLS application read timed out");
+        }
+        return recv_record_impl(type, output, capacity, deadline);
+    }
+
+    int recv_record_impl(
+        std::uint8_t& type,
+        std::uint8_t* output,
+        const std::size_t capacity,
+        const std::chrono::steady_clock::time_point deadline) {
         require_ready();
 
-        std::lock_guard receive_lock{receive_mutex_};
+        std::unique_lock<std::timed_mutex> receive_lock{
+            receive_mutex_, std::defer_lock};
+        if (deadline == std::chrono::steady_clock::time_point{}) {
+            receive_lock.lock();
+        } else if (!receive_lock.try_lock_until(deadline)) {
+            throw std::runtime_error("Schannel TLS application read timed out");
+        }
+        require_ready();
+        enforce_hard_rotation_policy(/*sending=*/false, 0U);
         std::array<std::uint8_t, 3> header{};
-        if (!read_plaintext_exact(header)) {
-            return -1;
+        std::size_t header_bytes_read = 0U;
+        try {
+            if (!read_plaintext_exact(header, deadline, &header_bytes_read)) {
+                if (header_bytes_read != 0U) {
+                    receive_poisoned_.store(true, std::memory_order_release);
+                }
+                return -1;
+            }
+        } catch (...) {
+            if (header_bytes_read != 0U) {
+                receive_poisoned_.store(true, std::memory_order_release);
+            }
+            throw;
         }
 
         type = header[0];
         const std::uint16_t length = decode_u16(header.data() + 1U);
+        try {
+            // The header is consumed before this check. A crossing record is
+            // terminal because accepting a later record would desynchronize
+            // the stream's framing and accounting.
+            enforce_hard_rotation_policy(/*sending=*/false, length);
+        } catch (...) {
+            receive_poisoned_.store(true, std::memory_order_release);
+            throw;
+        }
         std::vector<std::uint8_t> payload(length);
-        if (!read_plaintext_exact(payload)) {
+        std::size_t payload_bytes_read = 0U;
+        try {
+            if (!read_plaintext_exact(payload, deadline, &payload_bytes_read)) {
+                wipe(payload);
+                if (header_bytes_read != 0U || payload_bytes_read != 0U) {
+                    receive_poisoned_.store(true, std::memory_order_release);
+                }
+                return -1;
+            }
+        } catch (...) {
             wipe(payload);
-            return -1;
+            // An idle pre-frame timeout remains recoverable. Once this
+            // frame's header or payload has been consumed, retrying could
+            // reinterpret the remaining bytes, so fail closed.
+            if (header_bytes_read != 0U || payload_bytes_read != 0U) {
+                receive_poisoned_.store(true, std::memory_order_release);
+            }
+            throw;
         }
 
+        // Count the protected application record once its complete plaintext
+        // has been accepted, even when the caller supplied an undersized
+        // destination. The key-epoch guard must not be bypassable by asking
+        // for a rejected buffer size repeatedly.
+        received_records_.fetch_add(1U, std::memory_order_relaxed);
+        received_bytes_.fetch_add(length, std::memory_order_relaxed);
         if (static_cast<std::size_t>(length) > capacity ||
             (length != 0U && output == nullptr)) {
             wipe(payload);
@@ -294,6 +398,32 @@ public:
         wipe(payload);
         return static_cast<int>(length);
     }
+
+#ifdef TRUETUNNEL_SECURE_TRANSPORT_TEST
+    void set_test_partial_write_failure_after(
+        const std::size_t ciphertext_bytes) {
+        if (ciphertext_bytes == 0U) {
+            throw std::invalid_argument(
+                "Partial-write injection requires at least one ciphertext byte");
+        }
+        test_partial_write_bytes_remaining_.store(
+            ciphertext_bytes, std::memory_order_release);
+    }
+
+    void set_test_plaintext_chunk_pause_after(
+        const std::size_t completed_chunks,
+        const std::chrono::milliseconds pause) {
+        if (completed_chunks == 0U || pause <= std::chrono::milliseconds::zero()) {
+            throw std::invalid_argument(
+                "Plaintext chunk pause requires a positive chunk count and duration");
+        }
+        test_plaintext_chunk_pause_milliseconds_.store(
+            pause.count(),
+            std::memory_order_release);
+        test_plaintext_chunk_pause_after_.store(
+            completed_chunks, std::memory_order_release);
+    }
+#endif
 
     void shutdown() noexcept {
         if (shutdown_started_.exchange(true, std::memory_order_acq_rel)) {
@@ -356,6 +486,44 @@ public:
 private:
     friend class SchannelSocket;
 
+    void enforce_hard_rotation_policy(const bool sending,
+                                      const std::size_t payload_length) const {
+        const auto records = (sending ? sent_records_ : received_records_)
+                                 .load(std::memory_order_acquire);
+        const auto bytes = (sending ? sent_bytes_ : received_bytes_)
+                               .load(std::memory_order_acquire);
+        if (records == (std::numeric_limits<std::uint64_t>::max)() ||
+            payload_length >
+                (std::numeric_limits<std::uint64_t>::max)() - bytes) {
+            throw std::runtime_error(
+                "TLS traffic-key accounting limit reached; replacement required");
+        }
+        if ((rotation_policy_.max_records != 0U &&
+             records >= rotation_policy_.max_records) ||
+            (rotation_policy_.max_bytes != 0U &&
+             (bytes > rotation_policy_.max_bytes ||
+              payload_length > rotation_policy_.max_bytes - bytes))) {
+            throw std::runtime_error(
+                "TLS traffic-key hard record/byte limit reached; replacement required");
+        }
+        const auto established = established_ticks_.load(std::memory_order_acquire);
+        if (rotation_policy_.max_age > std::chrono::seconds::zero() &&
+            established > 0) {
+            const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            // Compare in whole seconds instead of converting an arbitrary
+            // caller-supplied duration to nanoseconds (which can overflow a
+            // signed 64-bit representation for very large policies).
+            if (now >= established &&
+                static_cast<std::uint64_t>(now - established) /
+                        1'000'000'000ULL >=
+                    static_cast<std::uint64_t>(rotation_policy_.max_age.count())) {
+                throw std::runtime_error(
+                    "TLS traffic-key hard age limit reached; replacement required");
+            }
+        }
+    }
+
     void require_ready() const {
         if (!handshake_complete_.load(std::memory_order_acquire)) {
             throw std::runtime_error("TLS handshake is not complete");
@@ -363,10 +531,22 @@ private:
         if (shutdown_started_.load(std::memory_order_acquire)) {
             throw std::runtime_error("TLS connection is shutting down");
         }
+        if (receive_poisoned_.load(std::memory_order_acquire)) {
+            throw std::runtime_error(
+                "TLS application stream is unusable after a partial frame failure");
+        }
+        if (application_write_poisoned_.load(std::memory_order_acquire)) {
+            throw std::runtime_error(
+                "TLS application stream is unusable after a failed record write");
+        }
     }
 
     void cleanup() noexcept {
         wipe(password_);
+        {
+            std::lock_guard continuity_lock{continuity_mutex_};
+            wipe(continuity_binding_);
+        }
         wipe(encrypted_input_);
         wipe(plaintext_input_);
         wipe(socket_read_buffer_);
@@ -608,11 +788,14 @@ private:
         return status == SEC_I_COMPLETE_NEEDED ? SEC_E_OK : SEC_I_CONTINUE_NEEDED;
     }
 
-    void send_context_output(SecBuffer& output) {
+    void send_context_output(
+        SecBuffer& output,
+        const std::chrono::steady_clock::time_point deadline = {}) {
         if (output.pvBuffer == nullptr || output.cbBuffer == 0U) {
             return;
         }
-        write_all({static_cast<const std::uint8_t*>(output.pvBuffer), output.cbBuffer});
+        write_all({static_cast<const std::uint8_t*>(output.pvBuffer), output.cbBuffer},
+                  false, deadline);
     }
 
     void preserve_extra(const SecBufferDesc& input,
@@ -884,6 +1067,26 @@ private:
         return hmac.finish();
     }
 
+    void derive_continuity_binding(
+        const std::array<std::uint8_t, 32>& exporter,
+        const std::array<std::uint8_t, 32>& client_nonce,
+        const std::array<std::uint8_t, 32>& server_nonce) {
+        HmacSha256 hmac{exporter.data(), exporter.size()};
+        hmac.update(kContinuityLabel.data(), kContinuityLabel.size());
+        hmac.update(client_nonce.data(), client_nonce.size());
+        hmac.update(server_nonce.data(), server_nonce.size());
+        const std::array<std::uint8_t, 2> suite_bytes{
+            static_cast<std::uint8_t>(kTlsAes256GcmSha384 >> 8U),
+            static_cast<std::uint8_t>(kTlsAes256GcmSha384 & 0xFFU)};
+        hmac.update(suite_bytes.data(), suite_bytes.size());
+        auto binding = hmac.finish();
+        {
+            std::lock_guard continuity_lock{continuity_mutex_};
+            continuity_binding_ = binding;
+        }
+        wipe(binding);
+    }
+
     void send_auth_message(const AuthMessage message,
                            const std::span<const std::uint8_t> payload) {
         if (payload.size() > (std::numeric_limits<std::uint16_t>::max)()) {
@@ -965,6 +1168,8 @@ private:
                     throw std::runtime_error("TrueTunnel password authentication failed");
                 }
 
+                derive_continuity_binding(exporter, client_nonce, server_nonce);
+
                 local_proof = make_proof(password_key,
                                          exporter,
                                          client_nonce,
@@ -1003,6 +1208,8 @@ private:
                 if (proof_mismatch) {
                     throw std::runtime_error("TrueTunnel password authentication failed");
                 }
+
+                derive_continuity_binding(exporter, client_nonce, server_nonce);
             }
         } catch (...) {
             wipe(exporter);
@@ -1022,14 +1229,35 @@ private:
         wipe(expected_proof);
     }
 
-    void send_plaintext(const std::span<const std::uint8_t> plaintext) {
-        std::lock_guard send_lock{send_mutex_};
-        const auto write_deadline = handshake_in_progress_
-                                        ? handshake_deadline_
-                                        : std::chrono::steady_clock::now() +
-                                              kApplicationWriteTimeout;
+    void send_plaintext(
+        const std::span<const std::uint8_t> plaintext,
+        const std::chrono::steady_clock::time_point deadline = {}) {
+        std::unique_lock<std::timed_mutex> send_lock{send_mutex_,
+                                                     std::defer_lock};
+        if (deadline == std::chrono::steady_clock::time_point{}) {
+            send_lock.lock();
+        } else if (std::chrono::steady_clock::now() >= deadline ||
+                   !send_lock.try_lock_until(deadline)) {
+            throw std::runtime_error("Schannel TLS application write timed out");
+        }
+        const auto write_deadline =
+            deadline != std::chrono::steady_clock::time_point{}
+                ? deadline
+                : (handshake_in_progress_
+                       ? handshake_deadline_
+                       : std::chrono::steady_clock::now() +
+                             kApplicationWriteTimeout);
         std::size_t offset = 0;
+#ifdef TRUETUNNEL_SECURE_TRANSPORT_TEST
+        std::size_t completed_chunks = 0U;
+#endif
         while (offset < plaintext.size()) {
+            if (std::chrono::steady_clock::now() >= write_deadline) {
+                throw std::runtime_error(
+                    handshake_in_progress_
+                        ? "Schannel TLS handshake timed out"
+                        : "Schannel TLS application write timed out");
+            }
             const std::size_t chunk_size = (std::min)(
                 plaintext.size() - offset,
                 static_cast<std::size_t>(stream_sizes_.cbMaximumMessage));
@@ -1088,17 +1316,41 @@ private:
             }
             wipe(encrypted);
             offset += chunk_size;
+#ifdef TRUETUNNEL_SECURE_TRANSPORT_TEST
+            ++completed_chunks;
+            auto pause_after = test_plaintext_chunk_pause_after_.load(
+                std::memory_order_acquire);
+            if (pause_after != 0U && completed_chunks >= pause_after &&
+                test_plaintext_chunk_pause_after_.compare_exchange_strong(
+                    pause_after, 0U, std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                const auto pause_ms =
+                    test_plaintext_chunk_pause_milliseconds_.exchange(
+                        0U, std::memory_order_acq_rel);
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds{pause_ms});
+            }
+#endif
         }
     }
 
     [[nodiscard]] bool read_plaintext_exact(
-        const std::span<std::uint8_t> output) {
+        const std::span<std::uint8_t> output,
+        const std::chrono::steady_clock::time_point deadline = {},
+        std::size_t* copied_out = nullptr) {
         std::size_t copied = 0;
+        if (copied_out != nullptr) {
+            *copied_out = 0U;
+        }
         while (copied < output.size()) {
+            if (deadline != std::chrono::steady_clock::time_point{} &&
+                std::chrono::steady_clock::now() >= deadline) {
+                throw std::runtime_error("Schannel TLS application read timed out");
+            }
             if (plaintext_offset_ == plaintext_input_.size()) {
                 wipe(plaintext_input_);
                 plaintext_offset_ = 0;
-                if (!decrypt_next_message()) {
+                if (!decrypt_next_message(deadline)) {
                     return false;
                 }
             }
@@ -1110,14 +1362,22 @@ private:
                         amount);
             plaintext_offset_ += amount;
             copied += amount;
+            if (copied_out != nullptr) {
+                *copied_out = copied;
+            }
         }
         return true;
     }
 
-    [[nodiscard]] bool decrypt_next_message() {
+    [[nodiscard]] bool decrypt_next_message(
+        const std::chrono::steady_clock::time_point deadline = {}) {
         for (;;) {
+            if (deadline != std::chrono::steady_clock::time_point{} &&
+                std::chrono::steady_clock::now() >= deadline) {
+                throw std::runtime_error("Schannel TLS application read timed out");
+            }
             if (encrypted_input_.empty()) {
-                if (!read_more_allow_eof(encrypted_input_)) {
+                if (!read_more_allow_eof(encrypted_input_, deadline)) {
                     return false;
                 }
             }
@@ -1139,7 +1399,7 @@ private:
             const SECURITY_STATUS status = ::DecryptMessage(&context_, &message, 0, nullptr);
             if (status == SEC_E_INCOMPLETE_MESSAGE) {
                 context_lock.unlock();
-                read_more(encrypted_input_);
+                read_more(encrypted_input_, deadline);
                 continue;
             }
             if (status == SEC_I_CONTEXT_EXPIRED) {
@@ -1173,7 +1433,7 @@ private:
                     token_begin, token_begin + token->cbBuffer);
                 wipe(encrypted_input_);
                 context_lock.unlock();
-                continue_post_handshake(std::move(post_handshake_input));
+                continue_post_handshake(std::move(post_handshake_input), deadline);
                 continue;
             }
             if (status != SEC_E_OK) {
@@ -1205,15 +1465,24 @@ private:
         }
     }
 
-    void continue_post_handshake(std::vector<std::uint8_t> input_bytes) {
+    void continue_post_handshake(
+        std::vector<std::uint8_t> input_bytes,
+        const std::chrono::steady_clock::time_point deadline = {}) {
         // Keep outgoing post-handshake tokens ordered with application TLS
         // records and prevent EncryptMessage from using a half-updated context.
-        std::lock_guard send_lock{send_mutex_};
+        std::unique_lock<std::timed_mutex> send_lock{send_mutex_,
+                                                     std::defer_lock};
+        if (deadline == std::chrono::steady_clock::time_point{}) {
+            send_lock.lock();
+        } else if (std::chrono::steady_clock::now() >= deadline ||
+                   !send_lock.try_lock_until(deadline)) {
+            throw std::runtime_error("Schannel TLS application read timed out");
+        }
         std::lock_guard context_lock{context_mutex_};
 
         for (;;) {
             if (input_bytes.empty()) {
-                read_more(input_bytes);
+                read_more(input_bytes, deadline);
             }
 
             SecBuffer input_buffers[2]{};
@@ -1237,10 +1506,10 @@ private:
 
             SECURITY_STATUS status = context_step(&input, output_desc);
             status = complete_auth_token_if_needed(status, output_desc);
-            send_context_output(output_buffer);
+            send_context_output(output_buffer, deadline);
 
             if (status == SEC_E_INCOMPLETE_MESSAGE) {
-                read_more(input_bytes);
+                read_more(input_bytes, deadline);
                 continue;
             }
 
@@ -1284,9 +1553,26 @@ private:
                                            : "Schannel TLS application write timed out");
             }
             const std::size_t remaining = bytes.size() - offset;
-            const int request = static_cast<int>((std::min)(
+            int request = static_cast<int>((std::min)(
                 remaining,
                 static_cast<std::size_t>((std::numeric_limits<int>::max)())));
+#ifdef TRUETUNNEL_SECURE_TRANSPORT_TEST
+            const auto injected_bytes_remaining =
+                test_partial_write_bytes_remaining_.load(
+                    std::memory_order_acquire);
+            const bool inject_partial_failure =
+                injected_bytes_remaining !=
+                (std::numeric_limits<std::size_t>::max)();
+            if (inject_partial_failure) {
+                if (injected_bytes_remaining == 0U) {
+                    throw std::runtime_error(
+                        "Injected Schannel partial ciphertext write failure");
+                }
+                request = static_cast<int>((std::min)(
+                    static_cast<std::size_t>(request),
+                    injected_bytes_remaining));
+            }
+#endif
             const int sent = ::send(socket_,
                                     reinterpret_cast<const char*>(bytes.data() + offset),
                                     request,
@@ -1301,7 +1587,7 @@ private:
                         throw std::runtime_error(
                             "TLS close notification would block");
                     }
-                    (void)wait_for_socket(/*writable=*/true);
+                    (void)wait_for_socket(/*writable=*/true, deadline);
                     continue;
                 }
                 throw_winsock_error("send");
@@ -1309,6 +1595,20 @@ private:
             if (sent == 0) {
                 throw std::runtime_error("send returned zero bytes");
             }
+#ifdef TRUETUNNEL_SECURE_TRANSPORT_TEST
+            if (inject_partial_failure) {
+                const auto sent_size = static_cast<std::size_t>(sent);
+                if (sent_size >= injected_bytes_remaining) {
+                    test_partial_write_bytes_remaining_.store(
+                        0U, std::memory_order_release);
+                    throw std::runtime_error(
+                        "Injected Schannel partial ciphertext write failure");
+                }
+                test_partial_write_bytes_remaining_.store(
+                    injected_bytes_remaining - sent_size,
+                    std::memory_order_release);
+            }
+#endif
             offset += static_cast<std::size_t>(sent);
         }
     }
@@ -1324,14 +1624,17 @@ private:
         }
     }
 
-    void read_more(std::vector<std::uint8_t>& destination) {
-        if (!read_more_allow_eof(destination)) {
+    void read_more(
+        std::vector<std::uint8_t>& destination,
+        const std::chrono::steady_clock::time_point deadline = {}) {
+        if (!read_more_allow_eof(destination, deadline)) {
             throw std::runtime_error("Peer closed the TLS connection");
         }
     }
 
     [[nodiscard]] bool read_more_allow_eof(
-        std::vector<std::uint8_t>& destination) {
+        std::vector<std::uint8_t>& destination,
+        const std::chrono::steady_clock::time_point deadline = {}) {
         if (destination.size() >= kMaximumBufferedTlsBytes) {
             throw std::runtime_error("TLS input exceeded the buffering limit");
         }
@@ -1344,6 +1647,10 @@ private:
                 std::chrono::steady_clock::now() >= handshake_deadline_) {
                 throw std::runtime_error("Schannel TLS handshake timed out");
             }
+            if (deadline != std::chrono::steady_clock::time_point{} &&
+                std::chrono::steady_clock::now() >= deadline) {
+                throw std::runtime_error("Schannel TLS application read timed out");
+            }
             const int received = ::recv(socket_,
                                         reinterpret_cast<char*>(socket_read_buffer_.data()),
                                         static_cast<int>(socket_read_buffer_.size()),
@@ -1354,7 +1661,7 @@ private:
                     continue;
                 }
                 if (error == WSAEWOULDBLOCK || error == WSAETIMEDOUT) {
-                    (void)wait_for_socket(/*writable=*/false);
+                    (void)wait_for_socket(/*writable=*/false, deadline);
                     continue;
                 }
                 throw_winsock_error("recv");
@@ -1373,7 +1680,9 @@ private:
         }
     }
 
-    [[nodiscard]] bool wait_for_socket(const bool writable) const {
+    [[nodiscard]] bool wait_for_socket(
+        const bool writable,
+        const std::chrono::steady_clock::time_point deadline = {}) const {
         fd_set read_set;
         fd_set write_set;
         FD_ZERO(&read_set);
@@ -1383,8 +1692,18 @@ private:
         } else {
             FD_SET(socket_, &read_set);
         }
+        long long poll_microseconds = kSocketPollMicroseconds;
+        if (deadline != std::chrono::steady_clock::time_point{}) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) return false;
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::microseconds>(deadline - now).count();
+            poll_microseconds = (std::min)(
+                poll_microseconds, (std::max)(1LL, remaining));
+        }
         timeval timeout{};
-        timeout.tv_usec = kSocketPollMicroseconds;
+        timeout.tv_sec = static_cast<long>(poll_microseconds / 1'000'000LL);
+        timeout.tv_usec = static_cast<long>(poll_microseconds % 1'000'000LL);
         const int ready = ::select(0,
                                    writable ? nullptr : &read_set,
                                    writable ? &write_set : nullptr,
@@ -1402,13 +1721,72 @@ private:
         TrafficKeyRotationStats stats{};
         stats.sent_records = sent_records_.load(std::memory_order_relaxed);
         stats.sent_bytes = sent_bytes_.load(std::memory_order_relaxed);
+        stats.received_records =
+            received_records_.load(std::memory_order_relaxed);
+        stats.received_bytes = received_bytes_.load(std::memory_order_relaxed);
+        const auto established = established_ticks_.load(std::memory_order_acquire);
+        if (established > 0) {
+            const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            stats.age_microseconds = static_cast<std::uint64_t>(
+                (now > established ? now - established : 0) / 1'000LL);
+        }
         stats.application_initiation_supported = false;
         return stats;
+    }
+
+    [[nodiscard]] std::array<std::uint8_t, 32> continuity_binding() const {
+        if (!handshake_complete_.load(std::memory_order_acquire)) {
+            throw std::runtime_error(
+                "TLS continuity binding is unavailable before authentication");
+        }
+        std::lock_guard continuity_lock{continuity_mutex_};
+        return continuity_binding_;
+    }
+
+    [[nodiscard]] std::array<std::uint8_t, 32> replacement_proof(
+        const std::span<const std::uint8_t> request_nonce,
+        const std::span<const std::uint8_t> assigned_ipv4,
+        const std::span<const std::uint8_t> new_binding) const {
+        require_ready();
+        std::lock_guard continuity_lock{continuity_mutex_};
+        return replacement_proof_impl(continuity_binding_, new_binding,
+                                      request_nonce, assigned_ipv4);
+    }
+
+    [[nodiscard]] static std::array<std::uint8_t, 32> replacement_proof(
+        const std::array<std::uint8_t, 32>& old_binding,
+        const std::array<std::uint8_t, 32>& new_binding,
+        const std::span<const std::uint8_t> request_nonce,
+        const std::span<const std::uint8_t> assigned_ipv4) {
+        return replacement_proof_impl(old_binding, new_binding, request_nonce,
+                                      assigned_ipv4);
+    }
+
+    [[nodiscard]] static std::array<std::uint8_t, 32>
+    replacement_proof_impl(
+        const std::span<const std::uint8_t> old_binding,
+        const std::span<const std::uint8_t> new_binding,
+        const std::span<const std::uint8_t> request_nonce,
+        const std::span<const std::uint8_t> assigned_ipv4) {
+        if (old_binding.size() != 32U || new_binding.size() != 32U ||
+            request_nonce.size() != 16U || assigned_ipv4.size() != 4U) {
+            throw std::invalid_argument(
+                "TLS replacement proof inputs have invalid sizes");
+        }
+        HmacSha256 hmac{old_binding.data(), old_binding.size()};
+        hmac.update(kReplacementProofLabel.data(),
+                    kReplacementProofLabel.size());
+        hmac.update(request_nonce.data(), request_nonce.size());
+        hmac.update(assigned_ipv4.data(), assigned_ipv4.size());
+        hmac.update(new_binding.data(), new_binding.size());
+        return hmac.finish();
     }
 
     SOCKET socket_{INVALID_SOCKET};
     bool is_server_{false};
     CipherSuite suite_{CipherSuite::Aes256Gcm};
+    TrafficKeyRotationPolicy rotation_policy_{};
     std::vector<std::uint8_t> password_;
 
     NCRYPT_PROV_HANDLE key_provider_{0};
@@ -1432,13 +1810,31 @@ private:
     std::size_t plaintext_offset_{0};
 
     std::mutex handshake_mutex_;
-    std::mutex send_mutex_;
-    std::mutex receive_mutex_;
+    std::timed_mutex send_mutex_;
+    // Serializes the prospective check with the corresponding application
+    // write. send_mutex_ also protects TLS context/output ordering, but is
+    // intentionally not used as the accounting lock by internal handshake
+    // traffic.
+    mutable std::timed_mutex send_accounting_mutex_;
+    std::timed_mutex receive_mutex_;
     std::mutex context_mutex_;
+    mutable std::mutex continuity_mutex_;
     std::atomic<bool> handshake_complete_{false};
     std::atomic<bool> shutdown_started_{false};
     std::atomic<std::uint64_t> sent_records_{0};
     std::atomic<std::uint64_t> sent_bytes_{0};
+    std::atomic<std::uint64_t> received_records_{0};
+    std::atomic<std::uint64_t> received_bytes_{0};
+    std::atomic<std::int64_t> established_ticks_{0};
+    std::atomic<bool> receive_poisoned_{false};
+    std::atomic<bool> application_write_poisoned_{false};
+    std::array<std::uint8_t, 32> continuity_binding_{};
+#ifdef TRUETUNNEL_SECURE_TRANSPORT_TEST
+    std::atomic<std::size_t> test_partial_write_bytes_remaining_{
+        (std::numeric_limits<std::size_t>::max)()};
+    std::atomic<std::size_t> test_plaintext_chunk_pause_after_{0U};
+    std::atomic<std::int64_t> test_plaintext_chunk_pause_milliseconds_{0};
+#endif
 };
 
 SchannelSocket::SchannelSocket(const SOCKET socket,
@@ -1461,10 +1857,26 @@ int SchannelSocket::send_record(const std::uint8_t type,
     return impl_->send_record(type, data, length);
 }
 
+int SchannelSocket::send_record_until(
+    const std::uint8_t type,
+    const std::uint8_t* data,
+    const std::uint16_t length,
+    const std::chrono::steady_clock::time_point deadline) {
+    return impl_->send_record_until(type, data, length, deadline);
+}
+
 int SchannelSocket::recv_record(std::uint8_t& type,
                                 std::uint8_t* output,
                                 const std::size_t capacity) {
     return impl_->recv_record(type, output, capacity);
+}
+
+int SchannelSocket::recv_record_until(
+    std::uint8_t& type,
+    std::uint8_t* output,
+    const std::size_t capacity,
+    const std::chrono::steady_clock::time_point deadline) {
+    return impl_->recv_record_until(type, output, capacity, deadline);
 }
 
 void SchannelSocket::shutdown() noexcept {
@@ -1474,5 +1886,38 @@ void SchannelSocket::shutdown() noexcept {
 TrafficKeyRotationStats SchannelSocket::rotation_stats() const noexcept {
     return impl_->rotation_stats();
 }
+
+std::array<std::uint8_t, 32> SchannelSocket::continuity_binding() const {
+    return impl_->continuity_binding();
+}
+
+std::array<std::uint8_t, 32> SchannelSocket::replacement_proof(
+    const std::span<const std::uint8_t> request_nonce,
+    const std::span<const std::uint8_t> assigned_ipv4,
+    const std::span<const std::uint8_t> new_binding) const {
+    return impl_->replacement_proof(request_nonce, assigned_ipv4, new_binding);
+}
+
+std::array<std::uint8_t, 32> SchannelSocket::replacement_proof(
+    const std::array<std::uint8_t, 32>& old_binding,
+    const std::array<std::uint8_t, 32>& new_binding,
+    const std::span<const std::uint8_t> request_nonce,
+    const std::span<const std::uint8_t> assigned_ipv4) {
+    return Impl::replacement_proof(old_binding, new_binding, request_nonce,
+                                   assigned_ipv4);
+}
+
+#ifdef TRUETUNNEL_SECURE_TRANSPORT_TEST
+void SchannelSocket::set_test_partial_write_failure_after(
+    const std::size_t ciphertext_bytes) {
+    impl_->set_test_partial_write_failure_after(ciphertext_bytes);
+}
+
+void SchannelSocket::set_test_plaintext_chunk_pause_after(
+    const std::size_t completed_chunks,
+    const std::chrono::milliseconds pause) {
+    impl_->set_test_plaintext_chunk_pause_after(completed_chunks, pause);
+}
+#endif
 
 } // namespace secure

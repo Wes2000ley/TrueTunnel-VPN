@@ -4,6 +4,7 @@
 //  ──────────────────────────────────────────────────────────────────────────────
 
 #include <array>
+#include <algorithm>
 
 
 // ——— System / library ——————————————————————————————————————————
@@ -15,6 +16,7 @@
 
 #include "secure/SecureSocket.h"
 #include "secure/SharedSecret.h"
+#include "secure/CngUtils.h"
 
 #include <string>
 #include <memory>
@@ -30,6 +32,7 @@
 #include <iostream>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -51,6 +54,85 @@
 
 namespace {
 std::string peer_source_from_addr(const sockaddr_storage& addr, int len);
+
+constexpr std::size_t kMaximumPendingHandoffRecords = 256U;
+constexpr std::size_t kMaximumPendingHandoffBytes =
+    256U * secure::kMaximumDatagramPayloadSize;
+// FREEZE starts this single finite server-side budget before NEW is accepted.
+// The client has the same 450 ms outer bound and reserves its final 50 ms for
+// authenticated ABORT/local publication.  No phase may extend this deadline.
+constexpr auto kTcpHandoffServerBudget = std::chrono::milliseconds{450};
+constexpr auto kTcpHandoffRecoveryFlushBudget =
+    std::chrono::milliseconds{50};
+
+[[nodiscard]] bool enqueue_pending_handoff_record(
+    const std::shared_ptr<VpnServerPendingOutbound>& pending,
+    const std::uint8_t type,
+    const std::uint8_t* payload,
+    const std::size_t payload_size) noexcept {
+    if (!pending || (payload_size != 0U && payload == nullptr) ||
+        payload_size > secure::kMaximumDatagramPayloadSize) {
+        return false;
+    }
+    try {
+        std::lock_guard lock{pending->mutex};
+        if (pending->records.size() >= kMaximumPendingHandoffRecords ||
+            pending->bytes > kMaximumPendingHandoffBytes - payload_size) {
+            return false;
+        }
+        VpnServerPendingRecord record{};
+        record.type = type;
+        if (payload_size != 0U) {
+            record.payload.assign(payload, payload + payload_size);
+        }
+        pending->bytes += payload_size;
+        pending->records.push_back(std::move(record));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+[[nodiscard]] bool flush_pending_handoff_records(
+    const std::shared_ptr<VpnServerPendingOutbound>& pending,
+    const std::shared_ptr<secure::SecureSocket>& tls,
+    const std::optional<std::chrono::steady_clock::time_point> deadline =
+        std::nullopt) noexcept {
+    if (!pending || !tls) return true;
+    try {
+        // Keep the bounded queue locked while flushing. Every caller already
+        // owns the per-client write mutex, so producers cannot enqueue behind
+        // this barrier. Remove each record only after its send succeeds; if a
+        // write fails, the unsent suffix remains available to the rollback.
+        std::lock_guard lock{pending->mutex};
+        while (!pending->records.empty()) {
+            if (deadline && std::chrono::steady_clock::now() >= *deadline) {
+                return false;
+            }
+            const auto& record = pending->records.front();
+            const int sent = deadline
+                ? tls->send_record_until(
+                      record.type, record.payload.data(),
+                      static_cast<std::uint16_t>(record.payload.size()),
+                      *deadline)
+                : tls->send_record(
+                      record.type, record.payload.data(),
+                      static_cast<std::uint16_t>(record.payload.size()));
+            if (sent !=
+                static_cast<int>(record.payload.size())) {
+                return false;
+            }
+            pending->bytes -= record.payload.size();
+            pending->records.pop_front();
+        }
+        // bytes is decremented with each successful record; retain the
+        // invariant explicitly in case the queue representation changes.
+        pending->bytes = 0U;
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -79,6 +161,23 @@ VpnServer::VpnServer(int                port,
         throw std::invalid_argument("VPN server port is out of range");
     }
     secure::require_valid_shared_secret(password_);
+    if (transport_ == TransportProtocol::Tcp &&
+        !secure::is_valid_tcp_rotation_policy(rotation_policy_)) {
+        throw std::invalid_argument(
+            "VPN server TCP rotation policy leaves no usable handoff reserve");
+    }
+    password_page_locked_ = !password_.empty() &&
+        ::VirtualLock(password_.data(), password_.size()) != FALSE;
+    if (!password_.empty() && !password_page_locked_) {
+        // A server must retain the group credential to authenticate future
+        // peers and replacement sessions. Wiping remains guaranteed even on
+        // systems where the working-set privilege prevents page locking.
+        try {
+            std::cerr << "[WARN] Could not page-lock the server VPN credential; "
+                         "shutdown will still wipe it securely\n";
+        } catch (...) {
+        }
+    }
 }
 
 VpnServer::~VpnServer() { stop(); }
@@ -118,6 +217,24 @@ void VpnServer::stop()
     std::lock_guard<std::mutex> lifecycle_guard(lifecycle_mutex_);
     std::cout << "[INFO] Stopping VPN server; notifying clients\n";
     running_ = false;
+
+    // Wake replacement handlers that are waiting on a per-client drain
+    // condition before joining TCP workers. The running predicate is checked
+    // by those waits, so shutdown does not incur the normal three-second
+    // handoff deadline.
+    {
+        std::vector<std::shared_ptr<std::condition_variable>> handoff_waiters;
+        {
+            std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            handoff_waiters.reserve(client_map_.size());
+            for (const auto& [_, entry] : client_map_) {
+                if (entry.handoff_cv) handoff_waiters.push_back(entry.handoff_cv);
+            }
+        }
+        for (const auto& cv : handoff_waiters) {
+            cv->notify_all();
+        }
+    }
 
     const auto close_authenticated_clients = [this]() {
         std::vector<std::shared_ptr<secure::SecureSocket>> clients;
@@ -336,9 +453,14 @@ void VpnServer::stop()
               << chat_fanout.rejected << " rate-limited\n";
 
     if (!password_.empty()) {
-        ::SecureZeroMemory(password_.data(), password_.size());
-        password_.clear();
-        password_.shrink_to_fit();
+        char* const password_bytes = password_.data();
+        const std::size_t password_size = password_.size();
+        ::SecureZeroMemory(password_bytes, password_size);
+        if (password_page_locked_) {
+            (void)::VirtualUnlock(password_bytes, password_size);
+        }
+        password_page_locked_ = false;
+        std::string{}.swap(password_);
     }
     std::cout << "[✓] Server shutdown complete\n";
 }
@@ -361,6 +483,27 @@ void VpnServer::set_integration_reject_authenticated_clients(
     const std::uint32_t count) noexcept {
     integration_reject_authenticated_clients_.store(
         count, std::memory_order_release);
+}
+
+void VpnServer::set_integration_fail_next_session_replacement_commit(
+    const bool fail) noexcept {
+    integration_fail_next_session_replacement_commit_.store(
+        fail, std::memory_order_release);
+}
+
+void VpnServer::set_integration_fail_next_session_replacement_after_activate(
+    const bool fail) noexcept {
+    integration_fail_next_session_replacement_after_activate_.store(
+        fail, std::memory_order_release);
+}
+
+void VpnServer::set_integration_session_replacement_freeze_delay(
+    const std::chrono::milliseconds delay) noexcept {
+    const auto bounded = (std::clamp)(
+        delay, std::chrono::milliseconds::zero(),
+        kTcpHandoffServerBudget - std::chrono::milliseconds{100});
+    integration_session_replacement_freeze_delay_ms_.store(
+        bounded.count(), std::memory_order_release);
 }
 
 void VpnServer::integration_disconnect_all_clients() noexcept {
@@ -1002,7 +1145,15 @@ void VpnServer::heartbeatWatchdogEntry() {
     struct Snapshot {
         std::string ip;
         std::shared_ptr<secure::SecureSocket> tls;
+        std::shared_ptr<std::timed_mutex> write_mutex;
         std::shared_ptr<PeerHeartbeatState> heartbeat;
+        std::shared_ptr<std::atomic<bool>> replacement_preparing;
+        std::shared_ptr<std::atomic<bool>> draining;
+        std::shared_ptr<std::atomic<bool>> drain_barrier_sent;
+        std::shared_ptr<std::atomic<std::int64_t>> drain_deadline_ticks;
+        std::shared_ptr<std::mutex> handoff_mutex;
+        std::shared_ptr<std::condition_variable> handoff_cv;
+        std::shared_ptr<VpnServerPendingOutbound> pending_outbound;
     };
 
     while (running_.load(std::memory_order_acquire)) {
@@ -1019,13 +1170,132 @@ void VpnServer::heartbeatWatchdogEntry() {
             std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
             clients.reserve(client_map_.size());
             for (const auto& [ip, entry] : client_map_) {
-                clients.push_back(Snapshot{ip, entry.tls, entry.heartbeat});
+                clients.push_back(Snapshot{ip, entry.tls, entry.write_mutex,
+                                           entry.heartbeat,
+                                           entry.replacement_preparing,
+                                           entry.draining,
+                                           entry.drain_barrier_sent,
+                                           entry.drain_deadline_ticks,
+                                           entry.handoff_mutex,
+                                           entry.handoff_cv,
+                                           entry.pending_outbound});
             }
         }
 
         const auto now = std::chrono::steady_clock::now();
+        const auto now_ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            now.time_since_epoch()).count();
         for (const auto& client : clients) {
             if (!client.tls || !client.heartbeat) continue;
+            const bool preparation_active =
+                client.replacement_preparing &&
+                client.replacement_preparing->load(
+                    std::memory_order_acquire);
+            const bool drain_active = client.draining &&
+                client.draining->load(std::memory_order_acquire);
+            if ((preparation_active || drain_active) &&
+                client.drain_deadline_ticks &&
+                client.drain_deadline_ticks->load(std::memory_order_acquire) > 0 &&
+                now_ticks >= client.drain_deadline_ticks->load(
+                                  std::memory_order_acquire)) {
+                bool drain_still_owned = false;
+                {
+                    std::shared_lock<std::shared_mutex> map_lock(
+                        client_map_mutex_);
+                    const auto it = client_map_.find(client.ip);
+                    drain_still_owned =
+                        it != client_map_.end() &&
+                        it->second.tls == client.tls &&
+                        it->second.write_mutex == client.write_mutex &&
+                        it->second.pending_outbound == client.pending_outbound &&
+                        it->second.replacement_preparing ==
+                            client.replacement_preparing &&
+                        it->second.draining == client.draining &&
+                        it->second.drain_deadline_ticks ==
+                            client.drain_deadline_ticks &&
+                        it->second.handoff_mutex == client.handoff_mutex &&
+                        (it->second.replacement_preparing->load(
+                             std::memory_order_acquire) ||
+                         it->second.draining->load(
+                             std::memory_order_acquire));
+                }
+                if (drain_still_owned && client.handoff_mutex &&
+                    client.handoff_cv) {
+                    std::unique_lock<std::timed_mutex> drain_lock{
+                        *client.write_mutex, std::defer_lock};
+                    if (!drain_lock.try_lock_for(
+                            std::chrono::milliseconds{100})) {
+                        continue;
+                    }
+                    // Revalidate after taking the write lock; a replacement
+                    // may have committed while the watchdog was acquiring it.
+                    std::unique_lock handoff_lock{*client.handoff_mutex};
+                    std::unique_lock<std::shared_mutex> map_lock(
+                        client_map_mutex_);
+                    const auto current = client_map_.find(client.ip);
+                    const auto revalidated_now_ticks =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+                    if (current != client_map_.end() &&
+                        current->second.tls == client.tls &&
+                        current->second.write_mutex == client.write_mutex &&
+                        current->second.pending_outbound ==
+                            client.pending_outbound &&
+                        current->second.replacement_preparing ==
+                            client.replacement_preparing &&
+                        current->second.draining == client.draining &&
+                        current->second.drain_deadline_ticks ==
+                            client.drain_deadline_ticks &&
+                        current->second.handoff_mutex ==
+                            client.handoff_mutex &&
+                        (current->second.replacement_preparing->load(
+                             std::memory_order_acquire) ||
+                         current->second.draining->load(
+                             std::memory_order_acquire)) &&
+                        current->second.drain_deadline_ticks->load(
+                            std::memory_order_acquire) > 0 &&
+                        revalidated_now_ticks >=
+                            current->second.drain_deadline_ticks->load(
+                                std::memory_order_acquire)) {
+                        current->second.drain_nonce.fill(0U);
+                        current->second.drain_deadline_ticks->store(
+                            0, std::memory_order_release);
+                        current->second.replacement_preparing->store(
+                            false, std::memory_order_release);
+                        current->second.draining->store(
+                            false, std::memory_order_release);
+                        current->second.drain_barrier_sent->store(
+                            false, std::memory_order_release);
+                        if (current->second.heartbeat) {
+                            std::lock_guard heartbeat_lock{
+                                current->second.heartbeat->mutex};
+                            current->second.heartbeat->handoff_deadline = {};
+                            if (current->second.heartbeat->participating) {
+                                const auto timeout =
+                                    current->second.heartbeat->timeout;
+                                current->second.heartbeat->deadline =
+                                    std::chrono::steady_clock::now() +
+                                    (timeout >
+                                             std::chrono::milliseconds::zero()
+                                         ? timeout
+                                         : std::chrono::seconds{1});
+                            }
+                        }
+                        handoff_lock.unlock();
+                        client.handoff_cv->notify_all();
+                        map_lock.unlock();
+                        if (!flush_pending_handoff_records(
+                                client.pending_outbound, client.tls,
+                                std::chrono::steady_clock::now() +
+                                    kTcpHandoffRecoveryFlushBudget)) {
+                            std::cerr << "[!] Failed to flush queued records "
+                                         "after expired TCP/TLS handoff\n";
+                            client.tls->close();
+                        }
+                    }
+                }
+            }
             bool expired = false;
             {
                 std::lock_guard<std::mutex> heartbeat_lock(
@@ -1199,6 +1469,511 @@ void VpnServer::udpDispatchLoop() {
 // ───────────────────────────────────────────────────────────────────────────────
 //  private – per-client handling
 // ───────────────────────────────────────────────────────────────────────────────
+bool VpnServer::acceptTcpSessionReplacement(
+    const std::shared_ptr<secure::SecureSocket>& tls,
+    const std::span<const std::uint8_t> payload,
+    std::string& assigned_ip,
+    std::string& client_id) {
+    if (!tls) return false;
+
+    struct SensitiveBytesGuard final {
+        std::uint8_t* bytes;
+        std::size_t size;
+        ~SensitiveBytesGuard() noexcept {
+            if (bytes != nullptr && size != 0U) {
+                ::SecureZeroMemory(bytes, size);
+            }
+        }
+    };
+
+    SessionReplacementRequest request{};
+    SensitiveBytesGuard request_nonce_guard{
+        request.nonce.data(), request.nonce.size()};
+    SensitiveBytesGuard request_proof_guard{
+        request.proof.data(), request.proof.size()};
+    if (!decode_session_replacement_request(payload, request)) return false;
+
+    char ip_text[INET_ADDRSTRLEN]{};
+    IN_ADDR assigned_address{};
+    std::memcpy(&assigned_address.S_un.S_addr,
+                request.assigned_ipv4.data(), request.assigned_ipv4.size());
+    if (::inet_ntop(AF_INET, &assigned_address, ip_text,
+                    sizeof(ip_text)) == nullptr) {
+        return false;
+    }
+    assigned_ip = ip_text;
+
+    std::shared_ptr<secure::SecureSocket> old_tls;
+    std::shared_ptr<std::timed_mutex> old_write_mutex;
+    std::shared_ptr<std::shared_timed_mutex> old_ingress_gate;
+    std::shared_ptr<std::atomic<bool>> old_replacement_preparing;
+    std::shared_ptr<std::atomic<bool>> old_draining;
+    std::shared_ptr<std::atomic<bool>> old_drain_barrier_sent;
+    std::shared_ptr<std::atomic<std::int64_t>> old_drain_deadline_ticks;
+    std::shared_ptr<std::mutex> old_handoff_mutex;
+    std::shared_ptr<std::condition_variable> old_handoff_cv;
+    std::shared_ptr<PeerHeartbeatState> old_heartbeat;
+    std::shared_ptr<VpnServerPendingOutbound> pending_outbound;
+    std::array<std::uint8_t, 32> old_binding{};
+    std::array<std::uint8_t, 32> new_binding{};
+    SensitiveBytesGuard old_binding_guard{
+        old_binding.data(), old_binding.size()};
+    SensitiveBytesGuard new_binding_guard{
+        new_binding.data(), new_binding.size()};
+    {
+        std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto it = client_map_.find(assigned_ip);
+        if (it == client_map_.end() || !it->second.tls ||
+            it->second.tls == tls) {
+            return false;
+        }
+        old_tls = it->second.tls;
+        old_write_mutex = it->second.write_mutex;
+        old_ingress_gate = it->second.ingress_gate;
+        old_replacement_preparing = it->second.replacement_preparing;
+        old_draining = it->second.draining;
+        old_drain_barrier_sent = it->second.drain_barrier_sent;
+        old_drain_deadline_ticks = it->second.drain_deadline_ticks;
+        old_handoff_mutex = it->second.handoff_mutex;
+        old_handoff_cv = it->second.handoff_cv;
+        old_heartbeat = it->second.heartbeat;
+        pending_outbound = it->second.pending_outbound;
+        client_id = it->second.client_id;
+        old_binding = it->second.continuity_binding;
+    }
+
+    // The replacement TLS handshake has already completed before this point.
+    // Binding the proof to both exporters prevents a peer that knows the group
+    // credential from transplanting a valid OLD proof onto its own NEW TLS
+    // connection.
+    new_binding = tls->continuity_binding();
+    auto expected_proof = secure::SecureSocket::replacement_proof(
+        old_binding, new_binding, request.nonce, request.assigned_ipv4);
+    SensitiveBytesGuard expected_proof_guard{
+        expected_proof.data(), expected_proof.size()};
+    if (secure::ct_memcmp(expected_proof.data(), request.proof.data(),
+                          expected_proof.size()) != 0) {
+        return false;
+    }
+
+    if (!old_write_mutex || !old_ingress_gate ||
+        !old_replacement_preparing || !old_draining ||
+        !old_drain_deadline_ticks || !old_drain_barrier_sent ||
+        !old_handoff_mutex || !old_handoff_cv || !old_heartbeat ||
+        !pending_outbound) {
+        return false;
+    }
+
+    // NEW is admissible only after this exact OLD generation authenticated a
+    // FREEZE carrying the same nonce.  That freeze already serialized and
+    // queued server egress before the NEW handshake could consume OLD receive
+    // headroom.  PREP is not allowed to create or extend the deadline.
+    std::int64_t preparation_deadline_ticks = 0;
+    bool preparation_owned = false;
+    {
+        std::unique_lock handoff_lock{*old_handoff_mutex};
+        std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto it = client_map_.find(assigned_ip);
+        if (it == client_map_.end() || it->second.tls != old_tls ||
+            it->second.write_mutex != old_write_mutex ||
+            it->second.ingress_gate != old_ingress_gate ||
+            it->second.replacement_preparing != old_replacement_preparing ||
+            it->second.draining != old_draining ||
+            it->second.drain_barrier_sent != old_drain_barrier_sent ||
+            it->second.drain_deadline_ticks != old_drain_deadline_ticks ||
+            it->second.handoff_mutex != old_handoff_mutex ||
+            it->second.handoff_cv != old_handoff_cv ||
+            it->second.pending_outbound != pending_outbound ||
+            !old_replacement_preparing->load(std::memory_order_acquire) ||
+            old_draining->load(std::memory_order_acquire) ||
+            secure::ct_memcmp(it->second.drain_nonce.data(),
+                              request.nonce.data(), request.nonce.size()) != 0 ||
+            !running_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        preparation_deadline_ticks = old_drain_deadline_ticks->load(
+            std::memory_order_acquire);
+        const auto now_ticks =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (preparation_deadline_ticks <= now_ticks) return false;
+        preparation_owned = true;
+    }
+    const auto preparation_deadline = std::chrono::steady_clock::time_point{
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::nanoseconds{preparation_deadline_ticks})};
+
+    const auto clear_preparation = [&]() noexcept {
+        if (!preparation_owned) return;
+        std::unique_lock<std::timed_mutex> write_lock{
+            *old_write_mutex, std::defer_lock};
+        if (!write_lock.try_lock_for(kTcpHandoffRecoveryFlushBudget)) {
+            preparation_owned = false;
+            try { old_tls->close(); } catch (...) {}
+            return;
+        }
+        bool still_owned = false;
+        {
+            std::unique_lock handoff_lock{*old_handoff_mutex};
+            std::unique_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            const auto it = client_map_.find(assigned_ip);
+            still_owned = it != client_map_.end() &&
+                it->second.tls == old_tls &&
+                it->second.replacement_preparing ==
+                    old_replacement_preparing &&
+                it->second.pending_outbound == pending_outbound &&
+                old_replacement_preparing->load(
+                    std::memory_order_acquire) &&
+                secure::ct_memcmp(it->second.drain_nonce.data(),
+                                  request.nonce.data(),
+                                  request.nonce.size()) == 0;
+            if (still_owned) {
+                it->second.drain_nonce.fill(0U);
+                old_replacement_preparing->store(
+                    false, std::memory_order_release);
+                old_drain_barrier_sent->store(
+                    false, std::memory_order_release);
+                old_drain_deadline_ticks->store(
+                    0, std::memory_order_release);
+                if (it->second.heartbeat) {
+                    std::lock_guard heartbeat_lock{
+                        it->second.heartbeat->mutex};
+                    it->second.heartbeat->handoff_deadline = {};
+                    if (it->second.heartbeat->participating) {
+                        const auto timeout = it->second.heartbeat->timeout;
+                        it->second.heartbeat->deadline =
+                            std::chrono::steady_clock::now() +
+                            (timeout > std::chrono::milliseconds::zero()
+                                 ? timeout
+                                 : std::chrono::seconds{1});
+                    }
+                }
+            }
+        }
+        old_handoff_cv->notify_all();
+        if (still_owned &&
+            !flush_pending_handoff_records(
+                pending_outbound, old_tls,
+                std::chrono::steady_clock::now() +
+                    kTcpHandoffRecoveryFlushBudget)) {
+            try { old_tls->close(); } catch (...) {}
+        }
+        preparation_owned = false;
+    };
+
+    const auto acknowledgement = encode_session_replacement_ack(request.nonce);
+    bool drain_pending = false;
+    try {
+        if (tls->send_record_until(
+                PACKET_TYPE_SESSION_REPLACEMENT_ACK,
+                acknowledgement.data(),
+                static_cast<std::uint16_t>(acknowledgement.size()),
+                preparation_deadline) !=
+            static_cast<int>(acknowledgement.size())) {
+            clear_preparation();
+            return false;
+        }
+        {
+            std::unique_lock handoff_lock{*old_handoff_mutex};
+            drain_pending = old_handoff_cv->wait_until(
+                handoff_lock, preparation_deadline, [&]() {
+                    if (!running_.load(std::memory_order_acquire)) return true;
+                    const auto now_ticks =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+                    std::shared_lock<std::shared_mutex> map_lock(
+                        client_map_mutex_);
+                    const auto it = client_map_.find(assigned_ip);
+                    return it != client_map_.end() &&
+                        it->second.tls == old_tls &&
+                        it->second.write_mutex == old_write_mutex &&
+                        it->second.ingress_gate == old_ingress_gate &&
+                        it->second.handoff_mutex == old_handoff_mutex &&
+                        it->second.handoff_cv == old_handoff_cv &&
+                        it->second.replacement_preparing ==
+                            old_replacement_preparing &&
+                        it->second.draining == old_draining &&
+                        it->second.drain_barrier_sent ==
+                            old_drain_barrier_sent &&
+                        it->second.drain_deadline_ticks ==
+                            old_drain_deadline_ticks &&
+                        !old_replacement_preparing->load(
+                            std::memory_order_acquire) &&
+                        old_draining->load(std::memory_order_acquire) &&
+                        old_drain_deadline_ticks->load(
+                            std::memory_order_acquire) > now_ticks &&
+                        secure::ct_memcmp(it->second.drain_nonce.data(),
+                                          request.nonce.data(),
+                                          request.nonce.size()) == 0;
+                });
+        }
+        if (!drain_pending || !running_.load(std::memory_order_acquire)) {
+            clear_preparation();
+            return false;
+        }
+    } catch (...) {
+        clear_preparation();
+        throw;
+    }
+    preparation_owned = false;
+    const auto published_deadline_ticks = old_drain_deadline_ticks->load(
+        std::memory_order_acquire);
+    const auto handoff_deadline = std::chrono::steady_clock::time_point{
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::nanoseconds{published_deadline_ticks})};
+    if (published_deadline_ticks <= 0 ||
+        std::chrono::steady_clock::now() >= handoff_deadline) {
+        return false;
+    }
+
+    // The exclusive ingress lease and stable OLD write lock span the entire
+    // decision.  No decrypted OLD record or outbound application record can
+    // overtake the barrier, publication, COMMIT, or final receipt.
+    std::unique_lock<std::shared_timed_mutex> ingress_lock{
+        *old_ingress_gate, std::defer_lock};
+    if (!ingress_lock.try_lock_until(handoff_deadline)) return false;
+    std::unique_lock<std::timed_mutex> write_lock{
+        *old_write_mutex, std::defer_lock};
+    if (!write_lock.try_lock_until(handoff_deadline)) return false;
+
+    bool old_state_ready = false;
+    {
+        std::unique_lock handoff_lock{*old_handoff_mutex};
+        std::unique_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto it = client_map_.find(assigned_ip);
+        old_state_ready =
+            it != client_map_.end() && it->second.tls == old_tls &&
+            it->second.ingress_gate == old_ingress_gate &&
+            it->second.replacement_preparing == old_replacement_preparing &&
+            it->second.draining == old_draining &&
+            it->second.drain_barrier_sent == old_drain_barrier_sent &&
+            it->second.handoff_mutex == old_handoff_mutex &&
+            it->second.handoff_cv == old_handoff_cv &&
+            it->second.drain_deadline_ticks == old_drain_deadline_ticks &&
+            it->second.pending_outbound == pending_outbound &&
+            secure::ct_memcmp(it->second.continuity_binding.data(),
+                              old_binding.data(), old_binding.size()) == 0 &&
+            secure::ct_memcmp(it->second.drain_nonce.data(),
+                              request.nonce.data(), request.nonce.size()) == 0 &&
+            !old_replacement_preparing->load(std::memory_order_acquire) &&
+            old_draining->load(std::memory_order_acquire) &&
+            !old_drain_barrier_sent->load(std::memory_order_acquire) &&
+            running_.load(std::memory_order_acquire);
+    }
+    if (!old_state_ready) return false;
+
+    // Records queued after PREP belong after the OLD barrier. They are kept
+    // unsent until NEW is committed; flushing them on OLD here would consume
+    // the client's receive reserve and defeat the egress freeze.
+    const auto barrier_frame = encode_session_drain_frame(request.nonce);
+    if (old_tls->send_record_until(
+            PACKET_TYPE_SESSION_DRAIN_BARRIER,
+            barrier_frame.data(), static_cast<std::uint16_t>(barrier_frame.size()),
+            handoff_deadline) != static_cast<int>(barrier_frame.size())) {
+        return false;
+    }
+
+    {
+        std::unique_lock handoff_lock{*old_handoff_mutex};
+        std::unique_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto it = client_map_.find(assigned_ip);
+        if (it == client_map_.end() || it->second.tls != old_tls ||
+            it->second.pending_outbound != pending_outbound ||
+            secure::ct_memcmp(it->second.drain_nonce.data(), request.nonce.data(),
+                              request.nonce.size()) != 0) {
+            return false;
+        }
+        it->second.drain_barrier_sent->store(true, std::memory_order_release);
+    }
+    old_handoff_cv->notify_all();
+
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+    // The fault hook is intentionally pre-decision.  It exercises the
+    // authenticated ABORT rollback path without creating a split-brain map.
+    if (integration_fail_next_session_replacement_commit_.exchange(
+            false, std::memory_order_acq_rel)) {
+        throw std::runtime_error(
+            "integration-injected pre-activate TCP replacement failure");
+    }
+#endif
+
+    // READY is a reversible checkpoint.  The client must explicitly send
+    // ACTIVATE before this function may publish NEW.
+    if (tls->send_record_until(
+            PACKET_TYPE_SESSION_REPLACEMENT_READY,
+            acknowledgement.data(),
+            static_cast<std::uint16_t>(acknowledgement.size()),
+            handoff_deadline) != static_cast<int>(acknowledgement.size())) {
+        return false;
+    }
+    std::array<std::uint8_t, kSessionReplacementAckSize> activation{};
+    SensitiveBytesGuard activation_guard{
+        activation.data(), activation.size()};
+    std::uint8_t activation_type = 0U;
+    const int activation_size = tls->recv_record_until(
+        activation_type, activation.data(), activation.size(), handoff_deadline);
+    if (activation_size != static_cast<int>(activation.size()) ||
+        activation_type != PACKET_TYPE_SESSION_REPLACEMENT_ACTIVATE) {
+        return false;
+    }
+    std::array<std::uint8_t, kSessionReplacementNonceSize> activation_nonce{};
+    SensitiveBytesGuard activation_nonce_guard{
+        activation_nonce.data(), activation_nonce.size()};
+    if (!decode_session_replacement_ack(activation, activation_nonce) ||
+        secure::ct_memcmp(activation_nonce.data(), request.nonce.data(),
+                          request.nonce.size()) != 0) {
+        return false;
+    }
+
+    std::shared_ptr<PeerHeartbeatState> new_heartbeat;
+    std::shared_ptr<std::shared_timed_mutex> new_ingress_gate;
+
+    // ACTIVATE has been sent and accepted.  From here on, failure is
+    // irreversible: erase only this exact map entry and release the IP once.
+    const auto fail_after_activate = [&]() noexcept {
+        bool release_ip = false;
+        {
+            std::unique_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            const auto it = client_map_.find(assigned_ip);
+            if (it != client_map_.end() && it->second.tls == tls &&
+                it->second.client_id == client_id) {
+                ::SecureZeroMemory(it->second.continuity_binding.data(),
+                                   it->second.continuity_binding.size());
+                client_map_.erase(it);
+                release_ip = true;
+            }
+        }
+        if (release_ip) ip_pool.release(client_id);
+        try { old_tls->close(); } catch (...) {}
+        try { tls->close(); } catch (...) {}
+    };
+
+    try {
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+        if (integration_fail_next_session_replacement_after_activate_.exchange(
+                false, std::memory_order_acq_rel)) {
+            throw std::runtime_error(
+                "integration-injected post-activate TCP replacement failure");
+        }
+#endif
+        new_heartbeat = std::make_shared<PeerHeartbeatState>();
+        new_ingress_gate = std::make_shared<std::shared_timed_mutex>();
+        {
+            std::lock_guard heartbeat_lock{old_heartbeat->mutex};
+            new_heartbeat->participating = old_heartbeat->participating;
+            new_heartbeat->closing = old_heartbeat->closing;
+            new_heartbeat->timeout = old_heartbeat->timeout;
+            if (new_heartbeat->participating) {
+                new_heartbeat->last_request = std::chrono::steady_clock::now();
+                // Keep the same finite grace through COMMIT_ACK.  The NEW map
+                // is published before that receipt, so a 100/200 ms watchdog
+                // must not close a healthy handoff still inside the 450 ms
+                // server budget.
+                new_heartbeat->handoff_deadline = handoff_deadline;
+                new_heartbeat->deadline = handoff_deadline +
+                    (new_heartbeat->timeout > std::chrono::milliseconds::zero()
+                         ? new_heartbeat->timeout
+                         : std::chrono::seconds{1});
+            }
+        }
+        {
+            std::unique_lock handoff_lock{*old_handoff_mutex};
+            std::unique_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            const auto it = client_map_.find(assigned_ip);
+            if (it == client_map_.end() || it->second.tls != old_tls ||
+                it->second.ingress_gate != old_ingress_gate ||
+                it->second.pending_outbound != pending_outbound ||
+                !it->second.drain_barrier_sent->load(
+                    std::memory_order_acquire) ||
+                secure::ct_memcmp(it->second.drain_nonce.data(),
+                                  request.nonce.data(), request.nonce.size()) != 0 ||
+                !running_.load(std::memory_order_acquire)) {
+                throw std::runtime_error(
+                    "TCP/TLS handoff state changed before activation");
+            }
+            ::SecureZeroMemory(it->second.continuity_binding.data(),
+                               it->second.continuity_binding.size());
+            it->second.tls = tls;
+            it->second.ingress_gate = new_ingress_gate;
+            it->second.heartbeat = new_heartbeat;
+            it->second.continuity_binding = new_binding;
+            it->second.drain_nonce.fill(0U);
+            it->second.replacement_preparing->store(
+                false, std::memory_order_release);
+            it->second.drain_barrier_sent->store(false,
+                                                 std::memory_order_release);
+            it->second.draining->store(false, std::memory_order_release);
+            it->second.drain_deadline_ticks->store(0,
+                                                   std::memory_order_release);
+        }
+        old_handoff_cv->notify_all();
+
+        if (tls->send_record_until(
+                PACKET_TYPE_SESSION_REPLACEMENT_COMMIT,
+                acknowledgement.data(),
+                static_cast<std::uint16_t>(acknowledgement.size()),
+                handoff_deadline) != static_cast<int>(acknowledgement.size())) {
+            throw std::runtime_error("TLS replacement commit write failed");
+        }
+        std::array<std::uint8_t, kSessionReplacementAckSize> commit_ack{};
+        SensitiveBytesGuard commit_ack_guard{
+            commit_ack.data(), commit_ack.size()};
+        std::uint8_t commit_ack_type = 0U;
+        const int commit_ack_size = tls->recv_record_until(
+            commit_ack_type, commit_ack.data(), commit_ack.size(),
+            handoff_deadline);
+        if (commit_ack_size != static_cast<int>(commit_ack.size()) ||
+            commit_ack_type != PACKET_TYPE_SESSION_REPLACEMENT_COMMIT_ACK ||
+            !decode_session_replacement_ack(commit_ack, activation_nonce) ||
+            secure::ct_memcmp(activation_nonce.data(), request.nonce.data(),
+                              request.nonce.size()) != 0) {
+            throw std::runtime_error(
+                "TLS replacement commit receipt was invalid or lost");
+        }
+        // write_lock is the same per-client mutex retained across publication.
+        // Flush every PREP/DRAIN-queued application record to NEW before any
+        // later sender can acquire it, preserving order without spending OLD's
+        // two reserved receive-control slots.
+        if (!flush_pending_handoff_records(pending_outbound, tls,
+                                           handoff_deadline)) {
+            throw std::runtime_error(
+                "TLS replacement could not flush queued records on NEW");
+        }
+        {
+            std::shared_ptr<PeerHeartbeatState> completed_heartbeat;
+            {
+                std::shared_lock<std::shared_mutex> map_lock(
+                    client_map_mutex_);
+                const auto it = client_map_.find(assigned_ip);
+                if (it != client_map_.end() && it->second.tls == tls) {
+                    completed_heartbeat = it->second.heartbeat;
+                }
+            }
+            if (completed_heartbeat) {
+                std::lock_guard heartbeat_lock{completed_heartbeat->mutex};
+                completed_heartbeat->handoff_deadline = {};
+                if (completed_heartbeat->participating) {
+                    completed_heartbeat->deadline =
+                        std::chrono::steady_clock::now() +
+                        (completed_heartbeat->timeout >
+                                 std::chrono::milliseconds::zero()
+                             ? completed_heartbeat->timeout
+                             : std::chrono::seconds{1});
+                }
+            }
+        }
+        old_tls->close();
+        return true;
+    } catch (...) {
+        // ACTIVATE has already been authenticated.  There is no safe rollback
+        // to OLD after this point, even if publication itself failed; closing
+        // both generations is the only way to avoid split-brain state.
+        fail_after_activate();
+        return false;
+    }
+}
+
 void VpnServer::handleClient(SOCKET sock,
                              std::shared_ptr<std::atomic<bool>> alive)
 {
@@ -1207,6 +1982,7 @@ void VpnServer::handleClient(SOCKET sock,
     }
 
     std::string cid;
+    std::string leased_ip;
     std::string remote_ip = "unknown";
     std::shared_ptr<secure::SecureSocket> tls;
     bool tls_pending = false;
@@ -1217,6 +1993,32 @@ void VpnServer::handleClient(SOCKET sock,
         std::lock_guard<std::mutex> lock(pending_tcp_clients_mutex_);
         pending_tcp_clients_.erase(tls);
         tls_pending = false;
+    };
+    const auto release_client_lease_if_owned = [this, &cid, &leased_ip,
+                                                  &tls]() noexcept {
+        if (cid.empty()) return;
+        bool release_lease = leased_ip.empty();
+        {
+            std::unique_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            if (!leased_ip.empty()) {
+                const auto it = client_map_.find(leased_ip);
+                if (it == client_map_.end()) {
+                    release_lease = true;
+                } else if (it->second.client_id == cid && it->second.tls == tls) {
+                    client_map_.erase(it);
+                    release_lease = true;
+                } else if (it->second.client_id == cid) {
+                    // The logical client/IP may already belong to a replacement
+                    // TLS generation. Never release that generation's lease.
+                    release_lease = false;
+                } else {
+                    // A conflicting map entry belongs to somebody else. Release
+                    // only this handler's tentative/confirmed pool assignment.
+                    release_lease = true;
+                }
+            }
+            if (release_lease) ip_pool.release(cid);
+        }
     };
     try {
         sockaddr_storage peer{};
@@ -1256,17 +2058,41 @@ void VpnServer::handleClient(SOCKET sock,
         int flag = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));  // ✅ actual client socket
 
-        uint8_t typ=0; std::array<uint8_t,kConfigRequest.size()> req{};
-        int rn = tls->recv_record(typ, req.data(), req.size());
-        CHECK(rn == static_cast<int>(kConfigRequest.size()), "cfg read");
-        CHECK(typ == PACKET_TYPE_MSG &&
-              std::memcmp(req.data(), kConfigRequest.data(), kConfigRequest.size()) == 0,
-              "bad cfg tag");
+        uint8_t typ = 0;
+        std::array<std::uint8_t, 256U> req{};
+        const int rn = tls->recv_record(typ, req.data(), req.size());
+        CHECK(rn > 0, "empty initial client control record");
+        if (typ == PACKET_TYPE_SESSION_REPLACEMENT) {
+            std::string replacement_ip;
+            std::string replacement_client_id;
+            CHECK(acceptTcpSessionReplacement(
+                      tls,
+                  std::span<const std::uint8_t>{req.data(),
+                                                static_cast<std::size_t>(rn)},
+                  replacement_ip,
+                  replacement_client_id),
+                  "TLS session replacement was rejected");
+            set_socket_timeouts(sock, 0U);
+            unregister_pending_tls();
+            tlsClientEntry(tls,
+                           replacement_ip,
+                           replacement_client_id,
+                           alive,
+                           std::shared_ptr<UdpPeerState>{},
+                           std::string{});
+            return;
+        }
+        CHECK(rn == static_cast<int>(kConfigRequest.size()) &&
+                  typ == PACKET_TYPE_MSG &&
+                  std::memcmp(req.data(), kConfigRequest.data(),
+                              kConfigRequest.size()) == 0,
+              "bad initial config request");
 
         cid = std::to_string(reinterpret_cast<uintptr_t>(tls.get()));
         auto ip_opt     = ip_pool.assignTentative(cid);
         CHECK(ip_opt, "no free IPs");
         std::string ip = *ip_opt;
+        leased_ip = ip;
 
         std::string cfg = "VPN_CFG:IP=" + ip + ";GW=10.10.100.1;MASK=255.255.255.255";
         if (tls->send_record(PACKET_TYPE_MSG, (const uint8_t*)cfg.data(), (uint16_t)cfg.size()) < 0) {
@@ -1277,13 +2103,17 @@ void VpnServer::handleClient(SOCKET sock,
         ip_pool.confirm(cid);
 
         {
+            auto continuity_binding = tls->continuity_binding();
             std::unique_lock<std::shared_mutex> ul(client_map_mutex_);
             CHECK(running_.load(std::memory_order_acquire), "server stopping");
             const bool inserted = client_map_.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(ip),
-                std::forward_as_tuple(tls, cid)).second;
+                std::forward_as_tuple(tls, cid,
+                                      std::move(continuity_binding))).second;
             CHECK(inserted, "assigned IP already registered");
+            ::SecureZeroMemory(continuity_binding.data(),
+                               continuity_binding.size());
         }
         unregister_pending_tls();
 
@@ -1298,9 +2128,7 @@ void VpnServer::handleClient(SOCKET sock,
     }
     catch (const std::exception& e) {
         std::cerr << "[!] client: " << e.what() << '\n';
-        if (!cid.empty()) {
-            ip_pool.release(cid);
-        }
+        release_client_lease_if_owned();
         if (tls) {
             tls->close();
             unregister_pending_tls();
@@ -1310,9 +2138,7 @@ void VpnServer::handleClient(SOCKET sock,
     }
     catch (...) {
         std::cerr << "[!] client: unknown failure\n";
-        if (!cid.empty()) {
-            ip_pool.release(cid);
-        }
+        release_client_lease_if_owned();
         if (tls) {
             tls->close();
             unregister_pending_tls();
@@ -1506,6 +2332,7 @@ VpnServer::BroadcastStatus VpnServer::broadcast_payload(
         std::string id;
         std::shared_ptr<secure::SecureSocket> tls;
         std::shared_ptr<std::timed_mutex> write_mutex;
+        std::shared_ptr<VpnServerPendingOutbound> pending_outbound;
     };
 
     std::vector<ClientSnapshot> clients;
@@ -1518,7 +2345,8 @@ VpnServer::BroadcastStatus VpnServer::broadcast_payload(
                 continue;
             }
             clients.push_back(ClientSnapshot{
-                ip, entry.client_id, entry.tls, entry.write_mutex});
+                ip, entry.client_id, entry.tls, entry.write_mutex,
+                entry.pending_outbound});
         }
     }
 
@@ -1553,10 +2381,40 @@ VpnServer::BroadcastStatus VpnServer::broadcast_payload(
             all_ok = false;
             continue;
         }
+        std::shared_ptr<secure::SecureSocket> destination_tls;
+        bool current_client = false;
+        bool egress_paused = false;
+        {
+            std::shared_lock map_lock{client_map_mutex_};
+            const auto it = client_map_.find(client.ip);
+            current_client = it != client_map_.end() &&
+                it->second.client_id == client.id &&
+                it->second.write_mutex == client.write_mutex &&
+                it->second.pending_outbound == client.pending_outbound;
+            if (current_client) destination_tls = it->second.tls;
+            egress_paused = current_client &&
+                ((it->second.replacement_preparing &&
+                  it->second.replacement_preparing->load(
+                      std::memory_order_acquire)) ||
+                 (it->second.draining &&
+                  it->second.draining->load(std::memory_order_acquire)));
+        }
+        if (!current_client || !destination_tls) continue;
+        if (egress_paused) {
+            if (!enqueue_pending_handoff_record(
+                    client.pending_outbound, PACKET_TYPE_MSG,
+                    reinterpret_cast<const std::uint8_t*>(payload.data()),
+                    payload.size())) {
+                std::cerr << "[!] Handoff queue full for client " << client.ip
+                          << "; dropping chat delivery\n";
+                all_ok = false;
+            }
+            continue;
+        }
 
         std::string failure_text;
         try {
-            const int sent = client.tls->send_record(
+            const int sent = destination_tls->send_record(
                 PACKET_TYPE_MSG,
                 reinterpret_cast<const uint8_t*>(payload.data()),
                 static_cast<uint16_t>(payload.size()));
@@ -1572,7 +2430,9 @@ VpnServer::BroadcastStatus VpnServer::broadcast_payload(
             std::cerr << "[!] Send to client " << client.ip
                       << " failed: " << failure_text << '\n';
             all_ok = false;
-            dead.push_back(client);
+            auto failed = client;
+            failed.tls = std::move(destination_tls);
+            dead.push_back(std::move(failed));
         }
     }
     if (!dead.empty()) {
@@ -1622,7 +2482,588 @@ bool VpnServer::handle_control_record(
     const std::string& assigned_ip,
     const std::uint8_t type,
     const std::span<const std::uint8_t> payload) {
-    if (tls == nullptr || type != PACKET_TYPE_HEARTBEAT) return false;
+    if (tls == nullptr) return false;
+
+    if (type == PACKET_TYPE_SESSION_REPLACEMENT_FREEZE ||
+        type == PACKET_TYPE_SESSION_DRAIN_REQUEST ||
+        type == PACKET_TYPE_SESSION_DRAIN_ABORT) {
+        std::array<std::uint8_t, kSessionReplacementNonceSize> nonce{};
+        if (!decode_session_drain_frame(payload, nonce)) {
+            // A malformed control record must not tear down the still-valid
+            // generation; it is simply ignored after TLS authentication.
+            return true;
+        }
+
+        std::shared_ptr<secure::SecureSocket> authenticated_tls;
+        std::shared_ptr<std::timed_mutex> write_mutex;
+        std::shared_ptr<std::atomic<bool>> replacement_preparing;
+        std::shared_ptr<std::atomic<bool>> draining;
+        std::shared_ptr<std::atomic<bool>> drain_barrier_sent;
+        std::shared_ptr<std::atomic<std::int64_t>> drain_deadline_ticks;
+        std::shared_ptr<std::mutex> handoff_mutex;
+        std::shared_ptr<std::condition_variable> handoff_cv;
+        std::shared_ptr<VpnServerPendingOutbound> pending_outbound;
+        std::shared_ptr<PeerHeartbeatState> heartbeat;
+        bool already_draining = false;
+        bool already_preparing = false;
+        bool prepared_nonce_matches = false;
+        bool abort_nonce_matches = false;
+        {
+            std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            const auto it = client_map_.find(assigned_ip);
+            if (it != client_map_.end() && it->second.tls.get() == tls)
+                handoff_mutex = it->second.handoff_mutex;
+        }
+        // drain_nonce is protected by handoff_mutex (the atomic state flags
+        // alone are not sufficient). Re-read the map after taking that lock
+        // so an ABORT cannot race a concurrent drain publication.
+        if (handoff_mutex) {
+            std::lock_guard handoff_lock{*handoff_mutex};
+            std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            const auto it = client_map_.find(assigned_ip);
+            if (it != client_map_.end() && it->second.tls.get() == tls &&
+                it->second.handoff_mutex == handoff_mutex) {
+                authenticated_tls = it->second.tls;
+                write_mutex = it->second.write_mutex;
+                replacement_preparing =
+                    it->second.replacement_preparing;
+                draining = it->second.draining;
+                drain_barrier_sent = it->second.drain_barrier_sent;
+                drain_deadline_ticks = it->second.drain_deadline_ticks;
+                handoff_cv = it->second.handoff_cv;
+                pending_outbound = it->second.pending_outbound;
+                heartbeat = it->second.heartbeat;
+                already_draining = draining &&
+                    draining->load(std::memory_order_acquire);
+                already_preparing = replacement_preparing &&
+                    replacement_preparing->load(
+                        std::memory_order_acquire);
+                if (type == PACKET_TYPE_SESSION_DRAIN_REQUEST &&
+                    replacement_preparing &&
+                    replacement_preparing->load(
+                        std::memory_order_acquire) &&
+                    secure::ct_memcmp(it->second.drain_nonce.data(),
+                                      nonce.data(), nonce.size()) == 0) {
+                    prepared_nonce_matches = true;
+                }
+                if (type == PACKET_TYPE_SESSION_DRAIN_ABORT &&
+                    secure::ct_memcmp(it->second.drain_nonce.data(),
+                                      nonce.data(), nonce.size()) == 0) {
+                    abort_nonce_matches = true;
+                }
+            }
+        }
+        if (!authenticated_tls || !write_mutex || !replacement_preparing ||
+            !draining ||
+            !drain_barrier_sent || !drain_deadline_ticks ||
+            !handoff_mutex || !handoff_cv) {
+            ::SecureZeroMemory(nonce.data(), nonce.size());
+            return true;
+        }
+        if (type == PACKET_TYPE_SESSION_REPLACEMENT_FREEZE) {
+            if (already_preparing || already_draining || !pending_outbound ||
+                !heartbeat) {
+                ::SecureZeroMemory(nonce.data(), nonce.size());
+                return true;
+            }
+
+            const auto freeze_deadline =
+                std::chrono::steady_clock::now() + kTcpHandoffServerBudget;
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+            const auto integration_freeze_received =
+                std::chrono::steady_clock::now();
+#endif
+            const auto freeze_deadline_ticks =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    freeze_deadline.time_since_epoch()).count();
+            std::unique_lock<std::timed_mutex> freeze_lock{
+                *write_mutex, std::defer_lock};
+            if (!freeze_lock.try_lock_until(freeze_deadline)) {
+                ::SecureZeroMemory(nonce.data(), nonce.size());
+                return true;
+            }
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+            std::cout << "[E2E][FREEZE] server writer acquired after "
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() -
+                             integration_freeze_received)
+                             .count()
+                      << " ms\n";
+#endif
+
+            // After receiving FREEZE, OLD must still carry FREEZE_ACK,
+            // DRAIN_ACK, and BARRIER in the server-to-client direction.  It
+            // must also accept DRAIN followed by a possible ABORT.  Check the
+            // exact prospective reserve before publishing the egress gate.
+            {
+                constexpr std::uint64_t kRequiredSentRecords = 3U;
+                constexpr std::uint64_t kRequiredReceivedRecords = 2U;
+                constexpr std::uint64_t kRequiredSentBytes =
+                    3U * static_cast<std::uint64_t>(kSessionDrainFrameSize);
+                constexpr std::uint64_t kRequiredReceivedBytes =
+                    2U * static_cast<std::uint64_t>(kSessionDrainFrameSize);
+                const auto stats = authenticated_tls->rotation_stats();
+                const auto insufficient = [](
+                    const std::uint64_t value, const std::uint64_t limit,
+                    const std::uint64_t required) noexcept {
+                    return limit != 0U &&
+                        (value >= limit || limit - value < required);
+                };
+                const auto age_limit =
+                    secure::rotation_age_limit_microseconds(
+                        rotation_policy_.max_age);
+                const auto required_age = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        kTcpHandoffServerBudget).count());
+                if (insufficient(stats.sent_records,
+                                 rotation_policy_.max_records,
+                                 kRequiredSentRecords) ||
+                    insufficient(stats.received_records,
+                                 rotation_policy_.max_records,
+                                 kRequiredReceivedRecords) ||
+                    insufficient(stats.sent_bytes,
+                                 rotation_policy_.max_bytes,
+                                 kRequiredSentBytes) ||
+                    insufficient(stats.received_bytes,
+                                 rotation_policy_.max_bytes,
+                                 kRequiredReceivedBytes) ||
+                    (age_limit != 0U &&
+                     (stats.age_microseconds >= age_limit ||
+                      age_limit - stats.age_microseconds < required_age))) {
+                    ::SecureZeroMemory(nonce.data(), nonce.size());
+                    authenticated_tls->close();
+                    return false;
+                }
+            }
+
+            bool freeze_owned = false;
+            {
+                std::unique_lock handoff_lock{*handoff_mutex};
+                std::unique_lock<std::shared_mutex> map_lock(
+                    client_map_mutex_);
+                const auto it = client_map_.find(assigned_ip);
+                if (it == client_map_.end() ||
+                    it->second.tls != authenticated_tls ||
+                    it->second.tls.get() != tls ||
+                    it->second.write_mutex != write_mutex ||
+                    it->second.replacement_preparing !=
+                        replacement_preparing ||
+                    it->second.draining != draining ||
+                    it->second.drain_barrier_sent != drain_barrier_sent ||
+                    it->second.drain_deadline_ticks != drain_deadline_ticks ||
+                    it->second.handoff_mutex != handoff_mutex ||
+                    it->second.handoff_cv != handoff_cv ||
+                    it->second.pending_outbound != pending_outbound ||
+                    replacement_preparing->load(std::memory_order_acquire) ||
+                    draining->load(std::memory_order_acquire) ||
+                    !running_.load(std::memory_order_acquire)) {
+                    ::SecureZeroMemory(nonce.data(), nonce.size());
+                    return true;
+                }
+                {
+                    std::lock_guard heartbeat_lock{heartbeat->mutex};
+                    if (heartbeat->closing) {
+                        ::SecureZeroMemory(nonce.data(), nonce.size());
+                        return true;
+                    }
+                    const auto timeout = heartbeat->timeout >
+                            std::chrono::milliseconds::zero()
+                        ? heartbeat->timeout
+                        : std::chrono::seconds{1};
+                    heartbeat->handoff_deadline = freeze_deadline;
+                    heartbeat->deadline = freeze_deadline + timeout;
+                }
+                it->second.drain_nonce = nonce;
+                drain_barrier_sent->store(false, std::memory_order_release);
+                drain_deadline_ticks->store(
+                    freeze_deadline_ticks, std::memory_order_release);
+                replacement_preparing->store(
+                    true, std::memory_order_release);
+                freeze_owned = true;
+            }
+
+            const auto clear_failed_freeze = [&]() noexcept {
+                if (!freeze_owned) return;
+                // The FREEZE gate is already published, so ordinary egress
+                // takes this writer only long enough to enqueue. Reacquire it
+                // before clearing the gate and flushing to preserve the same
+                // serialization used by a successful handoff.
+                std::unique_lock<std::timed_mutex> recovery_lock{
+                    *write_mutex, std::defer_lock};
+                if (!recovery_lock.try_lock_for(
+                        kTcpHandoffRecoveryFlushBudget)) {
+                    freeze_owned = false;
+                    authenticated_tls->close();
+                    return;
+                }
+                bool still_owned = false;
+                {
+                    std::unique_lock handoff_lock{*handoff_mutex};
+                    std::unique_lock<std::shared_mutex> map_lock(
+                        client_map_mutex_);
+                    const auto it = client_map_.find(assigned_ip);
+                    still_owned = it != client_map_.end() &&
+                        it->second.tls == authenticated_tls &&
+                        it->second.pending_outbound == pending_outbound &&
+                        replacement_preparing->load(
+                            std::memory_order_acquire) &&
+                        !draining->load(std::memory_order_acquire) &&
+                        secure::ct_memcmp(it->second.drain_nonce.data(),
+                                          nonce.data(), nonce.size()) == 0;
+                    if (still_owned) {
+                        it->second.drain_nonce.fill(0U);
+                        replacement_preparing->store(
+                            false, std::memory_order_release);
+                        draining->store(false, std::memory_order_release);
+                        drain_barrier_sent->store(
+                            false, std::memory_order_release);
+                        drain_deadline_ticks->store(
+                            0, std::memory_order_release);
+                        std::lock_guard heartbeat_lock{heartbeat->mutex};
+                        heartbeat->handoff_deadline = {};
+                        if (heartbeat->participating) {
+                            const auto timeout = heartbeat->timeout;
+                            heartbeat->deadline =
+                                std::chrono::steady_clock::now() +
+                                (timeout > std::chrono::milliseconds::zero()
+                                     ? timeout
+                                     : std::chrono::seconds{1});
+                        }
+                    }
+                }
+                handoff_cv->notify_all();
+                if (still_owned &&
+                    !flush_pending_handoff_records(
+                        pending_outbound, authenticated_tls,
+                        std::chrono::steady_clock::now() +
+                            kTcpHandoffRecoveryFlushBudget)) {
+                    authenticated_tls->close();
+                }
+                freeze_owned = false;
+            };
+
+            // Publishing replacement_preparing while holding the stable writer
+            // places every already-started application write before FREEZE_ACK.
+            // Release the writer after publication: later egress revalidates the
+            // gate and enters pending_outbound, avoiding packet loss from its
+            // normal 100 ms congestion budget while this control is in flight.
+            freeze_lock.unlock();
+            try {
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+                const auto injected_delay = std::chrono::milliseconds{
+                    integration_session_replacement_freeze_delay_ms_.exchange(
+                        0, std::memory_order_acq_rel)};
+                if (injected_delay > std::chrono::milliseconds::zero()) {
+                    std::this_thread::sleep_for(injected_delay);
+                }
+#endif
+                const auto frame = encode_session_drain_frame(nonce);
+                if (authenticated_tls->send_record_until(
+                        PACKET_TYPE_SESSION_REPLACEMENT_FREEZE_ACK,
+                        frame.data(),
+                        static_cast<std::uint16_t>(frame.size()),
+                        freeze_deadline) != static_cast<int>(frame.size())) {
+                    clear_failed_freeze();
+                } else {
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+                    std::cout << "[E2E][FREEZE] acknowledgement sent after "
+                              << std::chrono::duration_cast<
+                                     std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() -
+                                     integration_freeze_received)
+                                     .count()
+                              << " ms\n";
+#endif
+                    handoff_cv->notify_all();
+                }
+            } catch (...) {
+                clear_failed_freeze();
+            }
+            ::SecureZeroMemory(nonce.data(), nonce.size());
+            return true;
+        }
+        if (type == PACKET_TYPE_SESSION_DRAIN_ABORT) {
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+            std::cout << "[E2E][ABORT] server received rollback; nonce "
+                      << (abort_nonce_matches ? "matched" : "mismatched")
+                      << '\n';
+#endif
+            if (abort_nonce_matches) {
+                std::unique_lock<std::timed_mutex> abort_lock{
+                    *write_mutex, std::defer_lock};
+                if (abort_lock.try_lock_for(kTcpHandoffRecoveryFlushBudget)) {
+                    bool still_owned = false;
+                    {
+                        std::unique_lock handoff_lock{*handoff_mutex};
+                        std::unique_lock<std::shared_mutex> map_lock(
+                            client_map_mutex_);
+                        const auto it = client_map_.find(assigned_ip);
+                        still_owned =
+                            it != client_map_.end() &&
+                            it->second.tls.get() == tls &&
+                            it->second.pending_outbound == pending_outbound &&
+                            secure::ct_memcmp(it->second.drain_nonce.data(),
+                                              nonce.data(), nonce.size()) == 0;
+                        if (still_owned) {
+                            it->second.drain_nonce.fill(0U);
+                            it->second.replacement_preparing->store(
+                                false, std::memory_order_release);
+                            it->second.drain_barrier_sent->store(
+                                false, std::memory_order_release);
+                            it->second.draining->store(
+                                false, std::memory_order_release);
+                            it->second.drain_deadline_ticks->store(
+                                0, std::memory_order_release);
+                            if (it->second.heartbeat) {
+                                std::lock_guard heartbeat_lock{
+                                    it->second.heartbeat->mutex};
+                                it->second.heartbeat->handoff_deadline = {};
+                                if (it->second.heartbeat->participating) {
+                                    const auto timeout =
+                                        it->second.heartbeat->timeout;
+                                    it->second.heartbeat->deadline =
+                                        std::chrono::steady_clock::now() +
+                                        (timeout > std::chrono::milliseconds::zero()
+                                             ? timeout
+                                             : std::chrono::seconds{1});
+                                }
+                            }
+                        }
+                        handoff_lock.unlock();
+                        handoff_cv->notify_all();
+                    }
+                    const bool flushed = !still_owned ||
+                        flush_pending_handoff_records(
+                            pending_outbound, authenticated_tls,
+                            std::chrono::steady_clock::now() +
+                                kTcpHandoffRecoveryFlushBudget);
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+                    std::cout << "[E2E][ABORT] server rollback ownership="
+                              << (still_owned ? "current" : "stale")
+                              << ", queued flush="
+                              << (flushed ? "complete" : "failed") << '\n';
+#endif
+                    if (still_owned && !flushed) {
+                        std::cerr << "[!] Failed to flush queued records after "
+                                     "TCP/TLS replacement abort\n";
+                        authenticated_tls->close();
+                    }
+#ifdef TRUETUNNEL_INTEGRATION_TEST
+                } else {
+                    std::cout << "[E2E][ABORT] server rollback writer lock timed out\n";
+#endif
+                }
+            }
+            ::SecureZeroMemory(nonce.data(), nonce.size());
+            return true;
+        }
+        if (already_draining) {
+            ::SecureZeroMemory(nonce.data(), nonce.size());
+            return true;
+        }
+        if (!prepared_nonce_matches) {
+            // DRAIN is valid only for the nonce that OLD authenticated during
+            // FREEZE. The NEW handler separately proves continuity before it
+            // can observe or commit this transition.
+            ::SecureZeroMemory(nonce.data(), nonce.size());
+            return true;
+        }
+
+        // Transition PREP within its original egress-freeze deadline. A late
+        // DRAIN must not silently extend a preparation whose rollback may
+        // already be restoring OLD traffic.
+        const auto preparation_ticks = drain_deadline_ticks->load(
+            std::memory_order_acquire);
+        if (preparation_ticks <= 0) {
+            ::SecureZeroMemory(nonce.data(), nonce.size());
+            return true;
+        }
+        const auto preparation_transition_deadline =
+            std::chrono::steady_clock::time_point{
+                std::chrono::duration_cast<
+                    std::chrono::steady_clock::duration>(
+                    std::chrono::nanoseconds{preparation_ticks})};
+        if (std::chrono::steady_clock::now() >=
+            preparation_transition_deadline) {
+            ::SecureZeroMemory(nonce.data(), nonce.size());
+            return true;
+        }
+        std::unique_lock<std::timed_mutex> drain_lock{
+            *write_mutex, std::defer_lock};
+        if (!drain_lock.try_lock_until(preparation_transition_deadline)) {
+            ::SecureZeroMemory(nonce.data(), nonce.size());
+            return true;
+        }
+        // Acquire the outbound lock before publishing the drain. The
+        // replacement waiter also needs this lock, so it cannot send BARRIER
+        // or COMMIT until this handler has put DRAIN_ACK on OLD first.
+        const auto handoff_deadline = preparation_transition_deadline;
+        // Refuse to begin a handoff only when OLD cannot carry the exact
+        // prospective controls still needed from this side.  DRAIN has
+        // already consumed one OLD receive record here: server sends ACK and
+        // BARRIER (2 records), while a client ABORT is the only remaining OLD
+        // receive control (1 record).  Using <=4 here used to reject a safe
+        // boundary and could strand the client after its emergency gate.
+        {
+            constexpr std::uint64_t kRequiredSentRecords = 2U;
+            constexpr std::uint64_t kRequiredReceivedRecords = 1U;
+            constexpr std::uint64_t kRequiredSentBytes =
+                2U * static_cast<std::uint64_t>(kSessionDrainFrameSize);
+            constexpr std::uint64_t kRequiredReceivedBytes =
+                static_cast<std::uint64_t>(kSessionDrainFrameSize);
+            const auto stats = authenticated_tls->rotation_stats();
+            const auto insufficient = [](const std::uint64_t value,
+                                         const std::uint64_t limit,
+                                         const std::uint64_t required) noexcept {
+                return limit != 0U &&
+                    (value >= limit || limit - value < required);
+            };
+            if (insufficient(stats.sent_records, rotation_policy_.max_records,
+                             kRequiredSentRecords) ||
+                insufficient(stats.received_records,
+                             rotation_policy_.max_records,
+                             kRequiredReceivedRecords) ||
+                insufficient(stats.sent_bytes, rotation_policy_.max_bytes,
+                             kRequiredSentBytes) ||
+                insufficient(stats.received_bytes, rotation_policy_.max_bytes,
+                             kRequiredReceivedBytes)) {
+                ::SecureZeroMemory(nonce.data(), nonce.size());
+                authenticated_tls->close();
+                return false;
+            }
+            if (rotation_policy_.max_age > std::chrono::seconds::zero()) {
+                const auto age_limit = secure::rotation_age_limit_microseconds(
+                    rotation_policy_.max_age);
+                const auto now = std::chrono::steady_clock::now();
+                const auto remaining = now < handoff_deadline
+                    ? static_cast<std::uint64_t>(
+                          std::chrono::duration_cast<std::chrono::microseconds>(
+                              handoff_deadline - now).count())
+                    : 0U;
+                if (stats.age_microseconds >= age_limit ||
+                    age_limit - stats.age_microseconds <
+                        remaining) {
+                    ::SecureZeroMemory(nonce.data(), nonce.size());
+                    authenticated_tls->close();
+                    return false;
+                }
+            }
+        }
+        {
+            std::unique_lock handoff_lock{*handoff_mutex};
+            std::unique_lock<std::shared_mutex> map_lock(client_map_mutex_);
+            const auto it = client_map_.find(assigned_ip);
+            if (it == client_map_.end() || it->second.tls.get() != tls ||
+                it->second.replacement_preparing != replacement_preparing ||
+                !it->second.replacement_preparing->load(
+                    std::memory_order_acquire) ||
+                !it->second.draining ||
+                it->second.draining->load(std::memory_order_acquire) ||
+                it->second.drain_deadline_ticks != drain_deadline_ticks ||
+                drain_deadline_ticks->load(std::memory_order_acquire) !=
+                    preparation_ticks ||
+                std::chrono::steady_clock::now() >=
+                    preparation_transition_deadline ||
+                secure::ct_memcmp(it->second.drain_nonce.data(), nonce.data(),
+                                  nonce.size()) != 0) {
+                ::SecureZeroMemory(nonce.data(), nonce.size());
+                return true;
+            }
+            it->second.replacement_preparing->store(
+                false, std::memory_order_release);
+            it->second.drain_barrier_sent->store(
+                false, std::memory_order_release);
+            it->second.draining->store(true, std::memory_order_release);
+            // Heartbeat ACKs are intentionally not emitted while OLD is
+            // draining.  Preserve a finite authenticated grace window so a
+            // valid aggressive (100/200 ms) policy cannot kill a handoff that
+            // is still inside the protocol's bounded server budget.
+            if (it->second.heartbeat) {
+                std::lock_guard heartbeat_lock{it->second.heartbeat->mutex};
+                const auto timeout =
+                    it->second.heartbeat->timeout >
+                            std::chrono::milliseconds::zero()
+                        ? it->second.heartbeat->timeout
+                        : std::chrono::seconds{1};
+                it->second.heartbeat->handoff_deadline = handoff_deadline;
+                it->second.heartbeat->deadline = handoff_deadline + timeout;
+            }
+        }
+        const auto frame = encode_session_drain_frame(nonce);
+        const auto clear_failed_drain = [&]() noexcept {
+            bool still_owned = false;
+            {
+                std::unique_lock handoff_lock{*handoff_mutex};
+                std::unique_lock<std::shared_mutex> map_lock(
+                    client_map_mutex_);
+                const auto it = client_map_.find(assigned_ip);
+                still_owned = it != client_map_.end() &&
+                    it->second.tls.get() == tls &&
+                    secure::ct_memcmp(it->second.drain_nonce.data(),
+                                      nonce.data(), nonce.size()) == 0;
+                if (still_owned) {
+                    it->second.drain_nonce.fill(0U);
+                    it->second.replacement_preparing->store(
+                        false, std::memory_order_release);
+                    it->second.drain_barrier_sent->store(
+                        false, std::memory_order_release);
+                    it->second.draining->store(false,
+                                                std::memory_order_release);
+                    it->second.drain_deadline_ticks->store(
+                        0, std::memory_order_release);
+                    if (it->second.heartbeat) {
+                        std::lock_guard heartbeat_lock{
+                            it->second.heartbeat->mutex};
+                        it->second.heartbeat->handoff_deadline = {};
+                        if (it->second.heartbeat->participating) {
+                            const auto timeout =
+                                it->second.heartbeat->timeout;
+                            it->second.heartbeat->deadline =
+                                std::chrono::steady_clock::now() +
+                                (timeout > std::chrono::milliseconds::zero()
+                                     ? timeout
+                                     : std::chrono::seconds{1});
+                        }
+                    }
+                }
+                handoff_lock.unlock();
+                handoff_cv->notify_all();
+            }
+            if (still_owned &&
+                !flush_pending_handoff_records(pending_outbound,
+                                               authenticated_tls,
+                    std::chrono::steady_clock::now() +
+                        kTcpHandoffRecoveryFlushBudget)) {
+                authenticated_tls->close();
+            }
+        };
+        try {
+            const auto send_control = [&](const std::uint8_t control_type) {
+                return authenticated_tls->send_record_until(
+                           control_type, frame.data(),
+                           static_cast<std::uint16_t>(frame.size()),
+                           handoff_deadline) ==
+                       static_cast<int>(frame.size());
+            };
+            // The replacement handler emits the final barrier while holding
+            // the same write lock. Queued application records remain unsent
+            // until NEW commits, making BARRIER the last OLD-generation record.
+            if (!send_control(PACKET_TYPE_SESSION_DRAIN_ACK)) {
+                clear_failed_drain();
+            } else {
+                // Publish only after the ACK write succeeds. Even a spurious
+                // waiter wake is safe because drain_lock remains held until
+                // this handler returns.
+                handoff_cv->notify_all();
+            }
+        } catch (...) {
+            clear_failed_drain();
+        }
+        ::SecureZeroMemory(nonce.data(), nonce.size());
+        return true;
+    }
+
+    if (type != PACKET_TYPE_HEARTBEAT) return false;
 
     HeartbeatControlFrame frame{};
     if (!decode_heartbeat_control_frame(payload, frame)) return false;
@@ -1669,6 +3110,7 @@ bool VpnServer::handle_control_record(
         }
         heartbeat->participating = true;
         heartbeat->last_request = now;
+        heartbeat->timeout = requested_timeout;
         heartbeat->deadline = now + requested_timeout;
     }
     heartbeat_requests_.fetch_add(1U, std::memory_order_relaxed);
@@ -1690,6 +3132,20 @@ bool VpnServer::handle_control_record(
         // the client has multiple heartbeat intervals before its timeout.
         return true;
     }
+    bool current_generation = false;
+    {
+        std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto it = client_map_.find(assigned_ip);
+        current_generation = it != client_map_.end() &&
+            it->second.tls.get() == tls && it->second.tls == authenticated_tls &&
+            it->second.write_mutex == write_mutex &&
+            (!it->second.replacement_preparing ||
+             !it->second.replacement_preparing->load(
+                 std::memory_order_acquire)) &&
+            (!it->second.draining ||
+             !it->second.draining->load(std::memory_order_acquire));
+    }
+    if (!current_generation) return true;
     const int sent = authenticated_tls->send_record(
         PACKET_TYPE_HEARTBEAT_ACK,
         payload.data(),
@@ -1700,36 +3156,76 @@ bool VpnServer::handle_control_record(
     return true;
 }
 
+void VpnServer::note_authenticated_client_activity(
+    secure::SecureSocket* const tls,
+    const std::string& assigned_ip) {
+    std::shared_ptr<PeerHeartbeatState> heartbeat;
+    {
+        std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto it = client_map_.find(assigned_ip);
+        if (it == client_map_.end() || it->second.tls.get() != tls) return;
+        heartbeat = it->second.heartbeat;
+    }
+    if (!heartbeat) return;
+
+    std::lock_guard heartbeat_lock{heartbeat->mutex};
+    if (!heartbeat->participating || heartbeat->closing ||
+        heartbeat->handoff_deadline !=
+            std::chrono::steady_clock::time_point{}) {
+        return;
+    }
+    const auto timeout = heartbeat->timeout;
+    heartbeat->deadline = std::chrono::steady_clock::now() +
+        (timeout > std::chrono::milliseconds::zero()
+             ? timeout
+             : std::chrono::seconds{1});
+}
+
 void VpnServer::handle_client_message(secure::SecureSocket* tls, std::string_view message) {
-    auto info_opt = find_client_info_for_tls(tls);
-    if (!info_opt) {
+    std::string sender;
+    std::string client_id;
+    std::shared_ptr<std::shared_timed_mutex> ingress_gate;
+    {
+        std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        for (const auto& [ip, entry] : client_map_) {
+            if (entry.tls.get() == tls) {
+                sender = ip;
+                client_id = entry.client_id;
+                ingress_gate = entry.ingress_gate;
+                break;
+            }
+        }
+    }
+    if (!ingress_gate || sender.empty() || client_id.empty()) {
         throw std::runtime_error("Chat sender is not an authenticated client");
     }
-    if (!allowClientChat(info_opt->second, message.size())) {
-        std::cerr << "[!] Disconnecting client " << info_opt->first
+
+    std::shared_lock ingress_lock{*ingress_gate};
+    {
+        std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto it = client_map_.find(sender);
+        if (it == client_map_.end() || it->second.tls.get() != tls ||
+            it->second.client_id != client_id ||
+            it->second.ingress_gate != ingress_gate) {
+            throw std::runtime_error("Chat sender used a retired TLS generation");
+        }
+    }
+
+    note_authenticated_client_activity(tls, sender);
+    if (!allowClientChat(client_id, message.size())) {
+        std::cerr << "[!] Disconnecting client " << sender
                   << " after exceeding the authenticated chat rate limit\n";
         throw std::runtime_error("Authenticated chat rate limit exceeded");
     }
-    const std::string& sender = info_opt->first;
-    const std::string* skip_id = &info_opt->second;
+    const std::string* skip_id = &client_id;
     std::string body(message.begin(), message.end());
     const BroadcastStatus status =
-        broadcast_message(sender, body, info_opt->second, skip_id);
+        broadcast_message(sender, body, client_id, skip_id);
     if (status == BroadcastStatus::RateLimited) {
         std::cerr << "[!] Disconnecting client " << sender
                   << " after exceeding the authenticated chat fanout budget\n";
         throw std::runtime_error("Authenticated chat fanout limit exceeded");
     }
-}
-
-std::optional<std::pair<std::string, std::string>> VpnServer::find_client_info_for_tls(secure::SecureSocket* tls) const {
-    std::shared_lock<std::shared_mutex> rlk(client_map_mutex_);
-    for (const auto& [ip, entry] : client_map_) {
-        if (entry.tls.get() == tls) {
-            return std::make_pair(ip, entry.client_id);
-        }
-    }
-    return std::nullopt;
 }
 
 void VpnServer::tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
@@ -1752,6 +3248,7 @@ void VpnServer::tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
     }
 
     bool release_client_id = false;
+    bool retired_generation = false;
     {
         std::lock_guard<std::shared_mutex> lg(client_map_mutex_);
         auto it = client_map_.find(src_ip);
@@ -1760,6 +3257,14 @@ void VpnServer::tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
             it->second.tls == tls) {
             client_map_.erase(it);
             release_client_id = true;
+        } else if (it != client_map_.end() &&
+                   it->second.client_id == client_id &&
+                   it->second.tls != tls) {
+            // A successful make-before-break handoff deliberately closes OLD.
+            // Its receive error belongs to the retired generation and must not
+            // unwind into handleClient(), whose generic cleanup would otherwise
+            // release the IP lease now owned by NEW.
+            retired_generation = true;
         }
     }
     if (release_client_id) {
@@ -1774,9 +3279,67 @@ void VpnServer::tlsClientEntry(std::shared_ptr<secure::SecureSocket> tls,
         alive->store(false);
     }
 
-    if (forwarding_error) {
+    if (forwarding_error && !retired_generation) {
         std::rethrow_exception(forwarding_error);
     }
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+bool VpnServer::route_authenticated_packet(
+    secure::SecureSocket* const source_tls,
+    const std::string& expected_source_ip,
+    WINTUN_SESSION_HANDLE session,
+    std::mutex& session_mutex,
+    const BYTE* const packet,
+    const UINT size) {
+    if (source_tls == nullptr || session == nullptr ||
+        !ipv4_source_matches(packet, size, expected_source_ip)) {
+        return true;
+    }
+
+    std::string source_client_id;
+    std::shared_ptr<std::shared_timed_mutex> ingress_gate;
+    {
+        std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto source = client_map_.find(expected_source_ip);
+        if (source == client_map_.end() ||
+            source->second.tls.get() != source_tls) {
+            return true;
+        }
+        source_client_id = source->second.client_id;
+        ingress_gate = source->second.ingress_gate;
+    }
+    if (!ingress_gate || source_client_id.empty()) return true;
+
+    // The replacement path takes this gate exclusively before its map commit.
+    // Revalidate after acquiring it because OLD may have retired while this
+    // callback was waiting behind the commit.
+    std::shared_lock ingress_lock{*ingress_gate};
+    {
+        std::shared_lock<std::shared_mutex> map_lock(client_map_mutex_);
+        const auto source = client_map_.find(expected_source_ip);
+        if (source == client_map_.end() ||
+            source->second.tls.get() != source_tls ||
+            source->second.client_id != source_client_id ||
+            source->second.ingress_gate != ingress_gate) {
+            return true;
+        }
+    }
+
+    note_authenticated_client_activity(source_tls, expected_source_ip);
+    if (forward_to_client_if_known(packet, size)) return true;
+
+    // Keep the ingress lease through local injection. Otherwise OLD could pass
+    // its ownership check, lose the replacement race, and inject after commit.
+    std::lock_guard<std::mutex> session_lock(session_mutex);
+    void* const tunnel_packet = WintunAllocateSendPacket(session, size);
+    if (tunnel_packet == nullptr) {
+        throw std::runtime_error(
+            "Wintun send ring is unavailable for an authenticated packet");
+    }
+    std::memcpy(tunnel_packet, packet, size);
+    WintunSendPacket(session, static_cast<const BYTE*>(tunnel_packet));
+    return true;
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -1789,6 +3352,7 @@ bool VpnServer::forward_to_client_if_known(const BYTE* packet, UINT size)
 
     std::shared_ptr<secure::SecureSocket> destination_tls;
     std::shared_ptr<std::timed_mutex> destination_write_mutex;
+    std::shared_ptr<VpnServerPendingOutbound> destination_pending_outbound;
     std::string destination_id;
     {
         std::shared_lock<std::shared_mutex> rlk(client_map_mutex_);
@@ -1799,6 +3363,7 @@ bool VpnServer::forward_to_client_if_known(const BYTE* packet, UINT size)
 
         destination_tls = it->second.tls;
         destination_write_mutex = it->second.write_mutex;
+        destination_pending_outbound = it->second.pending_outbound;
         destination_id = it->second.client_id;
     }
 
@@ -1808,6 +3373,33 @@ bool VpnServer::forward_to_client_if_known(const BYTE* packet, UINT size)
         if (!lg.try_lock_for(std::chrono::milliseconds{100})) {
             // A congested destination is still a known VPN peer. Drop this
             // packet instead of building an unbounded queue behind its writer.
+            return true;
+        }
+        bool current_client = false;
+        bool egress_paused = false;
+        {
+            std::shared_lock map_lock{client_map_mutex_};
+            const auto it = client_map_.find(dst);
+            current_client = it != client_map_.end() &&
+                it->second.client_id == destination_id &&
+                it->second.write_mutex == destination_write_mutex &&
+                it->second.pending_outbound == destination_pending_outbound;
+            if (current_client) destination_tls = it->second.tls;
+            egress_paused = current_client &&
+                ((it->second.replacement_preparing &&
+                  it->second.replacement_preparing->load(
+                      std::memory_order_acquire)) ||
+                 (it->second.draining &&
+                  it->second.draining->load(std::memory_order_acquire)));
+        }
+        if (!current_client || !destination_tls) return true;
+        if (egress_paused) {
+            if (!enqueue_pending_handoff_record(
+                    destination_pending_outbound, PACKET_TYPE_IP,
+                    reinterpret_cast<const std::uint8_t*>(packet), size)) {
+                std::cerr << "[!] Handoff queue full for client " << dst
+                          << "; dropping forwarded packet\n";
+            }
             return true;
         }
         try {

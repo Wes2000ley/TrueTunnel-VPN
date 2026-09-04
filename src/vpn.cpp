@@ -749,8 +749,12 @@ void WintunAdapterLease::Reset() noexcept {
 
 
 void tun_to_tls(WINTUN_SESSION_HANDLE session,
-                secure::SecureSocket* tls,
+                const std::function<std::shared_ptr<secure::SecureSocket>()>&
+                    tls_snapshot,
+                std::mutex& tls_write_mutex,
                 std::atomic<bool>& running,
+                const std::atomic<bool>* old_writes_blocked,
+                const std::atomic<bool>* control_write_pending,
                 HANDLE cancellation_event) {
 	std::cout << "[tun_to_tls] Started packet forwarding thread\n";
 
@@ -774,6 +778,33 @@ void tun_to_tls(WINTUN_SESSION_HANDLE session,
 				continue;
 			}
 			try {
+				// Renewal swaps the SecureSocket while retaining this Wintun
+				// session. Snapshot and serialize each packet so an old TLS
+				// generation cannot be closed underneath an in-flight write.
+				std::unique_lock write_guard{tls_write_mutex};
+				while (((old_writes_blocked != nullptr &&
+				         old_writes_blocked->load(std::memory_order_acquire)) ||
+				        (control_write_pending != nullptr &&
+				         control_write_pending->load(std::memory_order_acquire))) &&
+				       running.load(std::memory_order_acquire)) {
+					write_guard.unlock();
+					if (cancellation_event != nullptr &&
+					    ::WaitForSingleObject(cancellation_event, 10U) ==
+							WAIT_OBJECT_0) {
+						running.store(false, std::memory_order_release);
+						break;
+					}
+					::Sleep(1U);
+					write_guard.lock();
+				}
+				if (!running.load(std::memory_order_acquire)) {
+					WintunReleaseReceivePacket(session, pkt);
+					break;
+				}
+				auto tls = tls_snapshot();
+				if (!tls) {
+					throw std::runtime_error("secure transport unavailable");
+				}
 				const int sent = tls->send_record(
 					PACKET_TYPE_IP, pkt, static_cast<uint16_t>(size));
 				if (sent != static_cast<int>(size)) {

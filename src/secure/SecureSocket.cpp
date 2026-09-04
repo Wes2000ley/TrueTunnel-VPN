@@ -119,15 +119,59 @@ int SecureSocket::send_record(const std::uint8_t type,
         throw std::runtime_error("handshake not done");
     }
 
-    std::lock_guard lock{send_mutex_};
+    std::unique_lock<std::timed_mutex> lock{send_mutex_};
     if (closing_.load(std::memory_order_acquire) ||
         !handshook_.load(std::memory_order_acquire)) {
         throw std::runtime_error("SecureSocket is closing");
     }
     if (transport_type_ == TransportType::Stream) {
-        return schannel_->send_record(type, data, length);
+        try {
+            return schannel_->send_record(type, data, length);
+        } catch (...) {
+            // A stream write can fail after emitting only part of one TLS
+            // record. Reusing that byte stream would desynchronize the peer,
+            // so make every TCP/TLS write failure terminal for this session.
+            lock.unlock();
+            close();
+            throw;
+        }
     }
     return wolfssl_->send_record(type, data, length);
+}
+
+int SecureSocket::send_record_until(
+    const std::uint8_t type,
+    const std::uint8_t* data,
+    const std::uint16_t length,
+    const std::chrono::steady_clock::time_point deadline) {
+    if (transport_type_ != TransportType::Stream || !schannel_) {
+        throw std::runtime_error(
+            "Absolute record deadlines are only available for TCP/TLS");
+    }
+    if (!handshook_.load(std::memory_order_acquire)) {
+        throw std::runtime_error("handshake not done");
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+        throw std::runtime_error("TCP/TLS application write deadline expired");
+    }
+
+    std::unique_lock<std::timed_mutex> lock{send_mutex_, std::defer_lock};
+    if (!lock.try_lock_until(deadline)) {
+        throw std::runtime_error("TCP/TLS application write deadline expired");
+    }
+    if (closing_.load(std::memory_order_acquire) ||
+        !handshook_.load(std::memory_order_acquire)) {
+        throw std::runtime_error("SecureSocket is closing");
+    }
+    try {
+        return schannel_->send_record_until(type, data, length, deadline);
+    } catch (...) {
+        // The absolute deadline can expire after a partial ciphertext write.
+        // Never resume a possibly truncated TLS stream.
+        lock.unlock();
+        close();
+        throw;
+    }
 }
 
 int SecureSocket::recv_record(std::uint8_t& type,
@@ -148,6 +192,33 @@ int SecureSocket::recv_record(std::uint8_t& type,
     return wolfssl_->recv_record(type, output, capacity);
 }
 
+int SecureSocket::recv_record_until(
+    std::uint8_t& type,
+    std::uint8_t* output,
+    const std::size_t capacity,
+    const std::chrono::steady_clock::time_point deadline) {
+    if (transport_type_ != TransportType::Stream || !schannel_) {
+        throw std::runtime_error(
+            "Absolute record deadlines are only available for TCP/TLS");
+    }
+    if (!handshook_.load(std::memory_order_acquire)) {
+        throw std::runtime_error("handshake not done");
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+        throw std::runtime_error("TCP/TLS application read deadline expired");
+    }
+
+    std::unique_lock<std::timed_mutex> lock{recv_mutex_, std::defer_lock};
+    if (!lock.try_lock_until(deadline)) {
+        throw std::runtime_error("TCP/TLS application read deadline expired");
+    }
+    if (closing_.load(std::memory_order_acquire) ||
+        !handshook_.load(std::memory_order_acquire)) {
+        return -1;
+    }
+    return schannel_->recv_record_until(type, output, capacity, deadline);
+}
+
 TrafficKeyRotationStats SecureSocket::rotation_stats() const noexcept {
     if (transport_type_ == TransportType::Stream && schannel_) {
         return schannel_->rotation_stats();
@@ -157,6 +228,46 @@ TrafficKeyRotationStats SecureSocket::rotation_stats() const noexcept {
     }
     return {};
 }
+
+std::array<std::uint8_t, 32> SecureSocket::continuity_binding() const {
+    if (transport_type_ != TransportType::Stream || !schannel_) {
+        throw std::runtime_error(
+            "Session continuity binding is only available for TCP/TLS");
+    }
+    return schannel_->continuity_binding();
+}
+
+std::array<std::uint8_t, 32> SecureSocket::replacement_proof(
+    const std::span<const std::uint8_t> request_nonce,
+    const std::span<const std::uint8_t> assigned_ipv4,
+    const std::span<const std::uint8_t> new_binding) const {
+    if (transport_type_ != TransportType::Stream || !schannel_) {
+        throw std::runtime_error(
+            "Session replacement proof is only available for TCP/TLS");
+    }
+    return schannel_->replacement_proof(
+        request_nonce, assigned_ipv4, new_binding);
+}
+
+std::array<std::uint8_t, 32> SecureSocket::replacement_proof(
+    const std::array<std::uint8_t, 32>& old_binding,
+    const std::array<std::uint8_t, 32>& new_binding,
+    const std::span<const std::uint8_t> request_nonce,
+    const std::span<const std::uint8_t> assigned_ipv4) {
+    return SchannelSocket::replacement_proof(
+        old_binding, new_binding, request_nonce, assigned_ipv4);
+}
+
+#ifdef TRUETUNNEL_SECURE_TRANSPORT_TEST
+void SecureSocket::set_test_partial_write_failure_after(
+    const std::size_t ciphertext_bytes) {
+    if (transport_type_ != TransportType::Stream || !schannel_) {
+        throw std::runtime_error(
+            "Partial-write injection is only available for TCP/TLS tests");
+    }
+    schannel_->set_test_partial_write_failure_after(ciphertext_bytes);
+}
+#endif
 
 void SecureSocket::close() noexcept {
     std::lock_guard close_lock{close_mutex_};

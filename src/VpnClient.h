@@ -4,6 +4,7 @@
 #include "Networking.h"
 #include <winsock2.h>
 #include "secure/SecureSocket.h"
+#include <array>
 #include <string>
 #include <memory>
 #include <optional>
@@ -54,12 +55,16 @@ private:
 	void startPacketForwarding();
 	void startInputLoop();
 	void handle_incoming_message(std::string_view message);
-	void heartbeatLoop(std::shared_ptr<secure::SecureSocket> tls);
+	void heartbeatLoop();
 	void heartbeatWatchdogLoop();
+	void tcpSessionReplacementLoop();
+	void replaceTcpSession();
+	[[nodiscard]] SOCKET connectReplacementSocket(const std::string& bind_ip);
 	[[nodiscard]] bool handle_control_record(
 		std::uint8_t type, std::span<const std::uint8_t> payload);
 	void note_authenticated_receive() noexcept;
 	void terminate_unresponsive_channel(const char* reason) noexcept;
+	void clear_password() noexcept;
 	[[nodiscard]] std::shared_ptr<secure::SecureSocket> tls_snapshot() const;
 
 public:
@@ -91,6 +96,7 @@ public:
 		std::uint16_t port,
 		TransportProtocol transport);
 	bool send_integration_ipv4_packet(std::span<const std::uint8_t> packet);
+	void force_integration_tcp_session_replacement() noexcept;
 	secure::TrafficKeyRotationStats integration_rotation_stats();
 #endif
 
@@ -99,6 +105,8 @@ private:
 	std::string resolved_server_ip_;
 	int port_;
 	std::string password_;
+	std::mutex password_mutex_;
+	bool password_page_locked_{false};
 	std::string adaptername_;
 	std::string real_adapter_;
 	std::string local_ip_;
@@ -115,6 +123,8 @@ private:
 
 	std::atomic<SOCKET> sock_{INVALID_SOCKET};
 	std::atomic<SOCKET> pending_socket_{INVALID_SOCKET};
+	std::mutex pending_replacement_mutex_;
+	std::shared_ptr<secure::SecureSocket> pending_replacement_tls_;
 	std::mutex stop_mutex_;
 	bool start_called_ = false;
 	std::atomic<bool> stop_requested_{false};
@@ -126,8 +136,26 @@ private:
 	HANDLE cancellation_event_ = nullptr;
 	std::mutex session_mutex_;
 	std::mutex tls_write_mutex_;
+	// Gives bounded authenticated control traffic one turn between sustained
+	// application writes so a full-rate tunnel cannot starve its heartbeat.
+	std::atomic<bool> tcp_control_write_pending_{false};
 	std::mutex heartbeat_wait_mutex_;
 	std::condition_variable heartbeat_wait_cv_;
+	std::mutex rotation_wait_mutex_;
+	std::condition_variable rotation_wait_cv_;
+	std::atomic<bool> tcp_old_writes_blocked_{false};
+	// Set for the whole replacement attempt. The authenticated FREEZE phase
+	// turns on the write gate before NEW negotiation can consume any reserved
+	// old-generation control capacity.
+	std::atomic<bool> tcp_replacement_active_{false};
+	std::atomic<std::int64_t> tcp_handoff_deadline_ticks_{0};
+	std::atomic<bool> tcp_handoff_decision_attempted_{false};
+	std::mutex drain_wait_mutex_;
+	std::condition_variable drain_wait_cv_;
+	std::array<std::uint8_t, kSessionReplacementNonceSize> drain_nonce_{};
+	bool replacement_freeze_acknowledged_{false};
+	bool drain_acknowledged_{false};
+	bool drain_barrier_received_{false};
 	std::atomic<std::uint64_t> heartbeat_sequence_{0U};
 	std::atomic<std::uint64_t> heartbeat_last_ack_sequence_{0U};
 	std::atomic<std::uint64_t> heartbeat_acknowledgements_{0U};
@@ -141,11 +169,17 @@ private:
 	IntegrationEndpointObserver integration_endpoint_observer_;
 	IntegrationEndpointAttemptObserver integration_endpoint_attempt_observer_;
 	std::vector<std::string> integration_resolved_ipv4_addresses_;
+	std::atomic<bool> integration_force_tcp_session_replacement_{false};
 #endif
 	std::thread tun_thread_;
 	std::thread tls_thread_;
 	std::thread heartbeat_thread_;
 	std::thread heartbeat_watchdog_thread_;
+	std::thread tcp_rotation_thread_;
+	std::atomic<std::uint64_t> session_replacement_attempts_{0U};
+	std::atomic<std::uint64_t> session_replacement_successes_{0U};
+	std::atomic<std::uint64_t> session_replacement_failures_{0U};
+	std::atomic<std::uint64_t> last_handoff_pause_microseconds_{0U};
 	bool nat_public_installed_ = false;
 	bool nat_private_installed_ = false;
 	std::string nat_public_alias_;
