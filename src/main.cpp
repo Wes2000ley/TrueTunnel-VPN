@@ -114,7 +114,7 @@ GuiSmokeOptions parse_gui_smoke_options() noexcept {
 			options.valid = false;
 			return options;
 		}
-		options.log_path = *module_directory / L"vpn-gui-smoke.log";
+		options.log_path = *module_directory / L"TrueTunnel-gui-smoke.log";
                 if (options.log_path.empty()) options.valid = false;
         } catch (...) {
                 options.valid = false;
@@ -1685,10 +1685,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 	WNDCLASSEXW wc = {
 		sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L,
 		hInstance, h_icon, LoadCursor(nullptr, IDC_ARROW),
-		nullptr, nullptr, L"TrueTunnel VPN", h_icon_small
+		nullptr, nullptr, L"TrueTunnel", h_icon_small
 	};
 	if (::RegisterClassExW(&wc) == 0) return 1;
-	HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"TrueTunnel VPN", WS_OVERLAPPEDWINDOW,
+	HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"TrueTunnel", WS_OVERLAPPEDWINDOW,
 	                            CW_USEDEFAULT, CW_USEDEFAULT, 1180, 820,
 	                            nullptr, nullptr, wc.hInstance, nullptr);
 	if (hwnd == nullptr) {
@@ -4354,10 +4354,10 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 				nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
 				nid.uCallbackMessage = WM_TRAYICON;
 				nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_VPN_ICON));
-				strcpy_s(nid.szTip, "TrueTunnel VPN");
+				strcpy_s(nid.szTip, "TrueTunnel");
 				Shell_NotifyIcon(NIM_ADD, &nid);
 				nid.uFlags |= NIF_INFO;
-				strcpy_s(nid.szInfoTitle, "TrueTunnel VPN");
+				strcpy_s(nid.szInfoTitle, "TrueTunnel");
 				strcpy_s(nid.szInfo, "App minimized to system tray.\nDouble-click tray icon to restore.");
 				nid.dwInfoFlags = NIIF_INFO;
 				Shell_NotifyIcon(NIM_MODIFY, &nid);

@@ -2773,8 +2773,8 @@ void verify_authenticated_chat_rate_limit(VpnServer& server,
 
 [[nodiscard]] bool run_gui_smoke_process() {
     const std::filesystem::path directory = executable_path().parent_path();
-    const std::filesystem::path gui_executable = directory / L"vpn.exe";
-    const std::filesystem::path gui_log = directory / L"vpn-gui-smoke.log";
+    const std::filesystem::path gui_executable = directory / L"TrueTunnel.exe";
+    const std::filesystem::path gui_log = directory / L"TrueTunnel-gui-smoke.log";
     if (!std::filesystem::exists(gui_executable)) {
         std::cerr << "[FAIL] GUI executable is missing: "
                   << gui_executable.string() << '\n';
@@ -2850,7 +2850,7 @@ void verify_authenticated_chat_rate_limit(VpnServer& server,
 
     const std::filesystem::path sentinel =
         directory /
-        (L"vpn-gui-smoke-sentinel-" + std::to_wstring(::GetCurrentProcessId()) +
+        (L"TrueTunnel-gui-smoke-sentinel-" + std::to_wstring(::GetCurrentProcessId()) +
          L".txt");
     constexpr std::string_view sentinel_contents =
         "TrueTunnel smoke path sentinel - must remain unchanged";
@@ -2908,7 +2908,7 @@ void verify_authenticated_chat_rate_limit(VpnServer& server,
     const ChildRunResult smoke_result = run_child(
         std::move(command_line), 30'000U, exit_code, smoke_diagnostic);
     if (smoke_result != ChildRunResult::completed) {
-        std::cerr << "[FAIL] vpn.exe GUI smoke "
+        std::cerr << "[FAIL] TrueTunnel.exe GUI smoke "
                   << child_result_text(smoke_result) << " (diagnostic "
                   << smoke_diagnostic << ")\n";
         return false;
@@ -2939,7 +2939,7 @@ void verify_authenticated_chat_rate_limit(VpnServer& server,
             return false;
         }
     }
-    std::cout << "[PASS] Actual vpn.exe D3D/ImGui/secret/control smoke | log="
+    std::cout << "[PASS] Actual TrueTunnel.exe D3D/ImGui/secret/control smoke | log="
               << gui_log.string() << '\n';
     return true;
 }

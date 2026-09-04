@@ -1,0 +1,54 @@
+name: Feature request
+description: Suggest a focused improvement to TrueTunnel
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Please describe one focused user problem. Do not include credentials,
+        tunnel secrets, private keys, or security-sensitive proof-of-concept
+        material. Use the [security
+        policy](https://github.com/Wes2000ley/TrueTunnel-VPN/security/policy)
+        for vulnerabilities.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Who is affected, and what are they trying to accomplish?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the smallest useful change and how it should behave on failure.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - GUI and usability
+        - TCP / Schannel TLS
+        - UDP / wolfSSL DTLS
+        - Reconnect or heartbeat
+        - Wintun or Windows networking
+        - Build, tests, or documentation
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and confirmed this is not a duplicate.
+          required: true
+        - label: I have not included secrets or private security-report details.
+          required: true

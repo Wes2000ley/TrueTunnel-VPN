@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a reproducible defect in TrueTunnel
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for taking the time to report a defect. Do not use this form for
+        a suspected security vulnerability. Do not publish credentials, tunnel
+        secrets, private keys, or an exploit; follow the [security
+        policy](https://github.com/Wes2000ley/TrueTunnel-VPN/security/policy)
+        instead.
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      description: Provide the exact commit, tag, or file version tested.
+      placeholder: e.g. 1edc267 or V3
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 24H2
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - TCP / Schannel TLS
+        - UDP / wolfSSL DTLS
+        - GUI or configuration
+        - Wintun or networking lifecycle
+        - Other or not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest reliable sequence that demonstrates the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Remove secrets, credentials, private addresses, and unrelated personal data before posting.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and confirmed this is not a duplicate.
+          required: true
+        - label: This is not a security vulnerability report or sensitive disclosure.
+          required: true

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(vpn)
+project(TrueTunnel VERSION 3.1.0 LANGUAGES CXX)
 
 # The elevated process verifies the exact bundled Wintun binary before loading
 # it. Keep the configure-time package check in sync with src/vpn.cpp so an
@@ -183,6 +183,10 @@ add_executable(vpn
         src/raii.hpp
         ${VPN_GUI_SOURCES}
 )
+
+# Keep the internal target name stable for existing build integrations while
+# presenting the product's public name in installers and Windows Explorer.
+set_target_properties(vpn PROPERTIES OUTPUT_NAME "TrueTunnel")
 
 if (BUILD_TESTING)
     # The exact production GUI compiled as an unelevated visual-test process.
@@ -540,7 +544,7 @@ else ()
     add_custom_command(TARGET vpn POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${EXE_MANIFEST}"
-            "$<TARGET_FILE_DIR:vpn>/vpn.exe.manifest"
+            "$<TARGET_FILE_DIR:vpn>/TrueTunnel.exe.manifest"
     )
 endif ()
 
@@ -549,12 +553,38 @@ add_custom_command(TARGET vpn POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:vpn>"
         COMMAND ${CMAKE_COMMAND} -E make_directory
         "$<TARGET_FILE_DIR:vpn>/licenses"
+        COMMAND ${CMAKE_COMMAND} -E remove_directory
+        "$<TARGET_FILE_DIR:vpn>/docs"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/deps/wintun.dll"
         "$<TARGET_FILE_DIR:vpn>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/readme.md"
+        "${CMAKE_SOURCE_DIR}/README.md"
         "$<TARGET_FILE_DIR:vpn>/README.md"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/LICENSE"
+        "$<TARGET_FILE_DIR:vpn>/LICENSE"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/NOTICE"
+        "$<TARGET_FILE_DIR:vpn>/NOTICE"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/THIRD_PARTY.md"
+        "$<TARGET_FILE_DIR:vpn>/THIRD_PARTY.md"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/SECURITY.md"
+        "$<TARGET_FILE_DIR:vpn>/SECURITY.md"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/CHANGELOG.md"
+        "$<TARGET_FILE_DIR:vpn>/CHANGELOG.md"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/CONTRIBUTING.md"
+        "$<TARGET_FILE_DIR:vpn>/CONTRIBUTING.md"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/CODE_OF_CONDUCT.md"
+        "$<TARGET_FILE_DIR:vpn>/CODE_OF_CONDUCT.md"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/docs"
+        "$<TARGET_FILE_DIR:vpn>/docs"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/LICENSE"
         "$<TARGET_FILE_DIR:vpn>/licenses/TrueTunnel-LICENSE.txt"
@@ -614,9 +644,9 @@ endif()
 # Remove .lib and .exp files from the output directory
 add_custom_command(TARGET vpn POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E remove -f
-        "$<TARGET_FILE_DIR:vpn>/vpn.lib"
-        "$<TARGET_FILE_DIR:vpn>/vpn.exp"
-        "$<TARGET_FILE_DIR:vpn>/vpn.pdb"
+        "$<TARGET_FILE_DIR:vpn>/TrueTunnel.lib"
+        "$<TARGET_FILE_DIR:vpn>/TrueTunnel.exp"
+        "$<TARGET_FILE_DIR:vpn>/TrueTunnel.pdb"
         COMMENT "Deleting MSVC-generated .lib/.exp files from output"
 )
 # Set build type name safely (since multi-config generators like Visual Studio won't define it at configure time)
@@ -624,18 +654,26 @@ string(TOLOWER "$<CONFIG>" build_type)
 
 # Use generator expression for config-specific output folder
 set(zip_output_dir "$<TARGET_FILE_DIR:vpn>")
-set(zip_filename "$<TARGET_FILE_DIR:vpn>/TrueTunnel-VPN-$<CONFIG>.zip")
+set(zip_filename "$<TARGET_FILE_DIR:vpn>/TrueTunnel-$<CONFIG>.zip")
 
 # Package runtime files, documentation, and the exact license texts used by the
 # selected build configuration. Corresponding Source remains a distributor
 # obligation for GPLv3 builds; the notices do not replace it.
 add_custom_command(TARGET vpn POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E echo "Zipping TrueTunnel: $<CONFIG>"
-        COMMAND ${CMAKE_COMMAND} -E tar "cfv"
-        "${zip_filename}" --format=zip
-        -- "$<TARGET_FILE:vpn>"
-        "${zip_output_dir}/wintun.dll"
-        "${zip_output_dir}/README.md"
-        "${zip_output_dir}/licenses"
+        COMMAND ${CMAKE_COMMAND} -E chdir "${zip_output_dir}"
+        ${CMAKE_COMMAND} -E tar "cf" "${zip_filename}" --format=zip
+        -- "TrueTunnel.exe"
+        "wintun.dll"
+        "README.md"
+        "LICENSE"
+        "NOTICE"
+        "THIRD_PARTY.md"
+        "SECURITY.md"
+        "CHANGELOG.md"
+        "CONTRIBUTING.md"
+        "CODE_OF_CONDUCT.md"
+        "docs"
+        "licenses"
         COMMENT "Packing release zip: TrueTunnel-$<CONFIG>.zip"
 )

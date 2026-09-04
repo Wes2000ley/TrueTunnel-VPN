@@ -5,8 +5,8 @@
 IDI_VPN_ICON ICON "vpn.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,2,0,0
- PRODUCTVERSION 2,2,0,0
+ FILEVERSION 3,1,0,0
+ PRODUCTVERSION 3,1,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L       // VOS__WINDOWS32
@@ -17,15 +17,15 @@ BEGIN
   BEGIN
     BLOCK "040904b0"
     BEGIN
-      VALUE "CompanyName",      "Wesley Atwell"
-      VALUE "FileDescription",  "TrueTunnel VPN"
-      VALUE "FileVersion",      "2.2.0.0"
+      VALUE "CompanyName",      "TrueTunnel Project"
+      VALUE "FileDescription",  "TrueTunnel secure IPv4 VPN for Windows"
+      VALUE "FileVersion",      "3.1.0-dev"
       VALUE "InternalName",     "truetunnel"
-      VALUE "LegalCopyright",   "Copyright (c) 2025 Wesley Atwell"
+      VALUE "LegalCopyright",   "Copyright (c) 2025-2026 Wesley Atwell"
       VALUE "LegalTrademarks",  "TrueTunnel: MIT/GPLv2; bundled wolfSSL: GPLv3 or commercial"
-      VALUE "OriginalFilename", "vpn.exe"
-      VALUE "ProductName",      "TrueTunnel VPN"
-      VALUE "ProductVersion",   "2.2.0.0"
+      VALUE "OriginalFilename", "TrueTunnel.exe"
+      VALUE "ProductName",      "TrueTunnel"
+      VALUE "ProductVersion",   "3.1.0-dev"
     END
   END
 
