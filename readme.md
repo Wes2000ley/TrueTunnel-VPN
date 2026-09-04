@@ -378,17 +378,19 @@ The non-administrative suite contains eight registered tests:
 - `vpn_gui_visual_test` compiles the exact production ImGui dashboard into a
   separate executable without the administrator manifest or VPN-daemon startup.
   It proves that it is unelevated, renders Server/Client and TCP/UDP states at
-  desktop and compact sizes, exercises connected/connecting/stopping,
+  desktop, compact, and minimum-supported window sizes, exercises connected/connecting/stopping,
   recovery-enabled, and reconnecting states,
   opens both dialogs, focuses the endpoint through the real ImGui input path,
   verifies Tab focus order, Enter activation, and Escape dismissal, and renders
   field-level address, port, secret, adapter, and startup errors with the
   matching failure visible in Activity. It
   drives the outer dashboard to semantic card boundaries, snaps the Activity log
-  to complete rows, captures 31 Direct3D backbuffers to PNG with Windows Imaging
+  to complete rows, captures 33 Direct3D backbuffers to PNG with Windows Imaging
   Component, crops compact scrolled views to complete target sections, and
   rejects missing, blank, incorrectly sized, incompletely scrolled,
-  state-inconsistent, partially clipped-control, or clipped-target-card
+  state-inconsistent, misaligned chrome/card/endpoint geometry, long endpoint
+  overflow at the minimum supported viewport, partially clipped-control, or
+  clipped-target-card
   captures; and
 - `vpn_daemon_harness` exercises lifecycle transitions, re-entrant callbacks,
   invalid and retired secrets, recovery-policy validation and propagation,

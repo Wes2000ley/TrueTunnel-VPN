@@ -12,23 +12,24 @@ void ImGuiStyleManager::SetupStyle(ImGuiStyle& style, const float scale) {
 	// A restrained eight-point spacing system keeps the production window and
 	// the visual-test executable pixel-identical at the same DPI.
 	style = ImGuiStyle{};
-	style.WindowRounding = 16.0f;
+	style.WindowRounding = 18.0f;
 	style.ChildRounding = 16.0f;
-	style.FrameRounding = 10.0f;
-	style.PopupRounding = 14.0f;
+	style.FrameRounding = 9.0f;
+	style.PopupRounding = 16.0f;
 	style.ScrollbarRounding = 12.0f;
 	style.GrabRounding = 9.0f;
 	style.TabRounding = 10.0f;
 	style.FramePadding = ImVec2(12.0f, 9.0f);
 	style.ItemSpacing = ImVec2(10.0f, 9.0f);
 	style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+	style.CellPadding = ImVec2(5.0f, 4.0f);
 	style.WindowPadding = ImVec2(24.0f, 20.0f);
 	style.IndentSpacing = 18.0f;
 	style.ScrollbarSize = 9.0f;
 	style.GrabMinSize = 12.0f;
 	// Disabled settings must remain readable: their reduced contrast communicates
 	// that they are locked without making the active configuration disappear.
-	style.DisabledAlpha = 0.64f;
+	style.DisabledAlpha = 0.72f;
 	style.WindowBorderSize = 0.0f;
 	style.ChildBorderSize = 1.0f;
 	style.FrameBorderSize = 1.0f;
@@ -42,22 +43,22 @@ void ImGuiStyleManager::SetupStyle(ImGuiStyle& style, const float scale) {
 }
 
 void ImGuiStyleManager::SetupColors(ImVec4 *colors) {
-	const ImVec4 background(0.014f, 0.019f, 0.028f, 1.00f);
-	const ImVec4 panel(0.052f, 0.067f, 0.091f, 0.91f);
-	const ImVec4 panel_hover(0.076f, 0.101f, 0.139f, 0.97f);
-	const ImVec4 panel_active(0.093f, 0.127f, 0.178f, 1.00f);
+	const ImVec4 background(0.012f, 0.017f, 0.026f, 1.00f);
+	const ImVec4 panel(0.052f, 0.074f, 0.105f, 0.96f);
+	const ImVec4 panel_hover(0.070f, 0.105f, 0.153f, 0.99f);
+	const ImVec4 panel_active(0.084f, 0.129f, 0.190f, 1.00f);
 	const ImVec4 accent(0.286f, 0.604f, 1.000f, 1.00f);
 	const ImVec4 accent_hover(0.386f, 0.675f, 1.000f, 1.00f);
 	const ImVec4 accent_active(0.220f, 0.506f, 0.914f, 1.00f);
-	const ImVec4 border(0.235f, 0.278f, 0.345f, 0.68f);
+	const ImVec4 border(0.270f, 0.330f, 0.410f, 0.76f);
 
 	colors[ImGuiCol_Text] = ImVec4(0.930f, 0.956f, 0.990f, 1.00f);
 	colors[ImGuiCol_TextDisabled] = ImVec4(0.570f, 0.650f, 0.755f, 1.00f);
 	colors[ImGuiCol_WindowBg] = background;
-	colors[ImGuiCol_ChildBg] = ImVec4(0.034f, 0.046f, 0.065f, 0.90f);
-	colors[ImGuiCol_PopupBg] = ImVec4(0.030f, 0.040f, 0.057f, 0.99f);
+	colors[ImGuiCol_ChildBg] = ImVec4(0.036f, 0.052f, 0.075f, 0.94f);
+	colors[ImGuiCol_PopupBg] = ImVec4(0.027f, 0.041f, 0.061f, 1.00f);
 	colors[ImGuiCol_Border] = border;
-	colors[ImGuiCol_BorderShadow] = ImVec4(0.000f, 0.000f, 0.000f, 0.28f);
+	colors[ImGuiCol_BorderShadow] = ImVec4(0.000f, 0.000f, 0.000f, 0.44f);
 	colors[ImGuiCol_FrameBg] = panel;
 	colors[ImGuiCol_FrameBgHovered] = panel_hover;
 	colors[ImGuiCol_FrameBgActive] = panel_active;
@@ -72,13 +73,13 @@ void ImGuiStyleManager::SetupColors(ImVec4 *colors) {
 	colors[ImGuiCol_CheckMark] = accent;
 	colors[ImGuiCol_SliderGrab] = accent;
 	colors[ImGuiCol_SliderGrabActive] = accent_hover;
-	colors[ImGuiCol_Button] = ImVec4(0.070f, 0.094f, 0.130f, 0.96f);
+	colors[ImGuiCol_Button] = ImVec4(0.065f, 0.096f, 0.140f, 0.98f);
 	colors[ImGuiCol_ButtonHovered] = accent;
 	colors[ImGuiCol_ButtonActive] = accent_active;
 	colors[ImGuiCol_Header] = ImVec4(0.145f, 0.300f, 0.510f, 0.76f);
 	colors[ImGuiCol_HeaderHovered] = ImVec4(0.28f, 0.52f, 0.82f, 0.78f);
 	colors[ImGuiCol_HeaderActive] = accent;
-	colors[ImGuiCol_Separator] = ImVec4(0.218f, 0.258f, 0.322f, 0.55f);
+	colors[ImGuiCol_Separator] = ImVec4(0.240f, 0.320f, 0.425f, 0.58f);
 	colors[ImGuiCol_SeparatorHovered] = ImVec4(0.35f, 0.62f, 0.93f, 0.65f);
 	colors[ImGuiCol_SeparatorActive] = accent;
 	colors[ImGuiCol_TextSelectedBg] = ImVec4(0.24f, 0.51f, 0.83f, 0.42f);

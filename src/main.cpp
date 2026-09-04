@@ -35,6 +35,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <tchar.h>
 #include <algorithm>
@@ -614,6 +615,7 @@ struct GuiRenderMetrics {
 	bool help_visible{false};
 	bool disconnect_confirmation_visible{false};
 	bool partial_control_visible{false};
+	bool partial_activity_row_visible{false};
 	bool help_button_available{false};
 	bool endpoint_input_available{false};
 	bool disconnect_button_available{false};
@@ -624,6 +626,8 @@ struct GuiRenderMetrics {
 	bool recovery_status_visible{false};
 	bool configuration_controls_locked{false};
 	bool secure_session_indicators_active{false};
+	bool status_endpoint_port_visible{false};
+	bool wide_layout{false};
 	bool role_server_control_available{false};
 	bool transport_tcp_control_available{false};
 	bool secret_action_available{false};
@@ -635,6 +639,11 @@ struct GuiRenderMetrics {
 	ImVec2 secret_action_center{};
 	ImVec2 dashboard_clip_minimum{};
 	ImVec2 dashboard_clip_maximum{};
+	Bounds header_surface{};
+	Bounds help_button{};
+	Bounds status_card{};
+	Bounds status_context{};
+	Bounds status_endpoint{};
 	Bounds connection_card{};
 	Bounds recovery_card{};
 	Bounds endpoint_field{};
@@ -673,6 +682,53 @@ void record_last_item_bounds(GuiRenderMetrics::Bounds& bounds) noexcept {
 	bounds.maximum = ImGui::GetItemRectMax();
 	bounds.valid = bounds.maximum.x > bounds.minimum.x &&
 		bounds.maximum.y > bounds.minimum.y;
+}
+
+std::string ellipsize_text_to_width(
+		const std::string_view text,
+		const float maximum_width) {
+	if (text.empty() || maximum_width <= 0.0f) return {};
+	if (ImGui::CalcTextSize(text.data(), text.data() + text.size()).x <=
+		maximum_width) {
+		return std::string{text};
+	}
+
+	constexpr std::string_view ellipsis{"..."};
+	std::string_view preserved_suffix{};
+	std::size_t prefix_limit = text.size();
+	const std::size_t port_separator = text.rfind(':');
+	if (port_separator != std::string_view::npos &&
+		port_separator + 1U < text.size()) {
+		preserved_suffix = text.substr(port_separator);
+		prefix_limit = port_separator;
+	}
+	std::string fixed_tail{ellipsis};
+	fixed_tail.append(preserved_suffix);
+	if (ImGui::CalcTextSize(fixed_tail.c_str()).x > maximum_width) {
+		preserved_suffix = {};
+		prefix_limit = text.size();
+		fixed_tail.assign(ellipsis);
+	}
+	if (ImGui::CalcTextSize(fixed_tail.c_str()).x > maximum_width) {
+		return {};
+	}
+
+	// Remove complete UTF-8 code points from the host while retaining the port.
+	// Endpoint input is bounded to 63 bytes, so this simple loop is predictable.
+	std::size_t prefix_size = prefix_limit;
+	while (prefix_size > 0U) {
+		--prefix_size;
+		while (prefix_size > 0U &&
+			(static_cast<unsigned char>(text[prefix_size]) & 0xC0U) == 0x80U) {
+			--prefix_size;
+		}
+		std::string candidate{text.substr(0U, prefix_size)};
+		candidate.append(fixed_tail);
+		if (ImGui::CalcTextSize(candidate.c_str()).x <= maximum_width) {
+			return candidate;
+		}
+	}
+	return fixed_tail;
 }
 
 void push_validation_frame(const bool invalid) {
@@ -782,22 +838,22 @@ bool resize_client_area(
 
 void draw_brand_mark(const float scale) {
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
-	const ImVec2 size(44.0f * scale, 44.0f * scale);
+	const ImVec2 size(38.0f * scale, 38.0f * scale);
 	ImGui::Dummy(size);
 	ImDrawList* draw = ImGui::GetWindowDrawList();
 	const ImVec2 maximum(origin.x + size.x, origin.y + size.y);
 	draw->AddRectFilled(
-		ImVec2(origin.x, origin.y + 5.0f * scale),
-		ImVec2(maximum.x, maximum.y + 6.0f * scale),
+		ImVec2(origin.x, origin.y + 4.0f * scale),
+		ImVec2(maximum.x, maximum.y + 5.0f * scale),
 		ImGui::GetColorU32(ImVec4(0.00f, 0.08f, 0.22f, 0.42f)),
-		13.0f * scale);
+		11.0f * scale);
 	draw->AddRectFilled(
 		origin, maximum,
 		ImGui::GetColorU32(ImVec4(0.15f, 0.43f, 0.92f, 1.0f)),
-		12.0f * scale);
+		10.0f * scale);
 	draw->AddRectFilledMultiColor(
-		ImVec2(origin.x + 7.0f * scale, origin.y + 1.0f * scale),
-		ImVec2(maximum.x - 7.0f * scale, origin.y + 18.0f * scale),
+		ImVec2(origin.x + 6.0f * scale, origin.y + 1.0f * scale),
+		ImVec2(maximum.x - 6.0f * scale, origin.y + 16.0f * scale),
 		ImGui::GetColorU32(ImVec4(0.48f, 0.78f, 1.00f, 0.64f)),
 		ImGui::GetColorU32(ImVec4(0.28f, 0.66f, 1.00f, 0.26f)),
 		ImGui::GetColorU32(ImVec4(0.22f, 0.46f, 0.94f, 0.00f)),
@@ -805,26 +861,26 @@ void draw_brand_mark(const float scale) {
 	draw->AddRect(
 		origin, maximum,
 		ImGui::GetColorU32(ImVec4(0.56f, 0.82f, 1.00f, 0.72f)),
-		12.0f * scale, 0, 1.0f * scale);
+		10.0f * scale, 0, 1.0f * scale);
 	const ImVec2 center(origin.x + size.x * 0.5f, origin.y + size.y * 0.5f);
 	const ImU32 glyph = ImGui::GetColorU32(ImVec4(0.94f, 0.98f, 1.0f, 0.98f));
 	// A compact shield/T mark reads as security and avoids looking like a
 	// window's minus button at small sizes.
-	draw->PathLineTo(ImVec2(center.x, center.y - 12.0f * scale));
-	draw->PathLineTo(ImVec2(center.x + 11.0f * scale, center.y - 7.0f * scale));
-	draw->PathLineTo(ImVec2(center.x + 8.0f * scale, center.y + 7.0f * scale));
-	draw->PathLineTo(ImVec2(center.x, center.y + 13.0f * scale));
-	draw->PathLineTo(ImVec2(center.x - 8.0f * scale, center.y + 7.0f * scale));
-	draw->PathLineTo(ImVec2(center.x - 11.0f * scale, center.y - 7.0f * scale));
-	draw->PathLineTo(ImVec2(center.x, center.y - 12.0f * scale));
+	draw->PathLineTo(ImVec2(center.x, center.y - 10.0f * scale));
+	draw->PathLineTo(ImVec2(center.x + 9.0f * scale, center.y - 6.0f * scale));
+	draw->PathLineTo(ImVec2(center.x + 7.0f * scale, center.y + 6.0f * scale));
+	draw->PathLineTo(ImVec2(center.x, center.y + 11.0f * scale));
+	draw->PathLineTo(ImVec2(center.x - 7.0f * scale, center.y + 6.0f * scale));
+	draw->PathLineTo(ImVec2(center.x - 9.0f * scale, center.y - 6.0f * scale));
+	draw->PathLineTo(ImVec2(center.x, center.y - 10.0f * scale));
 	draw->PathStroke(glyph, 0, 1.8f * scale);
 	draw->AddLine(
-		ImVec2(center.x - 5.5f * scale, center.y - 4.0f * scale),
-		ImVec2(center.x + 5.5f * scale, center.y - 4.0f * scale),
+		ImVec2(center.x - 5.0f * scale, center.y - 3.5f * scale),
+		ImVec2(center.x + 5.0f * scale, center.y - 3.5f * scale),
 		glyph, 1.8f * scale);
 	draw->AddLine(
-		ImVec2(center.x, center.y - 4.0f * scale),
-		ImVec2(center.x, center.y + 6.5f * scale),
+		ImVec2(center.x, center.y - 3.5f * scale),
+		ImVec2(center.x, center.y + 5.5f * scale),
 		glyph, 1.8f * scale);
 }
 
@@ -839,8 +895,8 @@ void draw_glass_surface(
 	const ImVec2 maximum(origin.x + size.x, origin.y + size.y);
 	const float rounding = (emphasized ? 18.0f : 16.0f) * scale;
 
-	// One soft shadow and one neutral hairline are enough to separate the glass
-	// from the background without turning the app into a game overlay.
+	// Layered low-alpha edges provide depth without turning the utility into a
+	// glowing game overlay.
 	draw->AddRectFilled(
 		ImVec2(origin.x + 1.0f * scale, origin.y + 7.0f * scale),
 		ImVec2(maximum.x + 1.0f * scale, maximum.y + 9.0f * scale),
@@ -848,16 +904,21 @@ void draw_glass_surface(
 		rounding + 2.0f * scale);
 
 	const ImVec4 glass = emphasized
-		? ImVec4(0.040f, 0.061f, 0.091f, 0.94f)
-		: ImVec4(0.028f, 0.039f, 0.056f, 0.88f);
+		? ImVec4(0.046f, 0.071f, 0.106f, 0.96f)
+		: ImVec4(0.033f, 0.050f, 0.074f, 0.94f);
 	draw->AddRectFilled(origin, maximum, ImGui::GetColorU32(glass), rounding);
 
 	// The hairline and top highlight imply a laminated
 	// glass edge while remaining crisp at non-integer Windows DPI scales.
 	draw->AddRect(
 		origin, maximum,
-		ImGui::GetColorU32(ImVec4(0.31f, 0.35f, 0.42f, 0.64f)),
+		ImGui::GetColorU32(ImVec4(0.30f, 0.42f, 0.57f, 0.78f)),
 		rounding, 0, 1.0f * scale);
+	draw->AddRect(
+		ImVec2(origin.x + 1.0f * scale, origin.y + 1.0f * scale),
+		ImVec2(maximum.x - 1.0f * scale, maximum.y - 1.0f * scale),
+		ImGui::GetColorU32(ImVec4(0.80f, 0.91f, 1.00f, 0.055f)),
+		rounding - 1.0f * scale, 0, 1.0f * scale);
 	draw->AddLine(
 		ImVec2(origin.x + rounding, origin.y + 1.0f * scale),
 		ImVec2(maximum.x - rounding, origin.y + 1.0f * scale),
@@ -874,52 +935,21 @@ void draw_glass_surface(
 	}
 }
 
-void draw_pill(
-		const char* label,
-		const ImVec4& background,
-		const ImVec4& foreground,
-		const float scale) {
-	const ImVec2 text_size = ImGui::CalcTextSize(label);
-	const ImVec2 size(text_size.x + 20.0f * scale, 28.0f * scale);
-	const ImVec2 origin = ImGui::GetCursorScreenPos();
-	ImGui::Dummy(size);
-	ImDrawList* draw = ImGui::GetWindowDrawList();
-	draw->AddRectFilled(
-		ImVec2(origin.x, origin.y + 2.0f * scale),
-		ImVec2(origin.x + size.x, origin.y + size.y + 3.0f * scale),
-		ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.20f)),
-		14.0f * scale);
-	draw->AddRectFilled(
-		origin, ImVec2(origin.x + size.x, origin.y + size.y),
-		ImGui::GetColorU32(background), 14.0f * scale);
-	draw->AddRect(
-		origin, ImVec2(origin.x + size.x, origin.y + size.y),
-		ImGui::GetColorU32(ImVec4(foreground.x, foreground.y, foreground.z, 0.24f)),
-		14.0f * scale, 0, 1.0f * scale);
-	draw->AddLine(
-		ImVec2(origin.x + 10.0f * scale, origin.y + 1.0f * scale),
-		ImVec2(origin.x + size.x - 10.0f * scale, origin.y + 1.0f * scale),
-		ImGui::GetColorU32(ImVec4(0.80f, 0.92f, 1.00f, 0.12f)),
-		1.0f * scale);
-	draw->AddText(
-		ImVec2(origin.x + 10.0f * scale,
-		       origin.y + (size.y - text_size.y) * 0.5f),
-		ImGui::GetColorU32(foreground), label);
-}
-
 bool begin_card(
 		const char* id,
 		const float scale,
-		const bool emphasized = false) {
+		const bool emphasized = false,
+		const float vertical_padding = 18.0f) {
 	ImGui::PushStyleColor(
 		ImGuiCol_ChildBg,
-		emphasized ? ImVec4(0.038f, 0.057f, 0.084f, 0.91f)
-		           : ImVec4(0.027f, 0.037f, 0.052f, 0.86f));
+		emphasized ? ImVec4(0.046f, 0.071f, 0.106f, 0.96f)
+		           : ImVec4(0.036f, 0.052f, 0.075f, 0.94f));
 	ImGui::PushStyleColor(
-		ImGuiCol_Border, ImVec4(0.28f, 0.32f, 0.39f, 0.68f));
+		ImGuiCol_Border, ImVec4(0.29f, 0.35f, 0.43f, 0.78f));
 	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 16.0f * scale);
 	ImGui::PushStyleVar(
-		ImGuiStyleVar_WindowPadding, ImVec2(20.0f * scale, 18.0f * scale));
+		ImGuiStyleVar_WindowPadding,
+		ImVec2(20.0f * scale, vertical_padding * scale));
 	const bool visible = ImGui::BeginChild(
 		id, ImVec2(0.0f, 0.0f),
 		ImGuiChildFlags_Borders |
@@ -942,18 +972,35 @@ void end_card(
 	const ImVec2 item_min = ImGui::GetItemRectMin();
 	const ImVec2 item_max = ImGui::GetItemRectMax();
 	ImDrawList* draw = ImGui::GetWindowDrawList();
+	const float rounding = 16.0f * scale;
+	// Repaint a precise outer hairline and a restrained inner reflection after
+	// the child is laid out. This keeps every card edge identical at any DPI.
+	draw->AddRect(
+		item_min, item_max,
+		ImGui::GetColorU32(ImVec4(0.30f, 0.36f, 0.45f, 0.78f)),
+		rounding, 0, 1.0f * scale);
+	draw->AddRect(
+		ImVec2(item_min.x + 1.0f * scale, item_min.y + 1.0f * scale),
+		ImVec2(item_max.x - 1.0f * scale, item_max.y - 1.0f * scale),
+		ImGui::GetColorU32(ImVec4(0.82f, 0.91f, 1.00f, 0.045f)),
+		rounding - 1.0f * scale, 0, 1.0f * scale);
 	draw->AddLine(
 		ImVec2(item_min.x + 16.0f * scale, item_min.y + 1.0f * scale),
 		ImVec2(item_max.x - 16.0f * scale, item_min.y + 1.0f * scale),
-		ImGui::GetColorU32(ImVec4(0.94f, 0.97f, 1.00f, 0.085f)),
+		ImGui::GetColorU32(ImVec4(0.94f, 0.97f, 1.00f, 0.12f)),
 		1.0f * scale);
+	draw->AddLine(
+		ImVec2(item_min.x + rounding, item_max.y + 2.0f * scale),
+		ImVec2(item_max.x - rounding, item_max.y + 2.0f * scale),
+		ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.30f)),
+		2.0f * scale);
 	if (emphasized) {
 		ImVec4 accent_edge = accent;
-		accent_edge.w = 0.86f;
+		accent_edge.w = 0.94f;
 		draw->AddLine(
-			ImVec2(item_min.x + 16.0f * scale, item_min.y + 1.0f * scale),
-			ImVec2(item_min.x + 118.0f * scale, item_min.y + 1.0f * scale),
-			ImGui::GetColorU32(accent_edge), 2.0f * scale);
+			ImVec2(item_min.x + 1.5f * scale, item_min.y + 18.0f * scale),
+			ImVec2(item_min.x + 1.5f * scale, item_max.y - 18.0f * scale),
+			ImGui::GetColorU32(accent_edge), 3.0f * scale);
 	}
 	ImGui::PopStyleVar(2);
 	ImGui::PopStyleColor(2);
@@ -980,10 +1027,14 @@ void card_heading(
 bool segment_button(
 		const char* label,
 		const bool selected,
-		const ImVec2& size) {
+		const ImVec2& size,
+		const float scale,
+		const bool read_only = false) {
 	ImGui::PushStyleColor(
 		ImGuiCol_Button,
-		selected ? ImVec4(0.145f, 0.390f, 0.790f, 0.98f)
+		selected ? (read_only
+			? ImVec4(0.105f, 0.235f, 0.410f, 0.98f)
+			: ImVec4(0.145f, 0.390f, 0.790f, 0.98f))
 		         : ImVec4(0.047f, 0.086f, 0.145f, 0.90f));
 	ImGui::PushStyleColor(
 		ImGuiCol_ButtonHovered,
@@ -993,25 +1044,83 @@ bool segment_button(
 		ImGuiCol_ButtonActive, ImVec4(0.145f, 0.349f, 0.659f, 1.0f));
 	ImGui::PushStyleColor(
 		ImGuiCol_Text,
-		selected ? ImVec4(0.98f, 0.99f, 1.0f, 1.0f)
+		selected ? (read_only
+			? ImVec4(0.76f, 0.83f, 0.91f, 1.0f)
+			: ImVec4(0.98f, 0.99f, 1.0f, 1.0f))
 		         : ImVec4(0.63f, 0.70f, 0.79f, 1.0f));
 	ImGui::PushStyleColor(
 		ImGuiCol_Border,
-		selected ? ImVec4(0.38f, 0.70f, 1.00f, 0.76f)
+		selected ? (read_only
+			? ImVec4(0.30f, 0.50f, 0.71f, 0.68f)
+			: ImVec4(0.38f, 0.70f, 1.00f, 0.76f))
 		         : ImVec4(0.21f, 0.34f, 0.51f, 0.58f));
-	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f * scale);
 	const bool clicked = ImGui::Button(label, size);
 	const ImVec2 item_min = ImGui::GetItemRectMin();
 	const ImVec2 item_max = ImGui::GetItemRectMax();
-	if (selected) {
+	if (selected && !read_only) {
 		ImGui::GetWindowDrawList()->AddLine(
-			ImVec2(item_min.x + 12.0f, item_min.y + 1.0f),
-			ImVec2(item_max.x - 12.0f, item_min.y + 1.0f),
-			ImGui::GetColorU32(ImVec4(0.72f, 0.89f, 1.00f, 0.34f)));
+			ImVec2(item_min.x + 12.0f * scale, item_min.y + 1.0f * scale),
+			ImVec2(item_max.x - 12.0f * scale, item_min.y + 1.0f * scale),
+			ImGui::GetColorU32(ImVec4(0.72f, 0.89f, 1.00f, 0.34f)),
+			1.0f * scale);
 	}
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor(5);
 	return clicked;
+}
+
+void decorate_popup_surface(const float scale, const ImVec4& accent) {
+	const ImVec2 minimum = ImGui::GetWindowPos();
+	const ImVec2 maximum(
+		minimum.x + ImGui::GetWindowWidth(),
+		minimum.y + ImGui::GetWindowHeight());
+	const float rounding = ImGui::GetStyle().PopupRounding;
+	ImDrawList* draw = ImGui::GetWindowDrawList();
+	draw->AddRect(
+		minimum, maximum,
+		ImGui::GetColorU32(ImVec4(0.35f, 0.52f, 0.72f, 0.88f)),
+		rounding, 0, 1.0f * scale);
+	draw->AddRect(
+		ImVec2(minimum.x + 1.0f * scale, minimum.y + 1.0f * scale),
+		ImVec2(maximum.x - 1.0f * scale, maximum.y - 1.0f * scale),
+		ImGui::GetColorU32(ImVec4(0.86f, 0.94f, 1.0f, 0.08f)),
+		rounding - 1.0f * scale, 0, 1.0f * scale);
+	ImVec4 top_accent = accent;
+	top_accent.w = 0.90f;
+	draw->AddLine(
+		ImVec2(minimum.x + rounding, minimum.y + 1.0f * scale),
+		ImVec2(minimum.x + rounding + 76.0f * scale,
+		       minimum.y + 1.0f * scale),
+		ImGui::GetColorU32(top_accent), 2.0f * scale);
+}
+
+void decorate_last_button_surface(
+		const float scale,
+		const ImVec4& accent,
+		const bool enabled = true) {
+	if (!enabled || !ImGui::IsItemVisible() ||
+		(!ImGui::IsItemHovered() && !ImGui::IsItemFocused() &&
+		 !ImGui::IsItemActive())) {
+		return;
+	}
+	const ImVec2 minimum = ImGui::GetItemRectMin();
+	const ImVec2 maximum = ImGui::GetItemRectMax();
+	const float rounding = ImGui::GetStyle().FrameRounding;
+	ImDrawList* draw = ImGui::GetWindowDrawList();
+	ImVec4 edge = accent;
+	edge.w *= 0.72f;
+	draw->AddRect(
+		ImVec2(minimum.x + 1.0f * scale, minimum.y + 1.0f * scale),
+		ImVec2(maximum.x - 1.0f * scale, maximum.y - 1.0f * scale),
+		ImGui::GetColorU32(edge), rounding - 1.0f * scale,
+		0, 1.0f * scale);
+	ImVec4 sheen = accent;
+	sheen.w = 0.28f;
+	draw->AddLine(
+		ImVec2(minimum.x + rounding, minimum.y + 1.0f * scale),
+		ImVec2(maximum.x - rounding, minimum.y + 1.0f * scale),
+		ImGui::GetColorU32(sheen), 1.0f * scale);
 }
 
 bool toggle_switch(
@@ -1154,7 +1263,13 @@ void posture_row(
 	}
 	ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 30.0f * scale);
 	ImGui::TextUnformatted(title);
-	ImGui::SameLine(142.0f * scale);
+	float widest_title = ImGui::CalcTextSize("Protocol").x;
+	widest_title = (std::max)(widest_title, ImGui::CalcTextSize("Provider").x);
+	widest_title = (std::max)(widest_title, ImGui::CalcTextSize("Cipher").x);
+	widest_title = (std::max)(widest_title, ImGui::CalcTextSize("Key lifecycle").x);
+	const float detail_screen_x = origin.x + 30.0f * scale +
+		widest_title + 16.0f * scale;
+	ImGui::SameLine(detail_screen_x - ImGui::GetWindowPos().x);
 	ImGui::TextDisabled("%s", detail);
 	ImGui::Dummy(ImVec2(0.0f, 3.0f * scale));
 }
@@ -1241,6 +1356,8 @@ struct VisualCaptureCase {
 	bool recovery_enabled;
 	bool activate_recovery_with_keyboard;
 	bool attempt_locked_configuration;
+	const char* server_address_override;
+	bool capture_full_viewport;
 };
 
 constexpr VisualCaptureCase visual_case(
@@ -1267,7 +1384,9 @@ constexpr VisualCaptureCase visual_case(
 		const int connection_phase = -1,
 		const bool recovery_enabled = false,
 		const bool activate_recovery_with_keyboard = false,
-		const bool attempt_locked_configuration = false) noexcept {
+		const bool attempt_locked_configuration = false,
+		const char* server_address_override = nullptr,
+		const bool capture_full_viewport = false) noexcept {
 	return {
 		filename, label, role, transport, daemon_state,
 		logical_width, logical_height, content_target,
@@ -1277,11 +1396,12 @@ constexpr VisualCaptureCase visual_case(
 		open_help, open_disconnect, tab_endpoint_to_port,
 		activate_primary_with_keyboard, dismiss_help_with_escape,
 		connection_phase, recovery_enabled, activate_recovery_with_keyboard,
-		attempt_locked_configuration
+		attempt_locked_configuration, server_address_override,
+		capture_full_viewport
 	};
 }
 
-constexpr std::array<VisualCaptureCase, 31> kVisualCaptureCases{{
+constexpr std::array<VisualCaptureCase, 33> kVisualCaptureCases{{
 	visual_case(L"01-server-tcp-overview.png", "server TCP desktop",
 		0, 0, VpnDaemon::State::Idle),
 	visual_case(L"02-server-udp-overview.png", "server UDP desktop",
@@ -1390,6 +1510,16 @@ constexpr std::array<VisualCaptureCase, 31> kVisualCaptureCases{{
 		1, 1, VpnDaemon::State::Running, 1180, 820,
 		VisualContentTarget::Top, 0.0f, 0.0f, false, false,
 		UiErrorField::None, nullptr, false, false, false, false, false, false, 2, false, false, true),
+	visual_case(L"32-minimum-window-recovery.png", "minimum supported window",
+		1, 1, VpnDaemon::State::Idle, 760, 640,
+		VisualContentTarget::Recovery, 0.0f, 0.0f, true, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false, 0, true),
+	visual_case(L"33-minimum-long-hostname.png", "minimum window long endpoint",
+		1, 1, VpnDaemon::State::Idle, 760, 640,
+		VisualContentTarget::Recovery, 0.0f, 0.0f, true, false,
+		UiErrorField::None, nullptr, false, false, false, false, false, false,
+		0, true, false, false,
+		"vpn-gateway-012345678901234567890123456789012345678901x.example", true),
 }};
 
 bool process_is_elevated() noexcept {
@@ -1837,6 +1967,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				? -1 : 0;
 			if (capture_case.validation_field == UiErrorField::Endpoint) {
 				server_address[0] = '\0';
+			} else if (capture_case.server_address_override != nullptr) {
+				strncpy_s(
+					server_address, capture_case.server_address_override,
+					sizeof(server_address) - 1U);
 			} else {
 				strncpy_s(
 					server_address, "vpn.example.net",
@@ -2078,6 +2212,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 		render_metrics.help_visible = false;
 		render_metrics.disconnect_confirmation_visible = false;
 		render_metrics.partial_control_visible = false;
+		render_metrics.partial_activity_row_visible = false;
 		render_metrics.help_button_available = false;
 		render_metrics.endpoint_input_available = false;
 		render_metrics.disconnect_button_available = false;
@@ -2088,9 +2223,16 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 		render_metrics.recovery_status_visible = false;
 		render_metrics.configuration_controls_locked = false;
 		render_metrics.secure_session_indicators_active = false;
+		render_metrics.status_endpoint_port_visible = false;
+		render_metrics.wide_layout = false;
 		render_metrics.role_server_control_available = false;
 		render_metrics.transport_tcp_control_available = false;
 		render_metrics.secret_action_available = false;
+		render_metrics.header_surface = {};
+		render_metrics.help_button = {};
+		render_metrics.status_card = {};
+		render_metrics.status_context = {};
+		render_metrics.status_endpoint = {};
 		render_metrics.connection_card = {};
 		render_metrics.recovery_card = {};
 		render_metrics.endpoint_field = {};
@@ -2222,10 +2364,15 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				status_detail_storage = "No active tunnel";
 			}
 			const char* status_detail = status_detail_storage.c_str();
+			const std::string endpoint_summary = is_server
+				? std::string("All interfaces · port ") + port
+				: server_address[0] == '\0'
+					? std::string("Missing server address · port ") + port
+					: std::string(server_address) + ":" + port;
 
 			// A quiet application bar keeps identity and help available without
 			// displacing the connection workflow with marketing copy.
-			const float header_height = 64.0f * scale;
+			const float header_height = 54.0f * scale;
 			const ImVec2 header_origin = ImGui::GetCursorScreenPos();
 			draw_glass_surface(
 				header_origin,
@@ -2234,24 +2381,36 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 			ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 16.0f * scale);
 			ImGui::PushStyleVar(
-				ImGuiStyleVar_WindowPadding, ImVec2(11.0f * scale, 10.0f * scale));
+				ImGuiStyleVar_WindowPadding, ImVec2(10.0f * scale, 8.0f * scale));
 			ImGui::BeginChild("##Header", ImVec2(0, header_height), false,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
 				ImGuiWindowFlags_NoBackground);
 			draw_brand_mark(scale);
-			ImGui::SameLine(0.0f, 13.0f * scale);
-			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f * scale);
+			ImGui::SameLine(0.0f, 12.0f * scale);
+			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 5.0f * scale);
 			if (fonts.title != nullptr) ImGui::PushFont(fonts.title);
 			ImGui::TextUnformatted("TrueTunnel");
 			if (fonts.title != nullptr) ImGui::PopFont();
-			ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 72.0f * scale);
-			ImGui::SetCursorPosY(18.0f * scale);
-			if (ImGui::Button("Help", ImVec2(72.0f * scale, 30.0f * scale))) {
+			const float title_right =
+				ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+			const float help_width = (std::max)(
+				68.0f * scale,
+				ImGui::CalcTextSize("Help").x + 28.0f * scale);
+			const float help_x = (std::max)(
+				title_right + 18.0f * scale,
+				ImGui::GetWindowContentRegionMax().x - help_width);
+			ImGui::SameLine(help_x);
+			ImGui::SetCursorPosY(12.0f * scale);
+			if (ImGui::Button("Help", ImVec2(help_width, 30.0f * scale))) {
 				ImGui::OpenPopup("Connection help");
 			}
+			decorate_last_button_surface(
+				scale, ImVec4(0.52f, 0.76f, 1.0f, 0.45f));
 			render_metrics.help_button_available = ImGui::IsItemVisible();
 			render_metrics.help_button_center = last_item_center();
+			record_last_item_bounds(render_metrics.help_button);
 			ImGui::EndChild();
+			record_last_item_bounds(render_metrics.header_surface);
 			ImGui::PopStyleVar(2);
 			ImGui::PopStyleColor();
 
@@ -2262,6 +2421,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				visual_help_popup_opened_once = true;
 			}
 #endif
+			ImGui::PushStyleColor(
+				ImGuiCol_PopupBg, ImVec4(0.027f, 0.041f, 0.061f, 1.0f));
+			ImGui::PushStyleColor(
+				ImGuiCol_Border, ImVec4(0.35f, 0.52f, 0.72f, 0.88f));
+			ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f * scale);
+			ImGui::PushStyleVar(
+				ImGuiStyleVar_WindowPadding, ImVec2(24.0f * scale, 20.0f * scale));
 			ImGui::SetNextWindowPos(
 				ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
 				ImVec2(0.5f, 0.5f));
@@ -2273,6 +2439,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				if (!visual_help_open) ImGui::CloseCurrentPopup();
 			#endif
 				render_metrics.help_visible = true;
+				decorate_popup_surface(
+					scale, ImVec4(0.30f, 0.66f, 1.0f, 1.0f));
 				if (fonts.semibold != nullptr) ImGui::PushFont(fonts.semibold);
 				ImGui::TextUnformatted("Before you connect");
 				if (fonts.semibold != nullptr) ImGui::PopFont();
@@ -2282,12 +2450,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				ImGui::BulletText("Server listens for an authenticated peer; Client connects to one.");
 				ImGui::BulletText("Generate the shared key on Server, then paste it into Client.");
 				ImGui::BulletText("Use TCP for reliable streams or UDP for latency-sensitive traffic.");
-				ImGui::BulletText("Client automatic recovery is optional: encrypted heartbeat plus bounded retries.");
+				ImGui::BulletText("Client recovery is optional: 5s heartbeat, 15s timeout, capped retry delay.");
 				ImGui::BulletText("Minimize to keep TrueTunnel in the system tray.");
 				if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
 				if (ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
 				ImGui::EndPopup();
 			}
+			ImGui::PopStyleVar(2);
+			ImGui::PopStyleColor(2);
 
 			// A compact command surface keeps status and the primary action visible.
 			if (begin_card("##StatusCard", scale, true)) {
@@ -2323,15 +2493,32 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					}
 
 					ImGui::TableSetColumnIndex(1);
-					draw_pill(
-						mode_labels[selected_mode],
-						ImVec4(0.091f, 0.151f, 0.230f, 1.0f),
-						ImVec4(0.72f, 0.82f, 0.94f, 1.0f), scale);
-					ImGui::SameLine(0.0f, 7.0f * scale);
-					draw_pill(
-						transport_labels[selected_transport],
-						ImVec4(0.120f, 0.254f, 0.420f, 1.0f),
-						ImVec4(0.55f, 0.79f, 1.0f, 1.0f), scale);
+					const std::string status_context =
+						std::string(mode_labels[selected_mode]) + " · " +
+						transport_labels[selected_transport];
+					const float summary_gap = 9.0f * scale;
+					const float endpoint_width = (std::max)(
+						1.0f,
+						ImGui::GetContentRegionAvail().x -
+							ImGui::CalcTextSize(status_context.c_str()).x - summary_gap);
+					const std::string visible_endpoint =
+						ellipsize_text_to_width(endpoint_summary, endpoint_width);
+					const std::string expected_port_suffix = std::string(":") + port;
+					render_metrics.status_endpoint_port_visible = is_server ||
+						server_address[0] == '\0' ||
+						(visible_endpoint.size() >= expected_port_suffix.size() &&
+						 visible_endpoint.compare(
+							visible_endpoint.size() - expected_port_suffix.size(),
+							expected_port_suffix.size(), expected_port_suffix) == 0);
+					ImGui::TextDisabled("%s", status_context.c_str());
+					record_last_item_bounds(render_metrics.status_context);
+					ImGui::SameLine(0.0f, summary_gap);
+					ImGui::TextUnformatted(visible_endpoint.c_str());
+					record_last_item_bounds(render_metrics.status_endpoint);
+					if (visible_endpoint != endpoint_summary &&
+						ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+						ImGui::SetTooltip("%s", endpoint_summary.c_str());
+					}
 					const float action_width = ImGui::GetContentRegionAvail().x;
 #ifdef TRUETUNNEL_GUI_VISUAL_TEST
 					const bool connect_disabled = !is_idle;
@@ -2347,7 +2534,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						ImGui::PushStyleColor(
 							ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.55f, 1.0f, 1.0f));
 						ImGui::PushStyleColor(
-							ImGuiCol_Border, ImVec4(0.46f, 0.75f, 1.0f, 0.82f));
+							ImGuiCol_Border, ImVec4(0.34f, 0.58f, 0.82f, 0.70f));
 #ifdef TRUETUNNEL_GUI_VISUAL_TEST
 						if (visual_activate_primary_with_keyboard &&
 							visual_input_stage >= 1U &&
@@ -2358,6 +2545,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						connect_clicked = ImGui::Button(
 							is_server ? "Start server" : "Connect",
 							ImVec2(action_width, 38.0f * scale));
+						decorate_last_button_surface(
+							scale, ImVec4(0.72f, 0.90f, 1.0f, 0.85f),
+							!connect_disabled);
 						render_metrics.connect_action_visible = ImGui::IsItemVisible();
 #ifdef TRUETUNNEL_GUI_VISUAL_TEST
 						render_metrics.primary_action_focused = ImGui::IsItemFocused();
@@ -2390,6 +2580,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 							            : is_starting ? "Cancel connection"
 							                          : "Disconnect",
 							ImVec2(action_width, 38.0f * scale));
+						decorate_last_button_surface(
+							scale, ImVec4(0.50f, 0.69f, 0.92f, 0.62f),
+							can_disconnect);
 						render_metrics.disconnect_action_visible = ImGui::IsItemVisible();
 						render_metrics.disconnect_button_available =
 							ImGui::IsItemVisible() && can_disconnect;
@@ -2485,12 +2678,20 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				}
 			}
 			end_card(scale, state_color, true);
+			record_last_item_bounds(render_metrics.status_card);
 
 #ifdef TRUETUNNEL_GUI_VISUAL_TEST
 			if (visual_disconnect_open && visual_input_stage >= 2U) {
 				ImGui::OpenPopup("Disconnect tunnel");
 			}
 #endif
+			ImGui::PushStyleColor(
+				ImGuiCol_PopupBg, ImVec4(0.030f, 0.039f, 0.055f, 1.0f));
+			ImGui::PushStyleColor(
+				ImGuiCol_Border, ImVec4(0.58f, 0.31f, 0.34f, 0.90f));
+			ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f * scale);
+			ImGui::PushStyleVar(
+				ImGuiStyleVar_WindowPadding, ImVec2(24.0f * scale, 20.0f * scale));
 			ImGui::SetNextWindowPos(
 				ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
 				ImVec2(0.5f, 0.5f));
@@ -2502,17 +2703,28 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				if (!visual_disconnect_open) ImGui::CloseCurrentPopup();
 			#endif
 				render_metrics.disconnect_confirmation_visible = true;
+				decorate_popup_surface(
+					scale, ImVec4(1.0f, 0.36f, 0.38f, 1.0f));
 				if (fonts.semibold != nullptr) ImGui::PushFont(fonts.semibold);
 				ImGui::TextUnformatted("End this secure session?");
 				if (fonts.semibold != nullptr) ImGui::PopFont();
 				ImGui::TextDisabled("Traffic through the tunnel will stop immediately.");
 				ImGui::Spacing();
+				ImGui::PushStyleColor(
+					ImGuiCol_Button, ImVec4(0.53f, 0.13f, 0.17f, 1.0f));
+				ImGui::PushStyleColor(
+					ImGuiCol_ButtonHovered, ImVec4(0.72f, 0.18f, 0.22f, 1.0f));
+				ImGui::PushStyleColor(
+					ImGuiCol_ButtonActive, ImVec4(0.43f, 0.09f, 0.13f, 1.0f));
+				ImGui::PushStyleColor(
+					ImGuiCol_Border, ImVec4(1.0f, 0.43f, 0.46f, 0.78f));
 				if (ImGui::Button(
 						"Disconnect", ImVec2(132.0f * scale, 36.0f * scale))) {
 					append_log("[System] Disconnect requested");
 					if (g_vpn_daemon) g_vpn_daemon->stop();
 					ImGui::CloseCurrentPopup();
 				}
+				ImGui::PopStyleColor(4);
 				ImGui::SameLine();
 				if (ImGui::Button(
 						"Keep connected", ImVec2(132.0f * scale, 36.0f * scale))) {
@@ -2521,6 +2733,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				if (ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
 				ImGui::EndPopup();
 			}
+			ImGui::PopStyleVar(2);
+			ImGui::PopStyleColor(2);
 
 			ImGui::Dummy(ImVec2(0.0f, 3.0f * scale));
 			ImGui::BeginChild(
@@ -2577,6 +2791,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 
 			const bool wide_layout =
 				ImGui::GetContentRegionAvail().x >= 1080.0f * scale;
+			render_metrics.wide_layout = wide_layout;
 			bool dashboard_table_open = false;
 			if (wide_layout) {
 				dashboard_table_open = ImGui::BeginTable(
@@ -2612,7 +2827,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				ImGui::BeginDisabled(configuration_locked);
 				if (segment_button(
 						"Server##role", selected_mode == 0,
-						ImVec2(segment_width, 40.0f * scale))) {
+						ImVec2(segment_width, 40.0f * scale), scale,
+						configuration_locked)) {
 					selected_mode = 0;
 					strncpy_s(mode, mode_options[0], sizeof(mode) - 1U);
 					clear_ui_error();
@@ -2624,7 +2840,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				ImGui::SameLine(0.0f, segment_gap);
 				if (segment_button(
 						"Client##role", selected_mode == 1,
-						ImVec2(segment_width, 40.0f * scale))) {
+						ImVec2(segment_width, 40.0f * scale), scale,
+						configuration_locked)) {
 					selected_mode = 1;
 					strncpy_s(mode, mode_options[1], sizeof(mode) - 1U);
 					clear_ui_error();
@@ -2643,7 +2860,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				ImGui::BeginDisabled(configuration_locked);
 				if (segment_button(
 						"TCP  |  Reliable##transport", selected_transport == 0,
-						ImVec2(segment_width, 40.0f * scale))) {
+						ImVec2(segment_width, 40.0f * scale), scale,
+						configuration_locked)) {
 					selected_transport = 0;
 					clear_ui_error();
 				}
@@ -2654,7 +2872,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				ImGui::SameLine(0.0f, segment_gap);
 				if (segment_button(
 						"UDP  |  Low latency##transport", selected_transport == 1,
-						ImVec2(segment_width, 40.0f * scale))) {
+						ImVec2(segment_width, 40.0f * scale), scale,
+						configuration_locked)) {
 					selected_transport = 1;
 					clear_ui_error();
 				}
@@ -2777,9 +2996,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						content_anchor(ImGui::GetCursorScreenPos().y);
 					ImGui::BeginGroup();
 					ImGui::PushStyleColor(
-						ImGuiCol_ChildBg, ImVec4(0.043f, 0.061f, 0.088f, 0.92f));
+						ImGuiCol_ChildBg, ImVec4(0.050f, 0.074f, 0.108f, 0.96f));
 					ImGui::PushStyleColor(
-						ImGuiCol_Border, ImVec4(0.30f, 0.39f, 0.52f, 0.72f));
+						ImGuiCol_Border, ImVec4(0.29f, 0.45f, 0.65f, 0.82f));
 					ImGui::PushStyleVar(
 						ImGuiStyleVar_ChildRounding, 12.0f * scale);
 					ImGui::PushStyleVar(
@@ -2810,9 +3029,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						ImGui::TextDisabled(
 							recovery_controls_disabled
 								? (recovery_options.enabled
-									? "Monitoring enabled · disconnect to change."
+									? "Monitoring active · retries continue until disconnect."
 									: "Off for this session · disconnect to change.")
-								: "Encrypted heartbeat and bounded retries.");
+								: "5s heartbeat · 15s timeout · 1-30s retry delay until disconnect.");
 						ImGui::PopTextWrapPos();
 						ImGui::TableSetColumnIndex(1);
 						ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f * scale);
@@ -2873,7 +3092,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 							ImVec2(
 								render_metrics.recovery_card.maximum.x - 14.0f * scale,
 								render_metrics.recovery_card.minimum.y + 1.0f * scale),
-							ImGui::GetColorU32(ImVec4(0.78f, 0.90f, 1.0f, 0.13f)),
+							ImGui::GetColorU32(ImVec4(0.78f, 0.90f, 1.0f, 0.18f)),
 							1.0f * scale);
 					}
 				}
@@ -2930,10 +3149,23 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						ui_error_field == UiErrorField::Adapter;
 					push_validation_frame(adapter_invalid);
 					ImGui::BeginDisabled(configuration_locked);
-					if (ImGui::Combo(
-						"##real_adapter", &current_adapter_idx_,
-						adapter_cstrs_.data(), static_cast<int>(adapter_cstrs_.size()))) {
-						clear_ui_error();
+					const bool valid_adapter_selection = current_adapter_idx_ >= 0 &&
+						current_adapter_idx_ < static_cast<int>(adapter_labels_.size());
+					const char* adapter_preview = valid_adapter_selection
+						? adapter_labels_[static_cast<std::size_t>(current_adapter_idx_)].c_str()
+						: "Select a physical adapter...";
+					if (ImGui::BeginCombo("##real_adapter", adapter_preview)) {
+						for (std::size_t index = 0; index < adapter_labels_.size(); ++index) {
+							const bool selected = current_adapter_idx_ ==
+								static_cast<int>(index);
+							if (ImGui::Selectable(
+									adapter_labels_[index].c_str(), selected)) {
+								current_adapter_idx_ = static_cast<int>(index);
+								clear_ui_error();
+							}
+							if (selected) ImGui::SetItemDefaultFocus();
+						}
+						ImGui::EndCombo();
 					}
 					ImGui::EndDisabled();
 					pop_validation_frame(adapter_invalid);
@@ -3071,15 +3303,83 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 			end_card(scale);
 			record_last_item_bounds(render_metrics.secret_card);
 
+			const auto render_security_card = [&]() {
+				render_metrics.security_anchor_y =
+					content_anchor(ImGui::GetCursorScreenPos().y);
+				if (begin_card("##SecurityPosture", scale)) {
+					if (fonts.semibold != nullptr) ImGui::PushFont(fonts.semibold);
+					ImGui::TextUnformatted("Security profile");
+					if (fonts.semibold != nullptr) ImGui::PopFont();
+					ImGui::SameLine();
+					ImGui::TextColored(
+						is_reconnecting
+							? ImVec4(1.0f, 0.70f, 0.32f, 1.0f)
+							: secure_session_active
+								? ImVec4(0.43f, 0.80f, 0.65f, 1.0f)
+								: ImVec4(0.49f, 0.72f, 0.96f, 1.0f),
+						is_reconnecting
+							? "· Negotiating"
+							: secure_session_active ? "· Active" : "· Configured");
+					ImGui::Spacing();
+					posture_row(
+						"Protocol",
+						native_tcp
+							? (is_reconnecting
+								? "TLS 1.3 · pending"
+								: secure_session_active ? "TLS 1.3" : "TLS 1.3 · selected")
+							: (is_reconnecting
+								? "DTLS 1.3 · pending"
+								: secure_session_active ? "DTLS 1.3" : "DTLS 1.3 · selected"),
+						scale, secure_session_active);
+					posture_row(
+						"Provider",
+						native_tcp ? "Windows Schannel" : "wolfSSL",
+						scale, secure_session_active);
+					posture_row(
+						"Cipher",
+						is_reconnecting
+							? "AES-256-GCM · pending"
+							: secure_session_active
+								? "AES-256-GCM"
+								: "AES-256-GCM · selected",
+						scale, secure_session_active);
+					posture_row(
+						"Key lifecycle",
+						is_reconnecting
+							? "Fresh keys on reconnect"
+							: secure_session_active
+								? (native_tcp ? "Provider-managed" : "Automatic")
+								: "Starts after authentication",
+						scale, secure_session_active);
+					if (gui_smoke_test &&
+						(!kGuiVisualTestBuild || ImGui::IsItemVisible())) {
+						smoke_cipher_rendered = true;
+					}
+				}
+				end_card(scale);
+				record_last_item_bounds(render_metrics.security_card);
+			};
+
 			if (dashboard_table_open) {
 				ImGui::TableSetColumnIndex(2);
+				render_security_card();
+				if (render_metrics.secret_card.valid) {
+					const ImVec2 cursor = ImGui::GetCursorScreenPos();
+					ImGui::SetCursorScreenPos(ImVec2(
+						cursor.x,
+						(std::max)(cursor.y, render_metrics.secret_card.minimum.y)));
+				}
 			} else {
 				ImGui::Dummy(ImVec2(0.0f, 16.0f * scale));
 			}
 
 			render_metrics.activity_anchor_y =
 				content_anchor(ImGui::GetCursorScreenPos().y);
-			if (begin_card("##ActivityCard", scale)) {
+			if (begin_card("##ActivityCard", scale, false, 14.0f)) {
+				const ImVec2 activity_item_spacing = ImGui::GetStyle().ItemSpacing;
+				ImGui::PushStyleVar(
+					ImGuiStyleVar_ItemSpacing,
+					ImVec2(activity_item_spacing.x, 6.0f * scale));
 				if (fonts.semibold != nullptr) ImGui::PushFont(fonts.semibold);
 				ImGui::TextUnformatted("Activity");
 				if (fonts.semibold != nullptr) ImGui::PopFont();
@@ -3092,12 +3392,26 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				}
 				observe_last_control(
 					render_metrics, dashboard_clip_minimum, dashboard_clip_maximum);
-				ImGui::PushStyleVar(
-					ImGuiStyleVar_FramePadding, ImVec2(4.0f * scale, 2.0f * scale));
-				ImGui::Checkbox("Follow newest", &auto_scroll);
-				observe_last_control(
-					render_metrics, dashboard_clip_minimum, dashboard_clip_maximum);
-				ImGui::PopStyleVar();
+				if (ImGui::BeginTable(
+						"##ActivityScrollControl", 2,
+						ImGuiTableFlags_SizingStretchProp |
+						ImGuiTableFlags_NoSavedSettings)) {
+					ImGui::TableSetupColumn(
+						"Label", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+					ImGui::TableSetupColumn(
+						"Control", ImGuiTableColumnFlags_WidthFixed, 48.0f * scale);
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::AlignTextToFramePadding();
+					ImGui::TextUnformatted("Auto-scroll activity");
+					ImGui::TableSetColumnIndex(1);
+					(void)toggle_switch(
+						"ActivityAutoScroll", auto_scroll, true, scale);
+					observe_last_control(
+						render_metrics, dashboard_clip_minimum,
+						dashboard_clip_maximum);
+					ImGui::EndTable();
+				}
 
 				const std::vector<std::string> log_snapshot = snapshot_logs();
 				ImGui::PushStyleColor(
@@ -3110,11 +3424,22 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				ImGui::PushStyleVar(
 					ImGuiStyleVar_ItemSpacing,
 					ImVec2(8.0f * scale, 4.0f * scale));
+				const float activity_log_height =
+					(wide_layout ? 114.0f : 109.0f) * scale;
 				ImGui::BeginChild(
-					"##ActivityLog", ImVec2(0.0f, 140.0f * scale), true,
+					"##ActivityLog", ImVec2(0.0f, activity_log_height), true,
 					ImGuiWindowFlags_AlwaysVerticalScrollbar);
+				const ImVec2 activity_clip_minimum =
+					ImGui::GetWindowDrawList()->GetClipRectMin();
+				const ImVec2 activity_clip_maximum =
+					ImGui::GetWindowDrawList()->GetClipRectMax();
 				std::vector<float> activity_row_scroll_positions;
 				activity_row_scroll_positions.reserve(log_snapshot.size());
+				const float timestamp_width =
+					ImGui::CalcTextSize("[00:00:00]").x;
+				const float indicator_column_x =
+					ImGui::GetWindowContentRegionMin().x + timestamp_width +
+						10.0f * scale;
 				for (const auto& line : log_snapshot) {
 					activity_row_scroll_positions.push_back(
 						ImGui::GetCursorPosY() -
@@ -3127,9 +3452,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						ImGui::TextDisabled(
 							"%.*s", static_cast<int>(timestamp.size()), timestamp.data());
 					} else {
-						ImGui::Dummy(ImVec2(70.0f * scale, ImGui::GetTextLineHeight()));
+						ImGui::Dummy(ImVec2(timestamp_width, ImGui::GetTextLineHeight()));
 					}
-					ImGui::SameLine(78.0f * scale);
+					ImGui::SameLine(indicator_column_x);
 					ImGui::GetWindowDrawList()->AddCircleFilled(
 						ImVec2(ImGui::GetCursorScreenPos().x + 4.0f * scale,
 						       row_origin.y + ImGui::GetTextLineHeight() * 0.5f),
@@ -3142,12 +3467,28 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					if (is_error) ImGui::PushStyleColor(ImGuiCol_Text, indicator);
 					ImGui::TextWrapped(
 						"%.*s", static_cast<int>(message.size()), message.data());
+					const ImVec2 message_minimum = ImGui::GetItemRectMin();
+					const ImVec2 message_maximum = ImGui::GetItemRectMax();
+					const float row_clip_tolerance = 0.5f * scale;
+					const float visible_row_threshold = 1.0f * scale;
+					const bool message_intersects =
+						message_maximum.y >
+							activity_clip_minimum.y + visible_row_threshold &&
+						message_minimum.y <
+							activity_clip_maximum.y - visible_row_threshold;
+					const bool message_contained =
+						message_minimum.y >=
+							activity_clip_minimum.y - row_clip_tolerance &&
+						message_maximum.y <=
+							activity_clip_maximum.y + row_clip_tolerance;
+					if (message_intersects && !message_contained) {
+						render_metrics.partial_activity_row_visible = true;
+					}
 					if (is_error && ImGui::IsItemVisible()) {
 						render_metrics.activity_error_visible = true;
 					}
 					if (is_error) ImGui::PopStyleColor();
 					ImGui::PopTextWrapPos();
-					ImGui::Dummy(ImVec2(0.0f, 1.0f * scale));
 				}
 				// Keep enough trailing breathing room to align the first visible log
 				// row exactly at the top even when viewing the newest entries.
@@ -3159,8 +3500,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					float snapped_scroll = 0.0f;
 					float closest_distance = std::numeric_limits<float>::max();
 					for (const float row_scroll : activity_row_scroll_positions) {
-						const float candidate = std::clamp(
-							row_scroll, 0.0f, ImGui::GetScrollMaxY());
+						const float aligned_row_scroll = (std::max)(
+							0.0f,
+							row_scroll - 2.0f * ImGui::GetStyle().WindowPadding.y);
+						if (aligned_row_scroll > ImGui::GetScrollMaxY()) continue;
+						const float candidate = (std::min)(
+							ImGui::GetScrollMaxY(),
+							aligned_row_scroll +
+								(desired_scroll > 0.0f ? 5.0f * scale : 0.0f));
 						const float distance = std::abs(candidate - desired_scroll);
 						if (distance < closest_distance) {
 							closest_distance = distance;
@@ -3228,53 +3575,15 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					}
 					ImGui::EndTable();
 				}
+				ImGui::PopStyleVar();
 			}
 			end_card(scale);
 			record_last_item_bounds(render_metrics.activity_card);
 
-			ImGui::Dummy(ImVec2(0.0f, 16.0f * scale));
-			render_metrics.security_anchor_y =
-				content_anchor(ImGui::GetCursorScreenPos().y);
-			if (begin_card("##SecurityPosture", scale)) {
-				if (fonts.semibold != nullptr) ImGui::PushFont(fonts.semibold);
-				ImGui::TextUnformatted("Security");
-				if (fonts.semibold != nullptr) ImGui::PopFont();
-				ImGui::SameLine();
-				ImGui::TextColored(
-					is_reconnecting
-						? ImVec4(1.0f, 0.70f, 0.32f, 1.0f)
-						: secure_session_active
-							? ImVec4(0.43f, 0.80f, 0.65f, 1.0f)
-							: ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
-					is_reconnecting
-						? "· Awaiting authenticated session"
-						: secure_session_active ? "· Active" : "· Inactive");
-				ImGui::Spacing();
-				posture_row(
-					"Protocol",
-					native_tcp
-						? (is_reconnecting ? "TLS 1.3 · pending" : "TLS 1.3")
-						: (is_reconnecting ? "DTLS 1.3 · pending" : "DTLS 1.3"),
-					scale, secure_session_active);
-				posture_row(
-					"Provider",
-					native_tcp ? "Windows Schannel" : "wolfSSL",
-					scale, secure_session_active);
-				posture_row(
-					"Cipher",
-					is_reconnecting ? "AES-256-GCM · pending" : "AES-256-GCM",
-					scale, secure_session_active);
-				posture_row(
-					"Key rotation",
-					is_reconnecting ? "Resumes after reconnect" : "Automatic",
-					scale, secure_session_active);
-				if (gui_smoke_test &&
-					(!kGuiVisualTestBuild || ImGui::IsItemVisible())) {
-					smoke_cipher_rendered = true;
-				}
+			if (!dashboard_table_open) {
+				ImGui::Dummy(ImVec2(0.0f, 16.0f * scale));
+				render_security_card();
 			}
-			end_card(scale);
-			record_last_item_bounds(render_metrics.security_card);
 
 			if (dashboard_table_open) ImGui::EndTable();
 			render_metrics.content_scroll_y = ImGui::GetScrollY();
@@ -3342,8 +3651,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						target_card = &render_metrics.security_card;
 						break;
 				}
+				const bool compact_layout = capture_case.logical_width < 1080;
 				const bool compact_section_capture =
-					capture_case.logical_width < 1080;
+					compact_layout &&
+					!capture_case.capture_full_viewport;
 				const float containment_tolerance = 2.0f * g_ui_scale;
 				const bool target_card_contained = target_card != nullptr &&
 					target_card->valid &&
@@ -3445,7 +3756,80 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					 std::abs(render_metrics.endpoint_field.minimum.y -
 						render_metrics.port_field.minimum.y) <= 1.0f * g_ui_scale &&
 					 std::abs(render_metrics.endpoint_field.maximum.y -
-						render_metrics.port_field.maximum.y) <= 1.0f * g_ui_scale);
+						render_metrics.port_field.maximum.y) <= 1.0f * g_ui_scale &&
+					 render_metrics.port_field.minimum.x -
+						render_metrics.endpoint_field.maximum.x >= 4.0f * g_ui_scale &&
+					 render_metrics.port_field.minimum.x -
+						render_metrics.endpoint_field.maximum.x <= 20.0f * g_ui_scale);
+				const float edge_tolerance = 1.5f * g_ui_scale;
+				const auto horizontal_edges_match = [edge_tolerance](
+						const GuiRenderMetrics::Bounds& left,
+						const GuiRenderMetrics::Bounds& right) noexcept {
+					return left.valid && right.valid &&
+						std::abs(left.minimum.x - right.minimum.x) <= edge_tolerance &&
+						std::abs(left.maximum.x - right.maximum.x) <= edge_tolerance;
+				};
+				const auto top_edges_match = [edge_tolerance](
+						const GuiRenderMetrics::Bounds& left,
+						const GuiRenderMetrics::Bounds& right) noexcept {
+					return left.valid && right.valid &&
+						std::abs(left.minimum.y - right.minimum.y) <= edge_tolerance;
+				};
+				const bool help_geometry_ok =
+					render_metrics.header_surface.valid &&
+					render_metrics.help_button.valid &&
+					render_metrics.help_button.minimum.x >=
+						render_metrics.header_surface.minimum.x - edge_tolerance &&
+					render_metrics.help_button.minimum.y >=
+						render_metrics.header_surface.minimum.y - edge_tolerance &&
+					render_metrics.help_button.maximum.x <=
+						render_metrics.header_surface.maximum.x + edge_tolerance &&
+					render_metrics.help_button.maximum.y <=
+						render_metrics.header_surface.maximum.y + edge_tolerance;
+				const bool status_summary_geometry_ok =
+					render_metrics.status_card.valid &&
+					render_metrics.status_context.valid &&
+					render_metrics.status_endpoint.valid &&
+					render_metrics.status_endpoint_port_visible &&
+					std::abs(render_metrics.status_context.minimum.y -
+						render_metrics.status_endpoint.minimum.y) <= edge_tolerance &&
+					render_metrics.status_endpoint.minimum.x -
+						render_metrics.status_context.maximum.x >= 4.0f * g_ui_scale &&
+					render_metrics.status_endpoint.maximum.x <=
+						render_metrics.status_card.maximum.x - 16.0f * g_ui_scale;
+				const bool chrome_alignment_ok = horizontal_edges_match(
+					render_metrics.header_surface, render_metrics.status_card) &&
+					help_geometry_ok && status_summary_geometry_ok;
+				const bool card_grid_alignment_ok = render_metrics.wide_layout
+					? (top_edges_match(
+							render_metrics.connection_card,
+							render_metrics.network_card) &&
+					   top_edges_match(
+							render_metrics.connection_card,
+							render_metrics.security_card) &&
+					   top_edges_match(
+							render_metrics.secret_card,
+							render_metrics.activity_card) &&
+					   horizontal_edges_match(
+							render_metrics.network_card,
+							render_metrics.secret_card) &&
+					   horizontal_edges_match(
+							render_metrics.security_card,
+							render_metrics.activity_card))
+					: (horizontal_edges_match(
+							render_metrics.connection_card,
+							render_metrics.network_card) &&
+					   horizontal_edges_match(
+							render_metrics.connection_card,
+							render_metrics.secret_card) &&
+					   horizontal_edges_match(
+							render_metrics.connection_card,
+							render_metrics.activity_card) &&
+					   horizontal_edges_match(
+							render_metrics.connection_card,
+							render_metrics.security_card));
+				const bool geometry_alignment_ok =
+					chrome_alignment_ok && card_grid_alignment_ok;
 				const unsigned int required_input_stage =
 					capture_case.attempt_locked_configuration ? 9U
 					: (capture_case.activate_primary_with_keyboard ||
@@ -3517,7 +3901,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					configuration_behavior_ok && security_state_ok && phase_state_ok &&
 					(!capture_case.open_disconnect ||
 						render_metrics.disconnect_confirmation_visible);
-				const bool containment_ok = !render_metrics.partial_control_visible;
+				const bool activity_rows_required = !compact_section_capture ||
+					capture_case.content_target == VisualContentTarget::Activity;
+				const bool activity_rows_ok = !activity_rows_required ||
+					!render_metrics.partial_activity_row_visible;
+				const bool controls_ok = compact_section_capture ||
+					!render_metrics.partial_control_visible;
+				const bool containment_ok = controls_ok &&
+					activity_rows_ok;
 				const auto card_is_contained = [&](
 						const GuiRenderMetrics::Bounds& bounds) noexcept {
 					return bounds.valid &&
@@ -3530,7 +3921,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 						bounds.maximum.y <= render_metrics.dashboard_clip_maximum.y +
 							containment_tolerance;
 				};
-				const bool desktop_dashboard_contained = compact_section_capture ||
+				const bool desktop_dashboard_contained = compact_layout ||
 					(card_is_contained(render_metrics.connection_card) &&
 					 card_is_contained(render_metrics.network_card) &&
 					 card_is_contained(render_metrics.secret_card) &&
@@ -3541,7 +3932,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 				const bool capture_ok =
 					encoded && dimensions_ok && contrast_ok && scroll_ok &&
 					interaction_ok && containment_ok && target_card_contained &&
-					desktop_dashboard_contained;
+					desktop_dashboard_contained && geometry_alignment_ok;
 
 				std::ostringstream result;
 				result << "[VISUAL] " << (capture_ok ? "PASS: " : "FAIL: ")
@@ -3555,6 +3946,12 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					   << " | interaction " << (interaction_ok ? "ok" : "failed")
 					   << " | endpoint alignment "
 					   << (endpoint_alignment_ok ? "ok" : "failed")
+					   << " | chrome edges "
+					   << (chrome_alignment_ok ? "aligned" : "failed")
+					   << " | status summary "
+					   << (status_summary_geometry_ok ? "contained" : "failed")
+					   << " | card grid "
+					   << (card_grid_alignment_ok ? "aligned" : "failed")
 					   << " | recovery " << (recovery_state_ok ? "ok" : "failed")
 					   << " | config lock " << (configuration_state_ok ? "ok" : "failed")
 					   << " | locked input "
@@ -3563,12 +3960,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance,
 					   << " | phase " << (phase_state_ok ? "ok" : "failed")
 					   << " | keyboard " << (keyboard_path_ok ? "ok" : "failed")
 					   << " | controls " << (containment_ok ? "contained" : "clipped")
+					   << " | activity rows "
+					   << (activity_rows_ok ? "complete" : "clipped")
 					   << " | dashboard "
 					   << (desktop_dashboard_contained ? "complete" : "clipped")
-				       << " | target card "
-				       << (target_card_contained ? "complete" : "clipped")
-				       << " | capture "
-				       << (compact_section_capture ? "section" : "viewport")
+					   << " | target card "
+					   << (target_card_contained ? "complete" : "clipped")
+					   << " | capture "
+					   << (compact_section_capture ? "section" : "viewport")
 				       << " | luma "
 				       << static_cast<unsigned int>(capture_stats.minimum_luma)
 				       << ".."
