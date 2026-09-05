@@ -4,7 +4,11 @@ This file records notable changes. It does not promise a release date,
 support window, or binary availability. Version metadata and repository tags
 may describe different snapshots; verify the exact commit you build.
 
-## [Unreleased] — 3.1.0-dev
+## [3.1.0-preview.1] — 2026-09-05
+
+This is a preview for evaluation, not a stable release. Qualification of the
+new desktop/worker privilege boundary with elevated, real-network GUI and E2E
+tests remains pending. See the [release notes](docs/releases/3.1.0-preview.1.md).
 
 - Added authenticated make-before-break renewal for long-lived Schannel/TCP
   sessions, with bounded freeze/cutover behavior and fail-closed handling.
@@ -15,8 +19,16 @@ may describe different snapshots; verify the exact commit you build.
 - Expanded security and integration coverage for native TLS/DTLS, malformed
   input, traffic limits, packet ordering, backpressure, recovery, and GUI
   states.
-- Refined the native Windows GUI and added an unelevated visual-regression
-  executable that captures the production dashboard at supported sizes.
+- Replaced the ImGui interface with an embedded React/TypeScript/WebView2 desktop:
+  responsive connection cards, aligned inputs, light/dark/system themes,
+  accessible Radix dialogs, searchable activity, and reduced-motion support.
+- Separated the unelevated desktop from an on-demand elevated native worker.
+  Access keys stay outside JavaScript; bounded, identity-checked local IPC owns
+  start/stop/telemetry and retains the existing cryptographic/network policies.
+- Added headless Playwright/axe coverage and actual-executable, UAC-free GUI
+  capture, plus native IPC, input-boundary, key-wiping, and diagnostic-file tests.
+- Removed Conan/ImGui/FreeType from the active build, pinned frontend/WebView2
+  dependencies, and embedded the production bundle with exact license notices.
 
 ## [3.0.0] — 2025-05-29, tag `V3`
 
@@ -28,6 +40,6 @@ may describe different snapshots; verify the exact commit you build.
 
 - Added HMAC authentication and disconnect controls to the controller and GUI.
 
-[Unreleased]: https://github.com/Wes2000ley/TrueTunnel-VPN/compare/V3...HEAD
+[3.1.0-preview.1]: https://github.com/Wes2000ley/TrueTunnel-VPN/releases/tag/v3.1.0-preview.1
 [3.0.0]: https://github.com/Wes2000ley/TrueTunnel-VPN/tree/V3
 [2.2.0]: https://github.com/Wes2000ley/TrueTunnel-VPN/tree/V2.2

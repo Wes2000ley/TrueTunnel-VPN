@@ -5,11 +5,11 @@
 <h1 align="center">TrueTunnel</h1>
 
 <p align="center">
-  <strong>A native Windows IPv4 VPN with a clear, focused control surface.</strong><br>
+  <strong>A Windows IPv4 VPN with a modern, focused desktop.</strong><br>
   DTLS 1.3 over UDP when latency matters. TLS 1.3 over TCP when networks are restrictive.
 </p>
 
-TrueTunnel is an open-source IPv4 VPN for Windows. It puts a native dashboard
+TrueTunnel is an open-source IPv4 VPN for Windows. It puts a React desktop
 over Wintun and two standardized encrypted transports:
 
 - **UDP** uses wolfSSL DTLS 1.3 and is the normal choice for interactive traffic.
@@ -30,27 +30,37 @@ security-sensitive deployment.
   encrypted in-band chat channel.
 - Optional client heartbeat and bounded automatic reconnect for both transports.
 - TCP make-before-break session renewal and UDP DTLS traffic-key updates.
-- A polished ImGui dashboard with activity logs, transport selection, and
-  explicit recovery controls.
+- A React + TypeScript desktop with responsive layouts, dark/light/system
+  themes, accessible dialogs, searchable activity, and explicit recovery controls.
+- An unelevated WebView2 interface and a separate, on-demand native network
+  worker. Access keys stay in native memory, never in JavaScript.
 
-![TrueTunnel client dashboard showing aligned connection, network, security, shared-key, and activity cards](docs/images/truetunnel-dashboard.png)
+![Actual TrueTunnel React desktop in WebView2, with a synthetic adapter and masked test key](docs/images/truetunnel-dashboard.png)
 
-The current development version is **3.1.0-dev**; it is not a published
-release. The latest repository tag is **V3 (3.0.0)**. Windows 11 and Windows
-Server 2022 or newer are supported. The VPN process requires Administrator
-privileges because it creates a Wintun adapter and changes Windows networking
-state.
+The current preview is **[3.1.0-preview.1](https://github.com/Wes2000ley/TrueTunnel-VPN/releases/tag/v3.1.0-preview.1)**.
+It is for evaluation, not a stable release: elevated real-network qualification
+of the new desktop/worker boundary remains pending. Read the
+[release notes and known limitations](docs/releases/3.1.0-preview.1.md).
+The last stable tag is **V3 (3.0.0)**. Windows 11 and Windows
+Server 2022 or newer and the Microsoft Edge WebView2 Evergreen Runtime are
+required. Opening the interface does not require Administrator privileges.
+Connecting requests approval for the native worker that owns Wintun and changes
+Windows networking state. Both processes must belong to the same Windows user;
+over-the-shoulder elevation as a different administrator is rejected.
 
 ## Quick start
 
-1. Download or build the `TrueTunnel-<Config>.zip` artifact and extract it to a
+1. Download `TrueTunnel-3.1.0-preview.1-windows-x64.zip` from the
+   [preview release](https://github.com/Wes2000ley/TrueTunnel-VPN/releases/tag/v3.1.0-preview.1),
+   or build `TrueTunnel-<Config>.zip`, and extract it to a
    dedicated directory. Keep `TrueTunnel.exe` and the adjacent `wintun.dll`
    together; do not replace the pinned DLL.
-2. Start `TrueTunnel.exe` as Administrator. Choose **Server**, select the
+2. Open `TrueTunnel.exe` normally. Choose **Server**, select the
    physical uplink, choose TCP or UDP, and select an unused listening port.
 3. Generate the 256-bit shared key in the Server dashboard and transfer it to
    the client through a trusted channel. The key is not persisted by TrueTunnel.
-4. On the client, choose **Client**, enter the server's address and the exact
+4. Press **Start server** and approve the Windows network worker. On the client,
+   choose **Client**, enter the server's address and the exact
    same port, paste the key, select the same transport, and press **Connect**.
 5. Prefer UDP. Enable **Automatic recovery** only when short outages should be
    retried; it is optional and off by default.
@@ -73,11 +83,9 @@ transport requires disconnecting and connecting again.
 
 ## Learn the design
 
-The architecture overview shows the runtime data path and its trust boundary.
-The SVG contains its draw.io source, so contributors can open and edit it
-directly.
-
-![TrueTunnel architecture from Windows client through TLS or DTLS to the authenticated server router](docs/images/truetunnel-architecture.drawio.svg)
+The [architecture guide](docs/ARCHITECTURE.md) describes the desktop/worker
+privilege boundary and the unchanged native packet path. No packets or access
+keys travel through the frontend.
 
 The [TLS session-renewal diagram](docs/images/tls-session-renewal.drawio.svg)
 shows the authenticated cutover, safe pre-activation rollback, and fail-closed
@@ -131,15 +139,13 @@ and TCP fallback in one focused product.
 
 ## Build and test in one minute
 
-Prerequisites are Visual Studio 2022, a current Windows SDK, CMake 3.20+, Conan
-2, network access for the pinned wolfSSL source archive, and the supplied
-`deps/wintun.dll`. OpenSSL is neither required nor shipped.
+Prerequisites are Visual Studio 2022, a current Windows SDK, CMake 3.24+,
+Node.js 22.12+ with npm, network access for pinned dependencies, and the supplied
+`deps/wintun.dll`. Conan, ImGui, FreeType, and OpenSSL are not required.
 
 ```powershell
-conan install . --output-folder=build/conan --build=missing -s build_type=Release
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-  -DCMAKE_TOOLCHAIN_FILE=build/conan/build/generators/conan_toolchain.cmake `
-  -DCMAKE_PREFIX_PATH=build/conan/build/generators -DBUILD_TESTING=ON
+  -DBUILD_TESTING=ON
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
@@ -165,7 +171,9 @@ registry keys, routes, or adapters by a broad name prefix, and do not remove the
 shared Wintun driver if another product uses it.
 
 To uninstall a manually extracted build, delete the extracted application
-directory after disconnecting. The driver package is shared with WireGuard and
+directory after disconnecting. WebView2's non-secret runtime data is under
+`%LOCALAPPDATA%\TrueTunnel\WebView2`; it can also be removed after all TrueTunnel
+processes close. The driver package is shared with WireGuard and
 must be removed only by the installer or an administrator who has verified that
 no Wintun adapter depends on it.
 

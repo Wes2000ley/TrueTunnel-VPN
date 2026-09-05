@@ -1,8 +1,13 @@
 # TrueTunnel release checklist
 
 This checklist is for maintainers preparing a distributable Windows artifact.
-This tree is the unreleased **3.1.0-dev** line; the latest repository tag is
-**V3 (3.0.0)**. The production executable is `TrueTunnel.exe`.
+This tree is **3.1.0-preview.1**; the last stable tag is **V3 (3.0.0)**.
+The production executable is `TrueTunnel.exe`.
+
+The [preview release notes](releases/3.1.0-preview.1.md) explicitly list the
+pending elevated qualification. Preview publication does not satisfy or waive
+the release-candidate/stable gates below. Keep evaluation previews marked as
+GitHub pre-releases, not the latest stable release.
 
 ## Before tagging
 
@@ -22,11 +27,8 @@ This tree is the unreleased **3.1.0-dev** line; the latest repository tag is
 ## Build and artifact checks
 
 ```powershell
-conan profile detect --force
-conan install . --output-folder=build/conan --build=missing -s build_type=Release
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-  -DCMAKE_TOOLCHAIN_FILE=build/conan/build/generators/conan_toolchain.cmake `
-  -DCMAKE_PREFIX_PATH=build/conan/build/generators -DBUILD_TESTING=ON
+  -DBUILD_TESTING=ON
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 .\build\Release\vpn_integration_test.exe --no-pause `
@@ -50,9 +52,11 @@ docs/
 licenses/
 ```
 
-`TrueTunnel.exe.manifest` is included beside the executable only when the build
-environment lacks `mt.exe`; otherwise the administrator manifest is embedded.
-Verify the executable version metadata and the Wintun SHA-256 before publishing.
+Verify the embedded manifest is `asInvoker`, the normal desktop is unelevated,
+and only the native worker requests UAC. Verify version metadata, dependency
+notices, and the Wintun SHA-256 before publishing. Run the frontend matrix from
+`frontend/` with `npm test`, then exercise real GUI start/stop/tray behavior for
+both transports. Do not substitute simulated frontend states for that check.
 
 The package includes the focused guides and diagrams, plus the exact source and
 third-party license texts required by the selected build. Test harnesses and

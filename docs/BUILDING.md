@@ -1,90 +1,88 @@
 # Building TrueTunnel
 
-## Supported environment
+## Requirements
 
-- Windows 11 or Windows Server 2022 or newer (x64 build).
-- Visual Studio 2022 with the Desktop C++ workload and a current Windows SDK.
-- CMake 3.20 or newer and Conan 2.0.5 or newer.
-- The repository's `deps/wintun.dll`. The build refuses a missing or modified
-  copy before configuring dependencies.
-- Network access on the first configure so CMake can fetch the pinned wolfSSL
-  5.9.2 archive. OpenSSL is not required.
+- Windows 11 or Windows Server 2022 or newer, x64.
+- Visual Studio 2022, Desktop C++ workload, and a current Windows SDK.
+- CMake 3.24+, Node.js 22.12+ and npm. Node is a build tool, not a runtime dependency.
+- Microsoft Edge WebView2 Evergreen Runtime to run the desktop and native GUI test.
+- The reviewed `deps/wintun.dll` supplied in this repository.
+- Network access on the first build for the pinned wolfSSL and WebView2 SDK archives,
+  nlohmann JSON header, and lockfile-resolved frontend packages.
 
-The Schannel profile depends on Windows TLS 1.3 support. The application must
-run elevated because Wintun, IP Helper, routes, and firewall rules are system
-resources.
+The desktop uses React, TypeScript, Vite, Radix Dialog, and Lucide icons. The
+existing C++23 VPN engine remains responsible for all networking and cryptography.
+Conan, Dear ImGui, FreeType, and OpenSSL are not used by the active build.
 
 ## Configure and build
 
-Install the Conan dependencies and generate the toolchain before configuring a
-clean Visual Studio build:
+From a normal PowerShell prompt in the repository root:
 
 ```powershell
-conan profile detect --force
-conan install . -of=build/conan -s build_type=Release --build=missing
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-  -DCMAKE_TOOLCHAIN_FILE=build/conan/build/generators/conan_toolchain.cmake `
-  -DCMAKE_PREFIX_PATH=build/conan/build/generators -DBUILD_TESTING=ON
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
 cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-The configure-time Wintun check compares the supplied DLL with the reviewed
-SHA-256. CMake also pins wolfSSL's source archive by SHA-256 and disables
-protocol/cipher families outside the product's TLS/DTLS profile.
+If multiple Node installations exist, select the supported executable with
+`-DTRUETUNNEL_NODE=C:/path/to/node.exe`. npm must also be discoverable on PATH.
+Do not reuse a build directory configured for the former Conan/ImGui frontend;
+configure a new directory instead.
 
-## Outputs
+CMake verifies SHA-256 pins for Wintun, wolfSSL, the WebView2 SDK, and the JSON
+header. It runs `npm ci --ignore-scripts`, TypeScript checking, Vite's production
+build, then embeds the resulting HTML/JS/CSS as executable resources. Frontend
+packages are exact-versioned with integrity hashes in `frontend/package-lock.json`.
+There is no runtime localhost server, npm installation, external script/CDN,
+or loose frontend asset directory in the release payload.
 
-The production target remains named `vpn` for build-system compatibility, but
-its external file name is **`TrueTunnel.exe`**. A Release build places it in
-`build/Release/` beside the pinned `wintun.dll`, `README.md`, the root project
-notices, `licenses/`, and `docs/`. The fallback UAC manifest is
-`TrueTunnel.exe.manifest` when the Windows SDK `mt.exe` tool is unavailable;
-when `mt.exe` is available the manifest is embedded in the executable.
-
-The package step creates `TrueTunnel-Release.zip` (and the corresponding
-configuration name for other generators). It contains:
-
-- `TrueTunnel.exe` and `wintun.dll`;
-- `README.md`, `SECURITY.md`, `CHANGELOG.md`, `CONTRIBUTING.md`,
-  `CODE_OF_CONDUCT.md`, the project notices, and the focused `docs/`
-  guides/diagrams;
-- `licenses/` with the TrueTunnel, Wintun, wolfSSL, ImGui, FreeType, and
-  transitive dependency notices used by the build.
-
-The test-only executables (`vpn_integration_test.exe`,
-`vpn_secure_transport_test.exe`, `vpn_gui_visual_test.exe`, and
-`vpn_daemon_harness.exe`) are not release payloads.
-
-## Developer configurations
-
-Use `-DBUILD_TESTING=ON` for the normal test targets. `-DENABLE_ANALYSIS=ON`
-enables `clang-tidy` when it is installed and discoverable. Release builds use
-static MSVC runtime linking, Control Flow Guard, ASLR, DEP, and CET-compatible
-linking where the toolchain supports those options.
-
-Do not copy DLLs from another Wintun release into the output directory. If the
-pin changes intentionally, update the reviewed digest in `CMakeLists.txt`, the
-loader's matching digest, release notes, and the test fixture as one reviewed
-change.
-
-## Clean rebuild
-
-To preserve source changes while removing generated state, close running
-TrueTunnel processes and remove only the generated build directory, then
-configure again:
+## Frontend development
 
 ```powershell
-Remove-Item -LiteralPath build -Recurse -Force
-conan install . --output-folder=build/conan --build=missing -s build_type=Release
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-  -DCMAKE_TOOLCHAIN_FILE=build/conan/build/generators/conan_toolchain.cmake `
-  -DCMAKE_PREFIX_PATH=build/conan/build/generators -DBUILD_TESTING=ON
-cmake --build build --config Release --parallel
+cd frontend
+npm ci --ignore-scripts
+npm run dev
+npm run build
+npm test
 ```
 
-If an old build left a Wintun adapter behind, follow the exact-identity cleanup
-in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) before rebuilding. Never remove a
-shared Wintun driver or unrelated adapter by a broad name match.
+The browser preview cannot start a VPN or access a secret. Only automated tests
+inject a simulated bridge. Production uses the native WebView2 message bridge;
+do not add mock sessions or development-server URLs to the executable.
 
-For the validation matrix, see [`TESTING.md`](TESTING.md); for release signing,
-integrity, and license checks, see [`RELEASE.md`](RELEASE.md).
+Playwright uses locally installed Microsoft Edge. Tests produce full-page,
+scrolled, light/dark, and state captures under `frontend/test-results/captures/`,
+and an HTML report under `frontend/playwright-report/`.
+
+## Outputs and deployment
+
+The internal target remains `vpn`; its public filename is `TrueTunnel.exe`.
+`build/Release/TrueTunnel-Release.zip` contains the EXE, pinned Wintun DLL,
+documentation, and exact third-party notices. Test executables and Node modules
+are not shipped. The WebView2 loader is statically linked; the separately
+installed Evergreen Runtime supplies the browser engine and its security updates.
+
+The embedded `asInvoker` manifest keeps the desktop unelevated. Connect/Start
+server launches the same executable as a privileged `--broker` child. That
+branch never initializes WebView2. A normal app launch from an elevated shell
+relaunches with the user's linked, unelevated token when available.
+
+The worker requires same-user elevation. Accounts that must supply a different
+administrator's credentials are not currently supported. Install the app into
+an administrator-writable, standard-user-read-only location where practical.
+
+`truetunnel_package` also runs when only documentation changes. Build that target
+to refresh the ZIP after editing guides or screenshots. Use a fresh output
+directory for release candidates so historical artifacts cannot contaminate
+the package.
+
+## Maintenance
+
+`-DENABLE_ANALYSIS=ON` enables discoverable clang-tidy. Product C++ builds use
+warnings as errors, `/sdl`, stack protection, static CRT, Control Flow Guard,
+ASLR, DEP, and CET-compatible linking.
+
+Keep frontend dependencies and Evergreen Runtime current, but review lockfile
+updates. Never replace Wintun independently of its matching build/runtime pins.
+See [Testing](TESTING.md), [Security design](SECURITY-DESIGN.md), and the
+[release checklist](RELEASE.md) for the remaining release gates.

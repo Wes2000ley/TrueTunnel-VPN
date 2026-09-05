@@ -41,3 +41,9 @@ Thumbs.db
 /*.vcxproj*
 /*.user
 fipsmodule.cnf
+
+# React frontend build and visual-test artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/

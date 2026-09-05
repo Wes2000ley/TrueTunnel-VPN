@@ -1,22 +1,45 @@
 # TrueTunnel architecture
 
-TrueTunnel is a Windows-only, one-server/many-client IPv4 VPN. The GUI and
-networking daemon currently run in the same elevated process. Wintun supplies
+TrueTunnel is a Windows-only, one-server/many-client IPv4 VPN. The React desktop
+runs unelevated in WebView2; a separate on-demand elevated process owns the
+networking daemon. Wintun supplies
 the virtual interfaces; Windows IP Helper/NetIO configures addresses and
 routes; Winsock carries the encrypted transport.
-
-![Architecture](images/truetunnel-architecture.drawio.svg)
 
 ## Runtime components
 
 | Component | Responsibility |
 | --- | --- |
-| `TrueTunnel.exe` | ImGui dashboard, configuration validation, lifecycle, and tray integration |
+| `TrueTunnel.exe` / `frontend/` | Unelevated React/TypeScript desktop, native key/clipboard ownership, configuration, activity, and tray integration |
+| `TrueTunnel.exe --broker` / `src/desktop/` | On-demand elevated network owner, validated private IPC, independent adapter/configuration checks |
 | `VpnDaemon` / `VpnController` | Owns start/stop state, telemetry, transport selection, and optional recovery |
 | `VpnServer` | Listener, peer admission, address pool, routing, chat fanout, limits, and server-side heartbeat watchdog |
 | `VpnClient` | Endpoint resolution, authenticated connection, Wintun egress/ingress, heartbeat, and optional reconnect |
 | Secure transport layer | Schannel TLS 1.3 for TCP or wolfSSL DTLS 1.3 for UDP; framing and key lifecycle |
 | Wintun / IP Helper | Stable virtual adapter, IPv4 address, routes, MTU, and exact-row cleanup |
+
+## Desktop boundary
+
+Vite compiles the UI into resources inside the executable. The host serves only
+those bytes at a private synthetic HTTPS origin, with a restrictive Content
+Security Policy and no network fetches. Navigation, popups, downloads, device
+permissions, host objects, developer tools, password saving, and autofill are
+disabled. WebView2 runs in an InPrivate profile; browser preview and test fixtures
+cannot change Windows networking.
+
+Connect creates a random, first-instance, local-only named pipe and requests UAC
+for the same executable. Both endpoints verify the peer PID, executable path,
+and user SID. The elevated worker independently checks the binary protocol's
+version, size, operation, key encoding, port, role, transport, and actual physical
+adapter LUID before calling the existing daemon. JavaScript cannot provide paths,
+shell commands, Wintun names, IP routes, or arbitrary native API calls.
+
+Only control/configuration and bounded telemetry cross IPC. Credentials cross
+once in a fixed-size native binary request, never JSON or JavaScript. VPN packets
+remain entirely within the native worker. Disconnect, UI exit, a lost pipe, and
+renderer failure trigger normal daemon cleanup. The desktop stays in Disconnecting
+until its exact worker exits; it never starts a replacement over an old Wintun lease.
+Minimize preserves ownership and keeps the tunnel running in the tray.
 
 ## Packet path
 

@@ -8,7 +8,7 @@ VS_VERSION_INFO VERSIONINFO
  FILEVERSION 3,1,0,0
  PRODUCTVERSION 3,1,0,0
  FILEFLAGSMASK 0x3fL
- FILEFLAGS 0x0L
+ FILEFLAGS VS_FF_PRERELEASE
  FILEOS 0x40004L       // VOS__WINDOWS32
  FILETYPE 0x1L         // VFT_APP
  FILESUBTYPE 0x0L
@@ -19,13 +19,13 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "TrueTunnel Project"
       VALUE "FileDescription",  "TrueTunnel secure IPv4 VPN for Windows"
-      VALUE "FileVersion",      "3.1.0-dev"
+      VALUE "FileVersion",      "3.1.0-preview.1"
       VALUE "InternalName",     "truetunnel"
       VALUE "LegalCopyright",   "Copyright (c) 2025-2026 Wesley Atwell"
       VALUE "LegalTrademarks",  "TrueTunnel: MIT/GPLv2; bundled wolfSSL: GPLv3 or commercial"
       VALUE "OriginalFilename", "TrueTunnel.exe"
       VALUE "ProductName",      "TrueTunnel"
-      VALUE "ProductVersion",   "3.1.0-dev"
+      VALUE "ProductVersion",   "3.1.0-preview.1"
     END
   END
 

@@ -2894,7 +2894,7 @@ void verify_authenticated_chat_rate_limit(VpnServer& server,
     (void)::DeleteFileW(sentinel.c_str());
     if (rejected_result != ChildRunResult::completed || rejected_exit == 0U ||
         sentinel_after != sentinel_contents) {
-        std::cerr << "[FAIL] Elevated GUI accepted or modified a caller-selected "
+        std::cerr << "[FAIL] GUI accepted or modified a caller-selected "
                      "smoke-log path (child "
                   << child_result_text(rejected_result) << ", diagnostic "
                   << rejected_diagnostic << ")\n";
@@ -2923,15 +2923,12 @@ void verify_authenticated_chat_rate_limit(VpnServer& server,
     const std::string log_contents{
         std::istreambuf_iterator<char>{log_input},
         std::istreambuf_iterator<char>{}};
-    const std::array<std::string_view, 8> required_results{
-        "[SMOKE] D3D initialization: PASS",
-        "[SMOKE] ImGui context: PASS",
-        "[SMOKE] ImGui Win32 backend: PASS",
-        "[SMOKE] ImGui DX11 backend: PASS",
-        "[SMOKE] generated secret invariant: PASS",
-        "[SMOKE] rendered frames (30 required): PASS",
-        "[SMOKE] core controls rendered: PASS",
-        "[SMOKE] client recovery control visible and enabled: PASS",
+    const std::array<std::string_view, 5> required_results{
+        "[PASS] React DOM, layout and native bridge smoke",
+        "Frontend: React / TypeScript / WebView2",
+        "Secrets: native CNG memory only",
+        "Network worker: not started",
+        "Integrity: unelevated",
     };
     for (const std::string_view result : required_results) {
         if (log_contents.find(result) == std::string::npos) {
@@ -2939,7 +2936,7 @@ void verify_authenticated_chat_rate_limit(VpnServer& server,
             return false;
         }
     }
-    std::cout << "[PASS] Actual TrueTunnel.exe D3D/ImGui/secret/control smoke | log="
+    std::cout << "[PASS] Actual TrueTunnel.exe React/WebView2/secret/control smoke | log="
               << gui_log.string() << '\n';
     return true;
 }
@@ -3410,6 +3407,7 @@ int main(int argc, char** argv) {
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument{argv[index]};
         if (argument == "--wintun-load-only" ||
+            argument == "--gui-smoke-only" ||
             argument == "--wintun-identity-test" ||
             argument == "--source-binding-test") {
             lightweight_mode = true;
@@ -3449,6 +3447,9 @@ int main(int argc, char** argv) {
     bool controller_cancel_child = false;
     bool repair_network = false;
     for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--gui-smoke-only") {
+            return run_gui_smoke_process() ? 0 : 1;
+        }
         if (std::string_view(argv[i]) == "--wintun-load-only") {
             wintun_load_only = true;
         }

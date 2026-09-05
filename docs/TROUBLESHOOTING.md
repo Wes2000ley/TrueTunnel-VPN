@@ -7,8 +7,9 @@ Remove or redact addresses and secrets before sharing test logs.
 
 ## The app does not start
 
-TrueTunnel is an elevated Windows application. Right-click `TrueTunnel.exe`
-and choose **Run as administrator**. A missing or changed `wintun.dll` is a
+Open `TrueTunnel.exe` normally; only Connect/Start server requests Windows
+approval. Install or update the Microsoft Edge WebView2 Evergreen Runtime if the
+desktop reports it missing. A missing or changed `wintun.dll` is a
 hard failure by design; restore the DLL shipped in the same
 `TrueTunnel-<Config>.zip` rather than downloading a replacement into the
 application directory. Windows 11/Server 2022+ and a current x64 build are
@@ -17,6 +18,12 @@ required.
 The production binary is `TrueTunnel.exe`. The test-only binary is
 `vpn_integration_test.exe`; it is not the VPN client and its direct launch is
 expected to request UAC for the real-stack test.
+
+The native worker must elevate as the same Windows user. Supplying a different
+administrator account is intentionally rejected. If approval is cancelled, the
+desktop retains your settings and allows retry. If the worker stops responding,
+wait for Disconnecting to finish before reconnecting; the app waits for normal
+Wintun cleanup. Minimize keeps a live tunnel in the tray; closing disconnects it.
 
 ## Client cannot connect
 
@@ -91,10 +98,10 @@ destination matches. Another VPN, Hyper-V, WSL, or a corporate policy may own
 the row. The product tracks its own rows and fails closed when ownership cannot
 be proven.
 
-`--repair-network` is an explicit one-time option for a DHCP uplink whose local
+The integration harness's `--repair-network` is an explicit one-time option for a DHCP uplink whose local
 `/32` route was removed by an older build. It uses Windows IP Helper release/
 renew and briefly interrupts that physical adapter. Do not use it as a generic
-VPN repair command.
+VPN repair command or pass it to `TrueTunnel.exe`.
 
 ## Internet sharing does not work
 
@@ -110,14 +117,16 @@ active; it does not silently enable ICS or readdress an existing interface.
 - `TrueTunnel-gui-smoke.log` — actual production GUI smoke output beside
   `TrueTunnel.exe`.
 - `vpn-controller-cancel.log` — bounded cancellation child output.
-- `build/Release/gui-visual-test/` — UAC-free visual PNGs/report.
+- `TrueTunnel-gui-smoke.png` — actual unelevated desktop screenshot.
+- `frontend/test-results/captures/` — headless frontend matrix PNGs.
+- `frontend/playwright-report/` — frontend test report.
 
 Use `--log-file C:\Logs\truetunnel-e2e.log` with the integration harness when a
 central log is preferable. The GUI rejects caller-selected smoke-log paths
-because it is elevated. Redact the shared key, hostnames, and public addresses
+to keep diagnostic writes confined to fixed sibling files. Redact the shared key, hostnames, and public addresses
 before sharing any log.
 
-For a reproducible report, include the version (`3.1.0-dev` for this tree),
+For a reproducible report, include the version (`3.1.0-preview.1` for this tree),
 Windows build, exact transport, build configuration, first error line, and
 whether the issue occurs after a clean reboot. See [`TESTING.md`](TESTING.md)
 for the supported validation commands.

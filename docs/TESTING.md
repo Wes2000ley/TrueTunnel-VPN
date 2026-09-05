@@ -15,7 +15,8 @@ ctest --test-dir build -C Release --output-on-failure
 
 The registered tests cover secure transport framing/profile checks, redirect
 stream logging, pinned Wintun loading and identity, DLL tamper rejection,
-source binding and endpoint validation, the UAC-free ImGui visual regression,
+source binding and endpoint validation, native desktop IPC and diagnostic-file
+bounds, the UAC-free production WebView2 smoke test,
 and daemon lifecycle/recovery behavior. The exact names can be listed with:
 
 ```powershell
@@ -29,11 +30,30 @@ ctest --test-dir build -C Release --output-on-failure -R vpn_secure_transport_te
 ctest --test-dir build -C Release --output-on-failure -R vpn_gui_visual_test
 ```
 
-The visual test builds the same dashboard sources into an unelevated test
-executable. It renders desktop, compact, and minimum-supported sizes, exercises
-TCP/UDP and Server/Client states, dialogs, keyboard focus, recovery states,
-validation errors, log scrolling, and long endpoint text. It writes PNGs and a
-flushed report below `build/Release/gui-visual-test/`.
+`vpn_gui_visual_test` invokes the harness with `--gui-smoke-only`, which launches
+the actual `TrueTunnel.exe --gui-smoke-test` without UAC. It checks rendered React
+controls, endpoint/port alignment, horizontal overflow, native CNG generation,
+and unelevated execution, and rejects a caller-selected diagnostic path without
+changing its sentinel file. A fixed sibling `TrueTunnel-gui-smoke.png` captures
+the real WebView2 output; `TrueTunnel-gui-smoke.log` records the result. The
+network worker is deliberately not started by this test.
+
+Run the separate frontend matrix after every UI change:
+
+```powershell
+cd frontend
+npm ci --ignore-scripts
+npm test
+```
+
+Playwright launches Edge headlessly and injects simulated, explicitly test-only
+native events. It exercises both transports, role/key controls, recovery and all
+connection phases, keyboard/focus/dialog behavior, malicious log text, search,
+chat, and browser-preview safety. Captures cover 1440, 1120, 900, 780, and 390 px
+widths, full-page/scrolled content, and light/dark themes. Axe checks WCAG AA
+rules; automated checks do not replace manual visual or screen-reader review.
+Outputs are in `frontend/test-results/captures/` and `frontend/playwright-report/`.
+These fixture-driven tests prove frontend behavior, not a live VPN session.
 
 ## Elevated real-stack E2E
 
@@ -59,7 +79,8 @@ controller-cancellation child writes `vpn-controller-cancel.log`. At the end,
 the harness launches the actual adjacent `TrueTunnel.exe` with
 `CreateProcessW --gui-smoke-test`; that process writes
 `TrueTunnel-gui-smoke.log` beside the executable. Caller-selected GUI smoke log
-paths are rejected because the GUI runs elevated.
+paths are rejected. If launched elevated, the desktop relaunches with the user's
+linked unelevated token; the web renderer is never deliberately run as Administrator.
 
 ## What the E2E proves
 
@@ -82,7 +103,7 @@ It also exercises:
 - malformed UDP tuple floods and raw TCP accept floods without unbounded worker
   growth;
 - blocked encrypted writes and bounded shutdown under Winsock backpressure; and
-- the actual production GUI's D3D11, ImGui, secret-generation, and core-control
+- the actual production GUI's React/WebView2, secret-generation, and core-control
   smoke path.
 
 The E2E's local acceptance limits are a 1,000 ms p95 latency ceiling, a 0.5
@@ -106,6 +127,8 @@ described in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 ## Release gate
 
 A release candidate requires a clean Release build, all registered CTest tests,
+the frontend matrix, a real GUI Connect/Start server/Disconnect/tray check of the
+new privilege boundary for both transports,
 one successful elevated E2E run for both transports, a zero-leak final Wintun
 inventory, and an inspected `TrueTunnel-<Config>.zip`. Record the E2E log and
 machine limitations in the release evidence. RRAS/NAT is environment-dependent;

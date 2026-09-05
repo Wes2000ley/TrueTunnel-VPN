@@ -7,7 +7,8 @@ targets native Windows; Linux and macOS builds are not supported.
 ## Development environment
 
 Use Windows 11 or Windows Server 2022 or newer, Visual Studio 2022 with a
-current Windows SDK, CMake 3.20 or newer, and Conan 2. The project requires
+current Windows SDK, CMake 3.24+, Node.js 22.12+ with npm, and WebView2 Evergreen
+Runtime. The project requires
 C++23. The first configure may need network access to retrieve the pinned
 wolfSSL source archive. Do not replace `deps/wintun.dll`; its SHA-256 is
 checked during configuration.
@@ -15,10 +16,7 @@ checked during configuration.
 From a PowerShell prompt in the repository root:
 
 ```powershell
-conan install . -of=build/conan -s build_type=Release --build=missing
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-  -DCMAKE_TOOLCHAIN_FILE=build/conan/build/generators/conan_toolchain.cmake `
-  -DCMAKE_PREFIX_PATH=build/conan/build/generators `
   -DBUILD_TESTING=ON
 cmake --build build --config Release --parallel
 ```
@@ -32,10 +30,13 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 For GUI changes, also run the UAC-free visual test and inspect the generated
-captures under `build\Release\gui-visual-test\`:
+native screenshot beside the executable. Run the frontend matrix and inspect
+its full-page captures under `frontend/test-results/captures/`:
 
 ```powershell
 ctest --test-dir build -C Release --output-on-failure -R ^vpn_gui_visual_test$
+cd frontend
+npm test
 ```
 
 The full `vpn_integration_test.exe` exercises real Schannel/TCP and wolfSSL
@@ -50,6 +51,12 @@ its log and clean up its test adapters:
 
 Never include generated logs, tunnel secrets, credentials, or system-specific
 network details in a patch. Explain tests that cannot run and why.
+
+Use accessible semantic controls, preserve keyboard focus and reduced-motion
+behavior, and check light/dark, compact, and long-content layouts. Never put a
+shared key in React state, a web message, browser storage, or a test capture.
+The IPC contract lives in `src/desktop/BridgeProtocol.h`; native validation is
+mandatory even if TypeScript has already validated a form.
 
 ## Pull requests
 

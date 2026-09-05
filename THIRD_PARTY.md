@@ -37,32 +37,45 @@ terms, rather than the Wintun source repository's GPLv2 license, govern this
 prebuilt binary distribution. The exact text is in
 `licenses/Wintun-PREBUILT-LICENSE.txt` and the release ZIP.
 
-## Dear ImGui
+## Modern desktop frontend
 
-- Version: 1.91.8-docking
-- Repository: https://github.com/ocornut/imgui
-- License: MIT
-- Purpose: native graphical user interface
+- React / React DOM 19.2.8: MIT.
+- Radix UI Dialog 1.1.23 and its dependencies: MIT.
+- Lucide React 1.41.0: ISC, with retained third-party icon notices.
+- Runtime dependency versions and integrity hashes: `frontend/package-lock.json`.
+- Purpose: the embedded React/TypeScript desktop interface.
 
-The release ZIP copies the exact MIT license from the Conan package used by the
-selected build configuration.
+The release ZIP includes `licenses/Frontend-NOTICES.txt`, assembled from the
+exact installed runtime packages' LICENSE/NOTICE files. The script fails if a
+notice is missing. The sole pinned fallback is react-remove-scroll-bar 2.3.8,
+whose npm tarball omits LICENSE; its exact upstream MIT text is retained at
+`licenses/react-remove-scroll-bar-MIT.txt` from
+https://github.com/theKashey/react-remove-scroll-bar/blob/master/LICENSE.
 
-## FreeType and transitive font/image libraries
+TypeScript, Vite, Playwright, axe, and Prettier are development tools, not shipped
+runtime modules. Dear ImGui and FreeType are no longer linked by the product.
 
-- FreeType 2.13.3: FreeType License or GPLv2
-- Brotli: MIT-style license
-- bzip2: bzip2 license
-- libpng: libpng license
-- zlib: zlib license
+## Microsoft WebView2
 
-FreeType provides font rendering for Dear ImGui. Its Conan package may link the
-listed libraries transitively. The release ZIP copies their exact package
-license texts so the binary distribution retains the notices for the resolved
-build.
+- SDK: 1.0.4191.47, NuGet `Microsoft.Web.WebView2`.
+- Archive SHA-256: `f492bbf547d0da329553b6727435b677579b1e9f91cc9e4a1ad029366d5f23d0`.
+- Purpose: Windows desktop web host, with statically linked SDK loader.
+- Terms: Microsoft WebView2 SDK license, copied verbatim into
+  `licenses/WebView2-LICENSE.txt` in the release ZIP.
+
+The separately installed Microsoft Edge WebView2 Evergreen Runtime is not
+bundled in the ZIP. Its runtime distribution terms and updates remain separate.
+
+## nlohmann JSON
+
+- Version: 3.12.0, single-header JSON parser for bounded native control messages.
+- Header SHA-256: `aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63`.
+- License: MIT; exact upstream text is in `licenses/nlohmann-json-MIT.txt`, from
+  https://github.com/nlohmann/json/blob/v3.12.0/LICENSE.MIT.
 
 ## Windows platform services
 
-The application calls Schannel, SSPI, CNG, CryptoAPI, Winsock, Direct3D, and
+The application calls Schannel, SSPI, CNG, CryptoAPI, Winsock, DWM, and
 other Windows APIs through the Windows SDK. These operating-system components
 are not bundled cryptographic libraries.
 
