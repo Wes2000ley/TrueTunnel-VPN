@@ -1,7 +1,7 @@
 # TrueTunnel security design
 
 This document describes the security properties of TrueTunnel
-3.1.0-preview.1. The last stable tag is V3 (3.0.0). It is a design record,
+3.1.0. It is a design record,
 not an independent audit or a certification. The complete VPN
 protocol is younger and less widely reviewed than WireGuard or IKEv2/IPsec.
 

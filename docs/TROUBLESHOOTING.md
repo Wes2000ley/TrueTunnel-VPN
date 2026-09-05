@@ -126,7 +126,7 @@ central log is preferable. The GUI rejects caller-selected smoke-log paths
 to keep diagnostic writes confined to fixed sibling files. Redact the shared key, hostnames, and public addresses
 before sharing any log.
 
-For a reproducible report, include the version (`3.1.0-preview.1` for this tree),
+For a reproducible report, include the version (`3.1.0` for this tree),
 Windows build, exact transport, build configuration, first error line, and
 whether the issue occurs after a clean reboot. See [`TESTING.md`](TESTING.md)
 for the supported validation commands.

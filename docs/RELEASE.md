@@ -1,13 +1,14 @@
 # TrueTunnel release checklist
 
 This checklist is for maintainers preparing a distributable Windows artifact.
-This tree is **3.1.0-preview.1**; the last stable tag is **V3 (3.0.0)**.
+This tree is **3.1.0**, published as a normal GitHub release.
 The production executable is `TrueTunnel.exe`.
 
-The [preview release notes](releases/3.1.0-preview.1.md) explicitly list the
-pending elevated qualification. Preview publication does not satisfy or waive
-the release-candidate/stable gates below. Keep evaluation previews marked as
-GitHub pre-releases, not the latest stable release.
+The [3.1.0 release notes](releases/3.1.0.md) explicitly list the pending elevated
+qualification. This release was published with that work outstanding; the GitHub
+release classification does not establish that the qualification gates below
+passed. Keep the outstanding checks visible in the release evidence rather than
+treating unrun checks as successful.
 
 ## Before tagging
 

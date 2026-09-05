@@ -4,6 +4,16 @@ This file records notable changes. It does not promise a release date,
 support window, or binary availability. Version metadata and repository tags
 may describe different snapshots; verify the exact commit you build.
 
+## [3.1.0] — 2026-09-05
+
+- Published the modern desktop as a normal GitHub release, with consistent
+  `3.1.0` application/package metadata and no Windows prerelease flag.
+- Retained the preview's native engine, security policies and dependencies;
+  this promotion does not change the VPN protocol or encryption.
+- Rebuilt and revalidated the versioned package. Pending elevated qualification
+  and unsigned-binary limitations remain explicit in the
+  [release notes](docs/releases/3.1.0.md).
+
 ## [3.1.0-preview.1] — 2026-09-05
 
 This is a preview for evaluation, not a stable release. Qualification of the
@@ -40,6 +50,7 @@ tests remains pending. See the [release notes](docs/releases/3.1.0-preview.1.md)
 
 - Added HMAC authentication and disconnect controls to the controller and GUI.
 
+[3.1.0]: https://github.com/Wes2000ley/TrueTunnel-VPN/releases/tag/v3.1.0
 [3.1.0-preview.1]: https://github.com/Wes2000ley/TrueTunnel-VPN/releases/tag/v3.1.0-preview.1
 [3.0.0]: https://github.com/Wes2000ley/TrueTunnel-VPN/tree/V3
 [2.2.0]: https://github.com/Wes2000ley/TrueTunnel-VPN/tree/V2.2

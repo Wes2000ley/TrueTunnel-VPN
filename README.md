@@ -37,11 +37,10 @@ security-sensitive deployment.
 
 ![Actual TrueTunnel React desktop in WebView2, with a synthetic adapter and masked test key](docs/images/truetunnel-dashboard.png)
 
-The current preview is **[3.1.0-preview.1](https://github.com/Wes2000ley/TrueTunnel-VPN/releases/tag/v3.1.0-preview.1)**.
-It is for evaluation, not a stable release: elevated real-network qualification
-of the new desktop/worker boundary remains pending. Read the
-[release notes and known limitations](docs/releases/3.1.0-preview.1.md).
-The last stable tag is **V3 (3.0.0)**. Windows 11 and Windows
+The current release is **[3.1.0](https://github.com/Wes2000ley/TrueTunnel-VPN/releases/tag/v3.1.0)**.
+Read the [release notes and known limitations](docs/releases/3.1.0.md), including
+the pending elevated real-network qualification of the new desktop/worker
+boundary. Windows 11 and Windows
 Server 2022 or newer and the Microsoft Edge WebView2 Evergreen Runtime are
 required. Opening the interface does not require Administrator privileges.
 Connecting requests approval for the native worker that owns Wintun and changes
@@ -50,8 +49,8 @@ over-the-shoulder elevation as a different administrator is rejected.
 
 ## Quick start
 
-1. Download `TrueTunnel-3.1.0-preview.1-windows-x64.zip` from the
-   [preview release](https://github.com/Wes2000ley/TrueTunnel-VPN/releases/tag/v3.1.0-preview.1),
+1. Download `TrueTunnel-3.1.0-windows-x64.zip` from the
+   [release page](https://github.com/Wes2000ley/TrueTunnel-VPN/releases/tag/v3.1.0),
    or build `TrueTunnel-<Config>.zip`, and extract it to a
    dedicated directory. Keep `TrueTunnel.exe` and the adjacent `wintun.dll`
    together; do not replace the pinned DLL.

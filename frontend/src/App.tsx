@@ -300,7 +300,7 @@ export function App() {
             />
             <div>
               {native ? "Native desktop app" : "Browser preview"}
-              <span>TrueTunnel 3.1.0-preview.1</span>
+              <span>TrueTunnel 3.1.0</span>
             </div>
           </div>
         </div>
@@ -1041,7 +1041,7 @@ export function App() {
               <Mark />
               <div>
                 <strong>TrueTunnel</strong>
-                <p>3.1.0-preview.1 · React + native Windows networking</p>
+                <p>3.1.0 · React + native Windows networking</p>
               </div>
             </div>
           </div>
